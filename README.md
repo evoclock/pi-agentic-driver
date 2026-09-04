@@ -103,10 +103,6 @@ configured Pi worker roles running under [Herdr](https://github.com/herdr)
   restoration on every success and failure path, and a checked
   domain-absence proof. Evidence is one structured receipt, never
   self-attested strings.
-- **synthetic dispatch family** — run-ledger cutover, autonomous Git
-  delivery, interactive envelope, dispatch lifecycle, and managed-worker
-  proofs exercised strictly in synthetic namespaces with private remotes;
-  no live activation.
 
 **Planned in this theme:**
 
