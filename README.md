@@ -106,10 +106,10 @@ configured Pi worker roles running under [Herdr](https://github.com/herdr)
 
 **Planned in this theme:**
 
-- **attended-authority guard parity** — one destructive-operation policy
-  enforced identically across Pi, Claude Code, and Hermes hosts, in TUI
-  and headless contexts, with progress after denial and no
-  false-positive stops on safe work.
+- **attended-authority guard** — a fail-closed veto over destructive
+  operations with native confirmation for consequential ones, correct
+  denial in headless contexts, no false-positive stops on safe work, and
+  a clean path to continue after a denial.
 
 ## Surviving pressure and handing over
 
