@@ -79,6 +79,15 @@ configured Pi worker roles running under [Herdr](https://github.com/herdr)
   evidence (`nonAuthorizing: true`). It cannot control panes, start agents,
   run shells, or create authority.
 
+- **Scales to many workers** — the trusted registry accepts up to 32
+  worker repositories, and any dynamic non-coordinator role within them
+  is eligible; `list` observes every live agent in one call. Fan-out is
+  sequential by design: one role per prompt, one complete exchange, no
+  broadcast primitive.
+- **Manages no agents of its own** — it communicates only with roles
+  Herdr is already running; starting, stopping, or renaming agents is
+  outside its surface.
+
 **Planned in this theme:**
 
 - **project status and state review** — read-only projections of workspace
