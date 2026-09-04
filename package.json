@@ -1,0 +1,39 @@
+{
+  "name": "@evoclock/pi-agentic-driver",
+  "version": "0.1.1",
+  "description": "Evidence-oriented Pi extensions for bounded agentic workflows: advisory code review (code-phage) and bounded role communication (herdr).",
+  "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "agentic-driver"
+  ],
+  "files": [
+    "extensions/code-phage.js",
+    "extensions/herdr-communication.ts",
+    "lib/adapters/diff-scope.mjs",
+    "lib/adapters/evidence.mjs",
+    "lib/adapters/narrative.mjs",
+    "lib/adapters/review-feedback.mjs",
+    "lib/adapters/visualization.mjs",
+    "lib/code-phage-core.mjs",
+    "lib/python_ast_metrics.py",
+    "lib/typescript_ast_metrics.mjs",
+    "scripts/enforcement/herdr_communication_pi.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "dependencies": {
+    "typescript": "5.9.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/evoclock/pi-agentic-driver.git"
+  }
+}
