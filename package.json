@@ -1,7 +1,7 @@
 {
   "name": "@evoclock/pi-agentic-driver",
   "version": "0.1.1",
-  "description": "Evidence-oriented Pi extensions for bounded agentic workflows: advisory code review (code-phage) and bounded role communication (herdr).",
+  "description": "Guardrail extensions for agentic development: advisory code review (code-phage) and bounded, non-authorizing role communication (herdr).",
   "type": "module",
   "license": "AGPL-3.0-or-later",
   "keywords": [
