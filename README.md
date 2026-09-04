@@ -1,18 +1,20 @@
 # pi-agentic-driver
 
-Evidence-oriented extensions for [Pi](https://github.com/earendil-works/pi-coding-agent):
-advisory code review, bounded role communication, and governed isolation proofs
-for agentic workflows.
+Evidence-oriented extensions for [Pi](https://github.com/earendil-works/pi-coding-agent)
+that make agentic development governable: review before code is written,
+communication that grants nothing, execution that stays isolated, sessions
+that recover, and Git that stays safe.
 
-**Status: active development and testing.** The extensions below are at
-different stages of qualification — each ships only after passing
-fixture-based acceptance (native tests, live-session checks, and independent
-model review). Released components are installable; pending ones are listed
-for transparency and are not yet packaged.
+**Status: active development and testing.** Each extension ships only after
+passing fixture-based acceptance (native tests, live-session checks, and
+independent model review). Released components are installable; pending
+ones are listed for transparency and are not yet packaged.
 
-## Released (0.1.1)
+## Keeping work bounded
 
-### code-phage — advisory code review
+*Extensions that review, route, and bound what an agent does.*
+
+### code-phage — advisory code review *(released, 0.1.1)*
 
 `code_phage` reviews a proposed change against a stated goal before code is
 written or committed. Given a goal, candidate files, accepted requirements,
@@ -41,7 +43,22 @@ Concept credit: Matty Stratton, "Cognitive Complexity" (2024-09-20, concept
 only, no code copied); `flake8-cognitive-complexity` 0.1.0, MIT (concept
 only, not a runtime dependency).
 
-### herdr-communication — bounded role communication
+**Planned in this theme:**
+
+- **work-mode routing** — an `ad-hoc` / `planned` / `restricted` contract
+  that keeps routine read/edit/test work free of lifecycle ceremony while
+  consequential operations stay behind native confirmation.
+- **prompted planning lifecycle** — natural-language goals derived into
+  complete semantic proposals with parent/scope choices at native
+  boundaries; no retry loops, no model-supplied identifiers.
+- **inventory refresh** — Git-aware codebase inventory regeneration with
+  verification receipts, so prior-art matching stays honest.
+
+## Communicating without granting authority
+
+*Extensions for bounded coordination between agents and boards.*
+
+### herdr-communication — bounded role communication *(released, 0.1.1)*
 
 `agentic_herdr_communication` exchanges bounded, marked reports with
 configured Pi worker roles running under [Herdr](https://github.com/herdr)
@@ -62,10 +79,20 @@ configured Pi worker roles running under [Herdr](https://github.com/herdr)
   evidence (`nonAuthorizing: true`). It cannot control panes, start agents,
   run shells, or create authority.
 
-## In development and testing
+**Planned in this theme:**
 
-These capabilities exist in the development tree and are working through
-qualification. Release of each is pending completed tests and review:
+- **board cutover and card-author compatibility** — fixed-scope migration
+  between planning boards with legacy card compatibility, exact write
+  sets, and rollback facts.
+- **project status and state review** — read-only projections of workspace
+  Git state, formal records, and task-state health (`/agentic-status`
+  family).
+
+## Executing in isolation
+
+*Extensions that prove automation ran — and stopped — exactly as declared.*
+
+**In development:**
 
 - **container-isolation proof** — a parameter-free, natively confirmed
   probe that a pinned local Podman image runs with `--network none`, a
@@ -79,58 +106,64 @@ qualification. Release of each is pending completed tests and review:
   restoration on every success and failure path, and a checked
   domain-absence proof. Evidence is one structured receipt, never
   self-attested strings.
+- **synthetic dispatch family** — run-ledger cutover, autonomous Git
+  delivery, interactive envelope, dispatch lifecycle, and managed-worker
+  proofs exercised strictly in synthetic namespaces with private remotes;
+  no live activation.
+
+**Planned in this theme:**
+
+- **attended-authority guard parity** — one destructive-operation policy
+  enforced identically across Pi, Claude Code, and Hermes hosts, in TUI
+  and headless contexts, with progress after denial and no
+  false-positive stops on safe work.
+
+## Surviving pressure and handing over
+
+*Extensions for session continuity when context runs out or a session ends.*
+
+**In development:**
+
+- **context-pressure handling** — pressure detection, non-lossy handover,
+  compaction completion without cancellation loops, and continuation of
+  the latest user goal. Development-only until the full live journey
+  passes.
+
+**Planned in this theme:**
+
+- **handover, checkpoint, and recovery** — durable repository-local
+  handover notes, governed checkpoint mutation, watchdog handoff, and
+  fresh-session resumption that identifies goal, changed files, checks,
+  and next step without executing anything.
+- **evidence ledger** — deterministic evidence indexing, lossless source
+  projection, universal checkpoint produce/store/recover, and run-ledger
+  records with crash and corruption vectors tested.
+
+## Working with Git safely
+
+*Extensions that keep routine Git low-friction and consequential Git guarded.*
+
+**In development:**
+
 - **git workflow safeguards** — exact-file staging with semantic
   derivation, native confirmation, post-confirmation drift revalidation,
   and protected-operation boundaries (no force push, no default-branch
   deletion, no history rewrite), while routine status/diff/stage/commit
   stays low-friction. Arbitrary wall-clock truncation of healthy
   operations is being removed.
-- **context-pressure handling** — pressure detection, non-lossy handover,
-  compaction completion without cancellation loops, and continuation of
-  the latest user goal. Development-only until the full live journey
-  passes.
 
-## Planned
+## Trust in the extension set itself
 
-The wider capability set, each item shipping individually as its scenario
-passes acceptance:
+*Foundations that keep the usable and development profiles honest.*
 
-- **ordinary-work mode routing** — a work-mode contract (`ad-hoc`,
-  `planned`, `restricted`) that keeps routine read/edit/test work free of
-  lifecycle ceremony while consequential operations stay behind native
-  confirmation.
-- **handover, checkpoint, and recovery** — durable repository-local
-  handover notes, governed checkpoint mutation, watchdog handoff, and
-  fresh-session resumption that identifies goal, changed files, checks,
-  and next step without executing anything.
-- **attended-authority guard parity** — one destructive-operation policy
-  enforced identically across Pi, Claude Code, and Hermes hosts, in TUI
-  and headless contexts, with progress after denial and no
-  false-positive stops on safe work.
-- **prompted planning lifecycle** — natural-language goals derived into
-  complete semantic proposals with parent/scope choices at native
-  boundaries; no retry loops, no model-supplied identifiers.
-- **project status and state review** — read-only projections of workspace
-  Git state, formal records, and task-state health (`/agentic-status`
-  family).
-- **board cutover and card-author compatibility** — fixed-scope migration
-  between planning boards with legacy card compatibility, exact write
-  sets, and rollback facts.
-- **evidence ledger** — deterministic evidence indexing, lossless source
-  projection, universal checkpoint produce/store/recover, and run-ledger
-  records with crash and corruption vectors tested.
-- **synthetic dispatch family** — run-ledger cutover, autonomous Git
-  delivery, interactive envelope, dispatch lifecycle, and managed-worker
-  proofs exercised strictly in synthetic namespaces with private remotes;
-  no live activation.
-- **inventory refresh** — Git-aware codebase inventory regeneration with
-  verification receipts, so prior-art matching stays honest.
+**Planned in this theme:**
+
 - **extension-registration and profile isolation** — loader registration
   inventories, digest comparison, and strict config/session/cache/log/
   extension separation between usable and development profiles.
 
-Each lands here when its scenario passes with all prohibited effects
-absent.
+Each item lands here as its own extension when its scenario passes
+acceptance with all prohibited effects absent.
 
 ## Install
 
