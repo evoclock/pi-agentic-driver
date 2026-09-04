@@ -102,7 +102,7 @@ configured Pi worker roles running under [Herdr](https://github.com/herdr)
 - **role-lane routing and warm sessions** — route work to declared role
   lanes and keep their sessions warm, without granting dispatch or shell
   authority.
-- **worker pulse** — liveness heartbeat and dispatch-eligibility
+- **worker pulse** — liveness observation and dispatch-eligibility
   observation across role lanes: which agents are alive, what state they
   are in, and what is ready for work. Non-authorizing observation; planned
   work cannot be dispatched without it.
