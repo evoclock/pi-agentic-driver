@@ -1,9 +1,25 @@
 # pi-agentic-driver
 
-Evidence-oriented extensions for [Pi](https://github.com/earendil-works/pi-coding-agent)
-that make agentic development governable: review before code is written,
-communication that grants nothing, execution that stays isolated, sessions
-that recover, and Git that stays safe.
+An agent left unsupervised will happily rewrite what it should have reused,
+ship to the wrong remote, lose its context at the worst moment, and report
+success in words you cannot verify. Pi is an excellent agent harness; the
+missing pieces are the guardrails around it.
+
+**pi-agentic-driver adds those guardrails as Pi extensions, and every one of
+them obeys the same rule: the agent does the work, the extension makes the
+work verifiable and bounded.** Review happens before code is written;
+communication carries reports, never authority; automation runs inside
+isolated proofs that prove their own cleanup; sessions survive compaction
+and handover; and Git operations stay exact, confirmed, and protected.
+
+Everything here is built the way it asks agents to work: every capability
+passes fixture-based acceptance with native tests, live-session checks, and
+independent model review before it ships — and each extension's own
+restrictions are documented, not discovered.
+
+Extensions for [Pi](https://github.com/earendil-works/pi-coding-agent):
+advisory code review, bounded role communication, and governed isolation
+proofs for agentic workflows.
 
 **Status: active development and testing.** Each extension ships only after
 passing fixture-based acceptance (native tests, live-session checks, and
