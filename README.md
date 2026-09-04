@@ -145,16 +145,6 @@ configured Pi worker roles running under [Herdr](https://github.com/herdr)
   stays low-friction. Arbitrary wall-clock truncation of healthy
   operations is being removed.
 
-## Trust in the extension set itself
-
-*Foundations that keep the usable and development profiles honest.*
-
-**Planned in this theme:**
-
-- **extension-registration and profile isolation** — loader registration
-  inventories, digest comparison, and strict config/session/cache/log/
-  extension separation between usable and development profiles.
-
 Each item lands here as its own extension when its scenario passes
 acceptance with all prohibited effects absent.
 
