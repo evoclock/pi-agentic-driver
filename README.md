@@ -86,9 +86,13 @@ configured Pi worker roles running under [Herdr](https://github.com/herdr)
   is eligible; `list` observes every live agent in one call. Fan-out is
   sequential by design: one role per prompt, one complete exchange, no
   broadcast primitive.
-- **Manages no agents of its own** — it communicates only with roles
-  Herdr is already running; starting, stopping, or renaming agents is
-  outside its surface.
+- **Agent/pane lifecycle (in development)** — from a session, in natural
+  language: "spawn an agent in a split pane to the right, make it an
+  implementer, set the model to X." Creates panes with directional splits,
+  spawns agents into roles, assigns model and working directory at spawn
+  time, and verifies what was created — trusted repositories only, the
+  coordinator class reserved, no shell or credential surface. Not part of
+  the released 0.1.1 tool; ships when its own qualification passes.
 
 **Planned in this theme:**
 
