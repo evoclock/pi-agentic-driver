@@ -90,8 +90,47 @@ qualification. Release of each is pending completed tests and review:
   the latest user goal. Development-only until the full live journey
   passes.
 
-Each item lands here as its own extension when its scenario passes
-acceptance with all prohibited effects absent.
+## Planned
+
+The wider capability set, each item shipping individually as its scenario
+passes acceptance:
+
+- **ordinary-work mode routing** — a work-mode contract (`ad-hoc`,
+  `planned`, `restricted`) that keeps routine read/edit/test work free of
+  lifecycle ceremony while consequential operations stay behind native
+  confirmation.
+- **handover, checkpoint, and recovery** — durable repository-local
+  handover notes, governed checkpoint mutation, watchdog handoff, and
+  fresh-session resumption that identifies goal, changed files, checks,
+  and next step without executing anything.
+- **attended-authority guard parity** — one destructive-operation policy
+  enforced identically across Pi, Claude Code, and Hermes hosts, in TUI
+  and headless contexts, with progress after denial and no
+  false-positive stops on safe work.
+- **prompted planning lifecycle** — natural-language goals derived into
+  complete semantic proposals with parent/scope choices at native
+  boundaries; no retry loops, no model-supplied identifiers.
+- **project status and state review** — read-only projections of workspace
+  Git state, formal records, and task-state health (`/agentic-status`
+  family).
+- **board cutover and card-author compatibility** — fixed-scope migration
+  between planning boards with legacy card compatibility, exact write
+  sets, and rollback facts.
+- **evidence ledger** — deterministic evidence indexing, lossless source
+  projection, universal checkpoint produce/store/recover, and run-ledger
+  records with crash and corruption vectors tested.
+- **synthetic dispatch family** — run-ledger cutover, autonomous Git
+  delivery, interactive envelope, dispatch lifecycle, and managed-worker
+  proofs exercised strictly in synthetic namespaces with private remotes;
+  no live activation.
+- **inventory refresh** — Git-aware codebase inventory regeneration with
+  verification receipts, so prior-art matching stays honest.
+- **extension-registration and profile isolation** — loader registration
+  inventories, digest comparison, and strict config/session/cache/log/
+  extension separation between usable and development profiles.
+
+Each lands here when its scenario passes with all prohibited effects
+absent.
 
 ## Install
 
