@@ -111,7 +111,7 @@ configured Pi worker roles running under [Herdr](https://github.com/herdr)
   denial in headless contexts, no false-positive stops on safe work, and
   a clean path to continue after a denial.
 
-## Surviving pressure and handing over
+## Managing context pressure, compaction, and avoiding lossy handover
 
 *Extensions for session continuity when context runs out or a session ends.*
 
