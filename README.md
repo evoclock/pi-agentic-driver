@@ -116,8 +116,8 @@ configured Pi worker roles running under [Herdr](https://github.com/herdr)
   Git state, formal records, and task-state health (`/agentic-status`
   family).
 - **role-lane routing and warm sessions** — smart model routing: work is
-  routed to the right model for the job — implementation, planning, and
-  review run as separate declared lanes — preferring warm sessions where
+  routed to the right model for the job, implementation, planning, and
+  review run as separate declared lanes, preferring warm sessions where
   the lane already has an established agent, so context and cache survive
   across tasks. Route affinity is an optimisation, never authority: an
   incompatible or unavailable lane yields an explicit review-required
@@ -157,7 +157,7 @@ configured Pi worker roles running under [Herdr](https://github.com/herdr)
   shell: when a model tries to delete, overwrite, or push, the guard
   stops it before execution and asks you. Safe commands (reads, builds,
   tests) pass through untouched. If you deny, you get a clear reason and
-  the session continues — the agent does not retry behind your back. In
+  the session continues, the agent does not retry behind your back. In
   headless runs where no human can confirm, destructive commands are
   refused outright rather than silently allowed.
 
