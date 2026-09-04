@@ -51,6 +51,8 @@ only, not a runtime dependency).
 - **prompted planning lifecycle** — natural-language goals derived into
   complete semantic proposals with parent/scope choices at native
   boundaries; no retry loops, no model-supplied identifiers.
+- **native assignment selection** — planned assignments chosen through a
+  native UI over derived candidates, never by model-supplied targets.
 - **inventory refresh** — Git-aware codebase inventory regeneration with
   verification receipts, so prior-art matching stays honest.
 
@@ -93,6 +95,9 @@ configured Pi worker roles running under [Herdr](https://github.com/herdr)
 - **project status and state review** — read-only projections of workspace
   Git state, formal records, and task-state health (`/agentic-status`
   family).
+- **role-lane routing and warm sessions** — route work to declared role
+  lanes and keep their sessions warm, without granting dispatch or shell
+  authority.
 
 ## Executing in isolation
 
@@ -130,6 +135,10 @@ configured Pi worker roles running under [Herdr](https://github.com/herdr)
   compaction completion without cancellation loops, and continuation of
   the latest user goal. Development-only until the full live journey
   passes.
+- **lossless session-reference compaction** — selective, lossless retrieval
+  of exact pre-compaction content, addressing factual degradation across
+  repeated compactions; designed as an optional add-on, not yet
+  implemented.
 
 **Planned in this theme:**
 
@@ -140,6 +149,9 @@ configured Pi worker roles running under [Herdr](https://github.com/herdr)
 - **evidence ledger** — deterministic evidence indexing, lossless source
   projection, universal checkpoint produce/store/recover, and run-ledger
   records with crash and corruption vectors tested.
+- **offline multihost evidence** — record run evidence on each host while
+  disconnected and reconcile it deterministically on reconnection, with no
+  host as sole authority.
 
 ## Working with Git safely
 
@@ -153,6 +165,9 @@ configured Pi worker roles running under [Herdr](https://github.com/herdr)
   deletion, no history rewrite), while routine status/diff/stage/commit
   stays low-friction. Arbitrary wall-clock truncation of healthy
   operations is being removed.
+- **assignment-aware Git journeys** — merge and protected-push flows bound
+  to a verified assignment, so consequential Git operations carry their
+  own recorded provenance.
 
 Each item lands here as its own extension when its scenario passes
 acceptance with all prohibited effects absent.
