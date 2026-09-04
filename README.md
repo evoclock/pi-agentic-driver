@@ -81,9 +81,6 @@ configured Pi worker roles running under [Herdr](https://github.com/herdr)
 
 **Planned in this theme:**
 
-- **board cutover and card-author compatibility** — fixed-scope migration
-  between planning boards with legacy card compatibility, exact write
-  sets, and rollback facts.
 - **project status and state review** — read-only projections of workspace
   Git state, formal records, and task-state health (`/agentic-status`
   family).
