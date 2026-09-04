@@ -3,7 +3,7 @@
 An agent left unsupervised will happily rewrite what it should have reused,
 ship to the wrong remote, lose its context at the worst moment, and report
 success in words you cannot verify. Pi is an excellent agent harness; the
-missing pieces are the guardrails around it.
+pieces I need for the way I work are the guardrails around it.
 
 **pi-agentic-driver adds those guardrails as Pi extensions, and every one of
 them obeys the same rule: the agent does the work, the extension makes the
@@ -14,7 +14,7 @@ and handover; and Git operations stay exact, confirmed, and protected.
 
 Everything here is built the way it asks agents to work: every capability
 passes fixture-based acceptance with native tests, live-session checks, and
-independent model review before it ships — and each extension's own
+independent model review before it ships, and each extension's own
 restrictions are documented, not discovered.
 
 Extensions for [Pi](https://github.com/earendil-works/pi-coding-agent):
@@ -32,7 +32,7 @@ ones are listed for transparency and are not yet packaged.
 
 ### code-phage — advisory code review *(released, 0.1.1)*
 
-`code_phage` reviews a proposed change against a stated goal before code is
+`code_phage` like a bacteriophage but for your code, it reviews a proposed change against a stated goal before code is
 written or committed. Given a goal, candidate files, accepted requirements,
 and test paths, it:
 
@@ -59,7 +59,7 @@ Concept credit: Matty Stratton, "Cognitive Complexity" (2024-09-20, concept
 only, no code copied); `flake8-cognitive-complexity` 0.1.0, MIT (concept
 only, not a runtime dependency).
 
-**Planned in this theme:**
+**Under development in this theme:**
 
 - **work-mode routing** — an `ad-hoc` / `planned` / `restricted` contract
   that keeps routine read/edit/test work free of lifecycle ceremony while
@@ -106,11 +106,11 @@ configured Pi worker roles running under [Herdr](https://github.com/herdr)
   language: "spawn an agent in a split pane to the right, make it an
   implementer, set the model to X." Creates panes with directional splits,
   spawns agents into roles, assigns model and working directory at spawn
-  time, and verifies what was created — trusted repositories only, the
+  time, and verifies what was created, trusted repositories only, the
   coordinator class reserved, no shell or credential surface. Not part of
   the released 0.1.1 tool; ships when its own qualification passes.
 
-**Planned in this theme:**
+**Under development in this theme:**
 
 - **project status and state review** — read-only projections of workspace
   Git state, formal records, and task-state health (`/agentic-status`
@@ -146,7 +146,7 @@ configured Pi worker roles running under [Herdr](https://github.com/herdr)
   domain-absence proof. Evidence is one structured receipt, never
   self-attested strings.
 
-**Planned in this theme:**
+**Under development in this theme:**
 
 - **attended-authority guard** — a fail-closed veto over destructive
   operations with native confirmation for consequential ones, correct
@@ -196,6 +196,24 @@ configured Pi worker roles running under [Herdr](https://github.com/herdr)
 - **assignment-aware Git journeys** — merge and protected-push flows bound
   to a verified assignment, so consequential Git operations carry their
   own recorded provenance.
+
+## Trust in the extension set itself
+
+*Extensions that keep the installed set honest and the record bounded.*
+
+- **security and integrity scanning** — static scanning of MCP configs,
+  agent skills, and extension packages for hardcoded secrets, prompt and
+  shell injection, data-exfiltration endpoints, untrusted integrations,
+  PII leakage, and OWASP/MCP threat families, with accept/redact/reject
+  decisions. Built on the agent-scanner approach proven in
+  Hillstar Orchestrator and Testudo.
+- **checkpoint storage lifecycle** — compression, deduplication, retention,
+  and purging rules for capsule/index stores once a product ships, so
+  session evidence has a managed lifetime instead of growing without
+  bound.
+- **product knowledge graph** — semantic graph projection of a shipped
+  product's checkpoints, decisions, and artifacts, so the record of what
+  was built stays queryable after active development ends.
 
 Each item lands here as its own extension when its scenario passes
 acceptance with all prohibited effects absent.
