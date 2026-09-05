@@ -44,3 +44,8 @@ This repository is the public package source for `@evoclock/pi-agentic-driver`.
   guidance. It captures the last assistant response for review, preserves
   code/frontmatter by excluding fenced prose from analysis, and never edits a
   file automatically; normal confirmed Pi editing remains the write boundary.
+- Release 0.4.0 adds an explicit AI;DR file-apply action. A caller supplies the
+  proposed replacement; AI;DR shows a bounded diff preview, requires native
+  confirmation, revalidates the file has not drifted, writes only the exact
+  confirmed replacement, and returns before/after hashes. Last-response and
+  supplied-text reviews remain read-only.

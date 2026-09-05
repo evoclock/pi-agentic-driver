@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { readFileSync, realpathSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { extname, isAbsolute, resolve, relative } from "node:path";
 
 export const AIDR_SCHEMA = "agentic-driver.aidr.v1";
 const MAX_TEXT_BYTES = 256 * 1024;
+const MAX_DIFF_PREVIEW_BYTES = 12 * 1024;
 const ALLOWED_FILE_EXTENSIONS = new Set([".md", ".mdx", ".txt", ".html", ".htm"]);
 const CLUTTER_PHRASES = Object.freeze([
   "in order to",
@@ -71,6 +73,39 @@ function clipped(value, length = 180) {
 
 function principle(status, finding) {
   return { status, finding };
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function diffPreview(before, after) {
+  const oldLines = before.replaceAll("\r\n", "\n").split("\n");
+  const newLines = after.replaceAll("\r\n", "\n").split("\n");
+  let prefix = 0;
+  while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) prefix += 1;
+  let suffix = 0;
+  while (
+    suffix < oldLines.length - prefix
+    && suffix < newLines.length - prefix
+    && oldLines[oldLines.length - suffix - 1] === newLines[newLines.length - suffix - 1]
+  ) suffix += 1;
+  const removed = oldLines.slice(prefix, oldLines.length - suffix).map((line) => `- ${line}`);
+  const added = newLines.slice(prefix, newLines.length - suffix).map((line) => `+ ${line}`);
+  const header = `@@ lines ${prefix + 1}-${oldLines.length - suffix} -> ${prefix + 1}-${newLines.length - suffix} @@`;
+  return clipped([header, ...removed, ...added].join("\n"), MAX_DIFF_PREVIEW_BYTES);
+}
+
+function blockedReport(reason, extra = {}) {
+  return {
+    schema: AIDR_SCHEMA,
+    ok: false,
+    status: "blocked",
+    reason,
+    nonAuthorizing: true,
+    authorityCreated: false,
+    ...extra,
+  };
 }
 
 export function extractAssistantText(message) {
@@ -175,7 +210,7 @@ export function reviewText(input, { mode = "review", source = "text" } = {}) {
     analogyExample: mode === "analogy"
       ? "For FIFO: imagine a bag of bread. The first slice in is the first slice out; the bag tightens around the remaining slices, but the slices are not reordered."
       : undefined,
-    editPolicy: "AI;DR is read-only. Use the normal confirmed Pi edit flow to apply a proposed rewrite.",
+    editPolicy: "Review is read-only. File rewrites require an explicit apply action, an exact replacement, native confirmation, and drift revalidation.",
     nonAuthorizing: true,
     authorityCreated: false,
   };
@@ -192,6 +227,37 @@ function resolveReviewFile(requestedPath, cwd) {
   return actual;
 }
 
+async function applyConfirmedFileReplacement(path, before, replacement, context) {
+  boundedText(replacement, "replacement");
+  if (before === replacement) return blockedReport("the proposed replacement is identical to the current file", { action: "apply", path });
+  if (typeof context?.ui?.confirm !== "function") {
+    return blockedReport("native confirmation is unavailable; AI;DR will not write the file", { action: "apply", path });
+  }
+  const preview = diffPreview(before, replacement);
+  const confirmed = await context.ui.confirm(
+    "AI;DR: apply confirmed rewrite",
+    `File: ${path}\n\n${preview}\n\nApply this exact replacement?`,
+  );
+  if (!confirmed) return blockedReport("native confirmation declined", { action: "apply", path, diffPreview: preview });
+  const current = readFileSync(path, "utf8");
+  if (current !== before) return blockedReport("the file changed after review; no write was performed", { action: "apply", path, diffPreview: preview });
+  writeFileSync(path, replacement, "utf8");
+  const after = readFileSync(path, "utf8");
+  if (after !== replacement) throw new Error("the file did not match the confirmed replacement after writing");
+  return {
+    schema: AIDR_SCHEMA,
+    ok: true,
+    status: "applied",
+    action: "apply",
+    path,
+    diffPreview: preview,
+    beforeHash: sha256(before),
+    afterHash: sha256(after),
+    nonAuthorizing: true,
+    authorityCreated: false,
+  };
+}
+
 export function registerAidrInterface(pi) {
   if (typeof pi?.registerTool !== "function") return;
   let lastAssistantText = "";
@@ -202,13 +268,15 @@ export function registerAidrInterface(pi) {
   pi.registerTool({
     name: "agentic_aidr",
     label: "AI;DR",
-    description: "Review the last response, supplied prose, or a Markdown/documentation file for clarity, simplicity, brevity, humanity, and neurodivergent-friendly structure. AI;DR is read-only and never edits files automatically.",
+    description: "Review the last response, supplied prose, or a Markdown/documentation file for clarity, simplicity, brevity, humanity, and neurodivergent-friendly structure. An explicit file apply action can write an exact proposed replacement only after native confirmation.",
     parameters: {
       type: "object",
       additionalProperties: false,
       properties: {
+        action: { type: "string", enum: ["review", "apply"] },
         source: { type: "string", enum: ["last-response", "text", "file"] },
         text: { type: "string", maxLength: MAX_TEXT_BYTES },
+        replacement: { type: "string", maxLength: MAX_TEXT_BYTES },
         path: { type: "string", maxLength: 1024 },
         mode: { type: "string", enum: ["review", "simple", "analogy"] },
       },
@@ -216,20 +284,30 @@ export function registerAidrInterface(pi) {
     },
     async execute(_id, params, _signal, _update, context) {
       try {
+        const action = params.action ?? "review";
+        if (!["review", "apply"].includes(action)) throw new Error("AI;DR action must be review or apply");
         let text;
         let source = params.source;
+        let path;
         if (source === "last-response") text = lastAssistantText;
         else if (source === "text") text = params.text;
         else if (source === "file") {
-          const path = resolveReviewFile(params.path, context.cwd);
+          path = resolveReviewFile(params.path, context.cwd);
           text = readFileSync(path, "utf8");
           source = path;
         } else throw new Error("AI;DR source must be last-response, text, or file");
         if (!text) throw new Error("there is no text available for AI;DR to review");
+        if (action === "apply") {
+          if (source !== path) throw new Error("AI;DR apply is available only for files");
+          const result = await applyConfirmedFileReplacement(path, text, params.replacement, context);
+          if (result.ok) result.review = reviewText(params.replacement, { mode: params.mode ?? "simple", source: path });
+          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result };
+        }
         const report = reviewText(text, { mode: params.mode ?? "review", source });
         return { content: [{ type: "text", text: JSON.stringify(report, null, 2) }], details: report };
       } catch (error) {
-        return { content: [{ type: "text", text: JSON.stringify({ schema: AIDR_SCHEMA, ok: false, status: "blocked", reason: error?.message ?? String(error), nonAuthorizing: true, authorityCreated: false }, null, 2) }], details: { ok: false } };
+        const report = blockedReport(error?.message ?? String(error));
+        return { content: [{ type: "text", text: JSON.stringify(report, null, 2) }], details: { ok: false } };
       }
     },
   });

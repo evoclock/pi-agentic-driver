@@ -74,6 +74,76 @@ test("AI;DR reviews a README without writing it", async () => {
   assert.equal(await readFile(path, "utf8"), original);
 });
 
+test("AI;DR applies an exact file replacement only after native confirmation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aidr-"));
+  const path = join(root, "README.md");
+  const original = "# Example\n\nThis is padded prose in order to test the fixer.\n";
+  const replacement = "# Example\n\nThis direct prose tests the fixer.\n";
+  await writeFile(path, original);
+  const registrations = [];
+  const confirmations = [];
+  registerAidrInterface({ registerTool(tool) { registrations.push(tool); }, on() {} });
+  const result = await registrations[0].execute(
+    "id",
+    { action: "apply", source: "file", path: "README.md", replacement, mode: "simple" },
+    undefined,
+    undefined,
+    { cwd: root, ui: { async confirm(title, message) { confirmations.push({ title, message }); return true; } } },
+  );
+  assert.equal(result.details.ok, true);
+  assert.equal(result.details.status, "applied");
+  assert.equal(confirmations.length, 1);
+  assert.match(confirmations[0].message, /- This is padded prose/);
+  assert.match(confirmations[0].message, /\+ This direct prose/);
+  assert.equal(await readFile(path, "utf8"), replacement);
+  assert.notEqual(result.details.beforeHash, result.details.afterHash);
+});
+
+test("AI;DR refuses a file that drifts after the diff preview", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aidr-"));
+  const path = join(root, "README.md");
+  const original = "# Example\n";
+  await writeFile(path, original);
+  const registrations = [];
+  registerAidrInterface({ registerTool(tool) { registrations.push(tool); }, on() {} });
+  const result = await registrations[0].execute(
+    "id",
+    { action: "apply", source: "file", path: "README.md", replacement: "# Changed\n" },
+    undefined,
+    undefined,
+    {
+      cwd: root,
+      ui: {
+        async confirm() {
+          await writeFile(path, "# Drifted\n");
+          return true;
+        },
+      },
+    },
+  );
+  assert.equal(result.details.ok, false);
+  assert.match(result.details.reason, /changed after review/);
+  assert.equal(await readFile(path, "utf8"), "# Drifted\n");
+});
+
+test("AI;DR does not write when native confirmation declines", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aidr-"));
+  const path = join(root, "README.md");
+  const original = "# Example\n";
+  await writeFile(path, original);
+  const registrations = [];
+  registerAidrInterface({ registerTool(tool) { registrations.push(tool); }, on() {} });
+  const result = await registrations[0].execute(
+    "id",
+    { action: "apply", source: "file", path: "README.md", replacement: "# Changed\n" },
+    undefined,
+    undefined,
+    { cwd: root, ui: { async confirm() { return false; } } },
+  );
+  assert.equal(result.details.ok, false);
+  assert.equal(await readFile(path, "utf8"), original);
+});
+
 test("AI;DR rejects unsupported file types and paths outside the project", async () => {
   const root = await mkdtemp(join(tmpdir(), "aidr-"));
   const registrations = [];
