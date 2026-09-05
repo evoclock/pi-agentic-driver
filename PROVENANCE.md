@@ -38,3 +38,9 @@ This repository is the public package source for `@evoclock/pi-agentic-driver`.
   is not ordinary ad-hoc work. The shipped microVM closure remains qualified
   but activation is deferred until the planned isolation execution path is
   enabled; the adapter now fails closed when that activation flag is absent.
+- Release 0.3.0 adds AI;DR, a read-only writing-review extension. Its profile
+  is based on the four stated principles of clarity, simplicity, brevity, and
+  humanity, with optional plain-language, analogy, and bullet-structure
+  guidance. It captures the last assistant response for review, preserves
+  code/frontmatter by excluding fenced prose from analysis, and never edits a
+  file automatically; normal confirmed Pi editing remains the write boundary.
