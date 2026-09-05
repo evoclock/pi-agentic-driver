@@ -175,7 +175,7 @@ for the wider task/model-routing and remote-session workflow.
 
 ## Writing clearly
 
-*AI;DR (AI Didn't Read) keeps technical writing clear without flattening the writer's voice.*
+*AI;DR (AI; Didn't Read) keeps technical writing clear without flattening the writer's voice.*
 
 <details>
 <summary><strong>AI;DR — writing review</strong> <em>(released, 0.4.0)</em></summary>
