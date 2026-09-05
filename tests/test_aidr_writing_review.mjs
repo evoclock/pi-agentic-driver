@@ -22,10 +22,35 @@ test("AI;DR applies the four principles and suggests bullets", () => {
   assert.match(report.findings.map((item) => item.kind).join(","), /clutter/);
 });
 
+test("AI;DR applies an ASD-STE100-informed profile in simple and ste modes", () => {
+  const report = reviewText(
+    "Utilize the tool in order to carry out the task. The operator should set up the unit as soon as possible.",
+    { mode: "simple", source: "text" },
+  );
+  const rules = report.standards["ASD-STE100"].rulesApplied;
+  assert.equal(report.standard, "asd-ste100");
+  assert.ok(rules.includes("STE-W1"));
+  assert.ok(rules.includes("STE-V1"));
+  assert.ok(rules.includes("STE-M1"));
+  assert.ok(rules.includes("STE-A1"));
+  assert.ok(report.metrics.steFindingCount >= 4);
+  assert.match(report.rewriteInstructions.join(" "), /ASD-STE100/);
+
+  const explicit = reviewText("Use one precise sentence.", { mode: "ste", source: "text", standard: "asd-ste100" });
+  assert.equal(explicit.standards["ASD-STE100"].status, "advisory_clear");
+});
+
 test("AI;DR ignores frontmatter and fenced code while reviewing prose", () => {
   const report = reviewText(`---\ntitle: Example\n---\n\nA short paragraph.\n\n\`\`\`js\nconst value = ${"x".repeat(300)};\n\`\`\``, { source: "text" });
   assert.equal(report.metrics.wordCount, 3);
   assert.equal(report.metrics.longSentenceCount, 0);
+});
+
+test("AI;DR treats each list item as its own paragraph", () => {
+  const item = "This list item contains enough words to test paragraph boundaries without making a claim about the technical content. ";
+  const report = reviewText(`- ${item.repeat(4)}\n- ${item.repeat(4)}\n- ${item.repeat(4)}`, { source: "text" });
+  assert.equal(report.metrics.longParagraphCount, 0);
+  assert.equal(report.metrics.paragraphCount, 3);
 });
 
 test("AI;DR extracts assistant text only", () => {
@@ -54,6 +79,8 @@ test("AI;DR registers a closed read-only tool and captures last response", async
   assert.equal(registrations.length, 1);
   assert.equal(registrations[0].name, "agentic_aidr");
   assert.equal(registrations[0].parameters.additionalProperties, false);
+  assert.deepEqual(registrations[0].parameters.properties.mode.enum, ["review", "simple", "analogy", "ste"]);
+  assert.deepEqual(registrations[0].parameters.properties.standard.enum, ["none", "asd-ste100"]);
   await handlers.message_end({ message: { role: "assistant", content: [{ type: "text", text: "A response to review." }] } });
   const result = await registrations[0].execute("id", { source: "last-response", mode: "review" }, undefined, undefined, { cwd: process.cwd() });
   assert.equal(result.details.ok, true);
@@ -97,6 +124,7 @@ test("AI;DR applies an exact file replacement only after native confirmation", a
   assert.match(confirmations[0].message, /\+ This direct prose/);
   assert.equal(await readFile(path, "utf8"), replacement);
   assert.notEqual(result.details.beforeHash, result.details.afterHash);
+  assert.equal(result.details.review.standard, "asd-ste100");
 });
 
 test("AI;DR refuses a file that drifts after the diff preview", async () => {

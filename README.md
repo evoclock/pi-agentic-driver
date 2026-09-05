@@ -13,31 +13,29 @@
   <img src="https://img.shields.io/badge/Python-3776AB?style=flat&logo=python&logoColor=white" alt="Python"/>
 </p>
 
-An agent left unsupervised will happily rewrite what it should have reused,
-ship to the wrong remote, lose its context at the worst moment, and report
-success in words you cannot verify. Pi is an excellent agent harness; the
-pieces I need for the way I work are the guardrails around it.
+Without guardrails, an agent can rewrite code that an existing abstraction
+already covers, ship to the wrong remote, lose context at the worst time, and
+report success without evidence. Pi is an excellent agent harness. I need
+these guardrails for the way I work.
 
-**pi-agentic-driver adds those guardrails as Pi extensions, and every one of
-them obeys the same rule: the agent does the work, the extension makes the
-work verifiable and bounded.** Review happens before code is written;
-communication carries reports, never authority; automation runs inside
-isolated proofs that prove their own cleanup; sessions survive compaction
-and handover; and Git operations stay exact, confirmed, and protected.
+**pi-agentic-driver adds these guardrails as Pi extensions. The agent does the
+work. Each extension makes the work verifiable and bounded.** Review happens
+before the agent writes code. Communication carries reports, not authority.
+Isolation proofs verify their own cleanup. Sessions survive compaction and
+handover. Git operations stay exact, confirmed, and protected.
 
-Everything here is built the way it asks agents to work: every capability
-passes fixture-based acceptance with native tests, live-session checks, and
-independent model review before it ships, and each extension's own
-restrictions are documented, not discovered.
+Each capability passes fixture-based acceptance, native tests, live-session
+checks, and independent model review before release. We document each
+extension's restrictions before release.
 
 Extensions for [Pi](https://github.com/earendil-works/pi-coding-agent):
 advisory code review, bounded role communication, and governed isolation
 proofs for agentic workflows.
 
 **Status: active development and testing.** Each extension ships only after
-passing fixture-based acceptance (native tests, live-session checks, and
-independent model review). Released components are installable; pending
-ones are listed for transparency and are not yet packaged.
+it passes fixture-based acceptance, native tests, live-session checks, and
+independent model review. You can install released components. This README
+lists pending components for transparency; pending components are not packaged.
 
 ## Keeping work bounded
 
@@ -46,15 +44,15 @@ ones are listed for transparency and are not yet packaged.
 <details>
 <summary><strong>code-phage — advisory code review</strong> <em>(released, 0.1.1)</em></summary>
 
-`code_phage` like a bacteriophage but for your code, it reviews a proposed change against a stated goal before code is
-written or committed. Given a goal, candidate files, accepted requirements,
+`code_phage` reviews a proposed change against a stated goal before the agent
+writes or commits code. Given a goal, candidate files, accepted requirements,
 and test paths, it:
 
 - **Finds prior art structurally** — matches exported symbols, function
   signatures, and dependency imports against a repository inventory, so an
   agent reuses an existing abstraction instead of writing a parallel version.
-  Word overlap alone never counts; credit (source, version, license) is
-  required whenever prior art informs the implementation.
+  Word overlap alone never counts. The implementation requires credit (source,
+  version, license) whenever prior art informs it.
 - **Binds an implementation budget** — goal, accepted requirements, write
   set, and tests become one reviewable budget, with coverage checks that
   flag unbound requirements and uncovered tests.
@@ -62,10 +60,10 @@ and test paths, it:
   complexity, line counts, duplication, module-level mutable state,
   dependency lists, test burden, and a rollback proxy. These are signals
   for human judgment, never rejection thresholds.
-- **Redirects scope drift** — files that support no accepted requirement are
-  named, excluded, and the smallest coherent write set is recommended; the
-  deletion test ("what fails if this is removed?") guards justified
-  complexity from false-positive flagging.
+- **Redirects scope drift** — it names and excludes files that support no
+  accepted requirement, then recommends the smallest coherent write set. The
+  deletion test ("what fails if we remove this?") guards justified complexity
+  from false-positive flagging.
 - **Stays advisory** — it never mutates files, creates tasks, grants
   authority, or blocks work; every result states `advisoryOnly: true`.
 
@@ -101,7 +99,7 @@ configured Pi worker roles running under [Herdr](https://herdr.dev/)
 
 - **Lists and observes** worker roles (`list`, `get`) filtered to trusted
   repositories only — a checked-in registry plus canonical-path validation;
-  unlisted or symlink-escaped repositories are denied.
+  the extension denies unlisted or symlink-escaped repositories.
 - **Prompts exactly once** (`prompt`): re-observes the role, sends one
   bounded prompt with a role-specific report contract, waits for terminal
   settlement (`idle`/`done`/`blocked`), and reads exactly one latest
@@ -110,7 +108,7 @@ configured Pi worker roles running under [Herdr](https://herdr.dev/)
 - **Waits and reads** (`wait`, `read`) with the same trust checks for
   partial journeys.
 - **Grants nothing** — fixed argv with `shell: false`, a pinned executable,
-  the coordinator role class denied, and results that are untrusted
+  the coordinator role class denied, and returns results as untrusted
   evidence (`nonAuthorizing: true`). It cannot control panes, start agents,
   run shells, or create authority.
 
@@ -159,18 +157,17 @@ for the wider task/model-routing and remote-session workflow.
 - **project status and state review** — read-only projections of workspace
   Git state, formal records, and task-state health (`/agentic-status`
   family).
-- **role-lane routing and warm sessions** — smart model routing: work is
-  routed to the right model for the job, implementation, planning, and
-  review run as separate declared lanes, preferring warm sessions where
-  the lane already has an established agent, so context and cache survive
-  across tasks. Route affinity is an optimisation, never authority: an
-  incompatible or unavailable lane yields an explicit review-required
-  result, never silent model substitution. Dispatch and shell authority
-  are not granted by routing.
+- **role-lane routing and warm sessions** — smart model routing sends work
+  to the right model for the job. Separate lanes handle implementation,
+  planning, and review. The router prefers a warm session when a lane already
+  has an established agent, so context and cache survive across tasks. Route
+  affinity is an optimisation, never authority: an incompatible or
+  unavailable lane yields an explicit review-required result, never silent
+  model substitution. Routing grants no dispatch or shell authority.
 - **worker pulse** — liveness observation and dispatch-eligibility
   observation across role lanes: which agents are alive, what state they
-  are in, and what is ready for work. Non-authorizing observation; planned
-  work cannot be dispatched without it.
+  are in, and what is ready for work. This observation grants no authority;
+  the system cannot dispatch planned work without it.
 - **task-ledger integration for planned work** — agents read and act
   within the task ledger's card states (what is dispatchable, in progress,
   blocked) without owning board authority: no admission, completion,
@@ -186,15 +183,27 @@ for the wider task/model-routing and remote-session workflow.
 `agentic_aidr` reviews the last assistant response, supplied prose, or a
 Markdown/documentation file. It checks four principles:
 
-- **Clarity:** strip each sentence to its cleanest useful parts.
+- **Clarity:** keep each sentence focused on one useful idea.
 - **Simplicity:** remove clutter, pompous phrases, and needless jargon.
-- **Brevity:** say the same thing in fewer words when possible.
-- **Humanity:** keep an authentic human voice rather than machine-sounding prose.
+- **Brevity:** use fewer words when they carry the same meaning.
+- **Humanity:** keep an authentic human voice.
 
-It also flags dense paragraphs, suggests bullets where they reduce working-memory
-load, and supports plain-language and analogy modes. Review is read-only. An
-explicit file apply action can show a bounded diff and write the exact proposed
-replacement only after native confirmation.
+The `simple` and `ste` modes also run an ASD-STE100-informed profile. The
+profile checks sentence length, direct word choice, precise verbs, and clear
+requirements, permissions, abilities, and conditions. It uses a 20-word target
+for procedural text and a 25-word target for descriptive text. It returns the
+rule and an example for each finding.
+
+Use `simple` for the four principles plus the profile. Use `ste` for a
+profile-focused report. The profile is advisory. It does not include the
+licensed ASD-STE100 approved-word dictionary and does not certify conformance.
+Check final text against the licensed specification and your project
+terminology list.
+
+AI;DR also flags dense paragraphs, suggests bullets when they reduce working
+memory load, and supports plain-language and analogy modes. Review is
+read-only. An explicit file apply action can show a bounded diff and write the
+exact proposed replacement only after native confirmation.
 
 </details>
 
@@ -212,9 +221,9 @@ QEMU/KVM guest on `linux-backend`. It returns a non-authorizing receipt with
 the marker, hashes, isolation context, checked domain teardown, and ACL
 restoration. The live qualification returned `VERIFIED`.
 
-Runtime isolation is reserved for the planned and automated execution paths;
-it is not part of ordinary ad-hoc work. Public activation remains deferred
-until those paths are enabled.
+The system reserves runtime isolation for planned and automated execution
+paths. It excludes runtime isolation from ordinary ad-hoc work. Public
+activation remains deferred until the system enables those paths.
 
 </details>
 
@@ -229,9 +238,9 @@ until those paths are enabled.
   shell: when a model tries to delete, overwrite, or push, the guard
   stops it before execution and asks you. Safe commands (reads, builds,
   tests) pass through untouched. If you deny, you get a clear reason and
-  the session continues, the agent does not retry behind your back. In
-  headless runs where no human can confirm, destructive commands are
-  refused outright rather than silently allowed.
+  the session continues, and the agent does not retry behind your back. In
+  headless runs where no human can confirm, the system refuses destructive
+  commands rather than silently allowing them.
 
 ## Managing context pressure, compaction, and avoiding lossy handover
 
@@ -271,8 +280,8 @@ until those paths are enabled.
   derivation, native confirmation, post-confirmation drift revalidation,
   and protected-operation boundaries (no force push, no default-branch
   deletion, no history rewrite), while routine status/diff/stage/commit
-  stays low-friction. Arbitrary wall-clock truncation of healthy
-  operations is being removed.
+  stays low-friction. We are removing arbitrary wall-clock truncation of
+  healthy operations.
 - **assignment-aware Git journeys** — merge and protected-push flows bound
   to a verified assignment, so consequential Git operations carry their
   own recorded provenance.

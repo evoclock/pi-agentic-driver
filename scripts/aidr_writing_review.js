@@ -22,6 +22,32 @@ const CLUTTER_PHRASES = Object.freeze([
   "facilitate",
   "aforementioned",
 ]);
+const STE_WORD_GUIDANCE = Object.freeze({
+  utilize: "use",
+  facilitate: "help",
+  approximately: "about",
+  commence: "start",
+  terminate: "stop",
+  "prior to": "before",
+  "subsequent to": "after",
+  "in lieu of": "instead of",
+  numerous: "many",
+  sufficient: "enough",
+});
+const STE_PHRASAL_GUIDANCE = Object.freeze({
+  "carry out": "perform",
+  "find out": "determine",
+  "look at": "examine",
+  "set up": "configure or install",
+});
+const STE_MODAL_GUIDANCE = Object.freeze({
+  should: "use must for a requirement, or state the recommendation directly",
+  may: "use can for ability or must have permission language when needed",
+  might: "state the condition and result directly",
+  could: "state the condition and result directly",
+  would: "state the action and condition directly",
+});
+const STE_DOCUMENT_TYPES = new Set(["procedural", "descriptive"]);
 const PASSIVE_PATTERN = /\b(?:is|are|was|were|be|been|being)\s+(?:\w+ed|\w+en)\b/gi;
 const SENTENCE_PATTERN = /[^.!?\n]+(?:[.!?]+|$)/g;
 
@@ -71,6 +97,81 @@ function clipped(value, length = 180) {
   return value.length <= length ? value : `${value.slice(0, length - 1).trimEnd()}…`;
 }
 
+function proseParagraphs(prose) {
+  return prose
+    .split(/\n\s*\n/)
+    .flatMap((block) => {
+      const paragraphs = [];
+      let current = "";
+      for (const line of block.split("\n")) {
+        const startsListItem = /^\s*(?:[-*+] |\d+[.)] )/.test(line);
+        if (startsListItem && current.trim()) {
+          paragraphs.push(current.trim());
+          current = "";
+        }
+        current += `${line}\n`;
+      }
+      if (current.trim()) paragraphs.push(current.trim());
+      return paragraphs;
+    })
+    .filter(Boolean);
+}
+
+function steTermExamples(prose, terms) {
+  return Object.entries(terms)
+    .filter(([term]) => new RegExp(`\\b${term.replaceAll(" ", "\\s+")}\\b`, "i").test(prose))
+    .map(([term, replacement]) => `${term} → ${replacement}`);
+}
+
+function steFindings(prose, sentences, documentType) {
+  const findings = [];
+  const sentenceLimit = documentType === "descriptive" ? 25 : 20;
+  const longSentences = sentences.filter((item) => item.wordCount > sentenceLimit).slice(0, 6);
+  if (longSentences.length) findings.push({
+    rule: "STE-S1",
+    kind: "ste-sentence-length",
+    message: `Keep ${documentType} sentences to about ${sentenceLimit} words, then split longer sentences.`,
+    examples: longSentences.map((item) => `${item.wordCount} words: ${clipped(item.sentence)}`),
+  });
+  const wordExamples = steTermExamples(prose, STE_WORD_GUIDANCE);
+  if (wordExamples.length) findings.push({
+    rule: "STE-W1",
+    kind: "ste-word-choice",
+    message: "Prefer a direct, familiar word. Confirm the replacement against your licensed ASD-STE100 dictionary or project terminology list.",
+    examples: wordExamples,
+  });
+  const phrasalExamples = steTermExamples(prose, STE_PHRASAL_GUIDANCE);
+  if (phrasalExamples.length) findings.push({
+    rule: "STE-V1",
+    kind: "ste-phrasal-verb",
+    message: "Replace an ambiguous phrasal verb with one precise verb when the meaning permits.",
+    examples: phrasalExamples,
+  });
+  const modalExamples = steTermExamples(prose, STE_MODAL_GUIDANCE);
+  if (modalExamples.length) findings.push({
+    rule: "STE-M1",
+    kind: "ste-modal-meaning",
+    message: "State requirement, ability, permission, or condition precisely; do not leave the modal meaning implicit.",
+    examples: modalExamples,
+  });
+  if (/\band\/or\b/i.test(prose)) findings.push({
+    rule: "STE-C1",
+    kind: "ste-conjunction",
+    message: "Replace “and/or” with the exact allowed combination.",
+    examples: ["and/or"],
+  });
+  const vagueTime = [...prose.matchAll(/\b(?:as soon as possible|at this point in time|from time to time)\b/gi)]
+    .slice(0, 6)
+    .map((match) => match[0]);
+  if (vagueTime.length) findings.push({
+    rule: "STE-A1",
+    kind: "ste-ambiguity",
+    message: "Use a measurable time or condition instead of a vague time phrase.",
+    examples: vagueTime,
+  });
+  return findings;
+}
+
 function principle(status, finding) {
   return { status, finding };
 }
@@ -117,14 +218,23 @@ export function extractAssistantText(message) {
     .trim();
 }
 
-export function reviewText(input, { mode = "review", source = "text" } = {}) {
+export function reviewText(input, {
+  mode = "review",
+  source = "text",
+  standard = "none",
+  documentType = "procedural",
+} = {}) {
   const text = boundedText(input);
-  if (!["review", "simple", "analogy"].includes(mode)) {
-    throw new Error("AI;DR mode must be review, simple, or analogy");
+  if (!["review", "simple", "analogy", "ste"].includes(mode)) {
+    throw new Error("AI;DR mode must be review, simple, analogy, or ste");
   }
+  if (!["none", "asd-ste100"].includes(standard)) throw new Error("AI;DR standard must be none or asd-ste100");
+  if (!STE_DOCUMENT_TYPES.has(documentType)) throw new Error("AI;DR documentType must be procedural or descriptive");
+  const useSte = standard === "asd-ste100" || mode === "simple" || mode === "ste";
+  const effectiveStandard = useSte ? "asd-ste100" : "none";
   const prose = visibleProse(text);
   const sentences = sentenceRecords(prose);
-  const paragraphs = prose.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
+  const paragraphs = proseParagraphs(prose);
   const longSentences = sentences.filter((item) => item.wordCount > 28).slice(0, 6);
   const longParagraphs = paragraphs
     .map((paragraph) => ({ paragraph, wordCount: words(paragraph).length }))
@@ -135,6 +245,7 @@ export function reviewText(input, { mode = "review", source = "text" } = {}) {
   const hasLists = /(?:^|\n)\s*(?:[-*+] |\d+[.)] )/m.test(prose);
   const hasStepLanguage = /\b(?:first|second|third|steps?|options?|choices?)\b/i.test(prose);
   const bulletOpportunity = !hasLists && hasStepLanguage && sentences.length >= 3;
+  const steReviewFindings = useSte ? steFindings(prose, sentences, documentType) : [];
   const findings = [];
   if (longSentences.length) findings.push({
     kind: "long-sentence",
@@ -161,14 +272,16 @@ export function reviewText(input, { mode = "review", source = "text" } = {}) {
     message: "Turn the steps or choices into bullets to reduce working-memory load.",
     examples: [],
   });
+  findings.push(...steReviewFindings);
 
   const hasIssues = findings.length > 0;
-  const rewriteInstructions = mode === "simple"
+  const rewriteInstructions = mode === "simple" || mode === "ste"
     ? [
         "Start with the answer in one sentence.",
         "Use plain words and short sentences.",
         "Put steps, choices, and comparisons in bullets.",
         "Keep technical terms, but explain each one at first use.",
+        "Use ASD-STE100-style controlled English as an advisory guide: choose one precise term, state one action per sentence, and make requirements, permissions, and conditions explicit.",
       ]
     : mode === "analogy"
       ? [
@@ -185,12 +298,14 @@ export function reviewText(input, { mode = "review", source = "text" } = {}) {
     status: hasIssues ? "needs_revision" : "clear",
     source,
     mode,
+    standard: effectiveStandard,
+    documentType,
     principles: {
-      clarity: principle(longSentences.length || longParagraphs.length ? "watch" : "clear",
+      clarity: principle(longSentences.length || longParagraphs.length || steReviewFindings.some((item) => item.rule === "STE-S1") ? "watch" : "clear",
         "Every sentence should contain the cleanest useful idea."),
-      simplicity: principle(clutter.length ? "watch" : "clear",
+      simplicity: principle(clutter.length || steReviewFindings.some((item) => ["STE-W1", "STE-V1"].includes(item.rule)) ? "watch" : "clear",
         "Remove clutter and explain necessary technical terms."),
-      brevity: principle(longSentences.length || longParagraphs.length ? "watch" : "clear",
+      brevity: principle(longSentences.length || longParagraphs.length || steReviewFindings.some((item) => item.rule === "STE-S1") ? "watch" : "clear",
         "If the same meaning fits in fewer words, use fewer words."),
       humanity: principle("manual",
         "Preserve an authentic voice; this cannot be measured reliably by a lint rule."),
@@ -204,7 +319,17 @@ export function reviewText(input, { mode = "review", source = "text" } = {}) {
       clutterPhraseCount: clutter.length,
       passivePhraseCount: passive.length,
       bulletOpportunity,
+      steFindingCount: steReviewFindings.length,
     },
+    standards: useSte ? {
+      "ASD-STE100": {
+        status: steReviewFindings.length ? "watch" : "advisory_clear",
+        profile: "ASD-STE100-informed",
+        rulesApplied: [...new Set(steReviewFindings.map((item) => item.rule))],
+        findings: steReviewFindings,
+        limitation: "This bounded advisory profile does not reproduce the licensed ASD-STE100 dictionary and does not certify conformance.",
+      },
+    } : undefined,
     findings,
     rewriteInstructions,
     analogyExample: mode === "analogy"
@@ -268,7 +393,7 @@ export function registerAidrInterface(pi) {
   pi.registerTool({
     name: "agentic_aidr",
     label: "AI;DR",
-    description: "Review the last response, supplied prose, or a Markdown/documentation file for clarity, simplicity, brevity, humanity, and neurodivergent-friendly structure. An explicit file apply action can write an exact proposed replacement only after native confirmation.",
+    description: "Review the last response, supplied prose, or a Markdown/documentation file for clarity, simplicity, brevity, humanity, neurodivergent-friendly structure, and optional ASD-STE100-informed controlled English. An explicit file apply action can write an exact proposed replacement only after native confirmation.",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -278,7 +403,9 @@ export function registerAidrInterface(pi) {
         text: { type: "string", maxLength: MAX_TEXT_BYTES },
         replacement: { type: "string", maxLength: MAX_TEXT_BYTES },
         path: { type: "string", maxLength: 1024 },
-        mode: { type: "string", enum: ["review", "simple", "analogy"] },
+        mode: { type: "string", enum: ["review", "simple", "analogy", "ste"] },
+        standard: { type: "string", enum: ["none", "asd-ste100"] },
+        documentType: { type: "string", enum: ["procedural", "descriptive"] },
       },
       required: ["source"],
     },
@@ -300,10 +427,20 @@ export function registerAidrInterface(pi) {
         if (action === "apply") {
           if (source !== path) throw new Error("AI;DR apply is available only for files");
           const result = await applyConfirmedFileReplacement(path, text, params.replacement, context);
-          if (result.ok) result.review = reviewText(params.replacement, { mode: params.mode ?? "simple", source: path });
+          if (result.ok) result.review = reviewText(params.replacement, {
+            mode: params.mode ?? "simple",
+            standard: params.standard ?? "none",
+            documentType: params.documentType ?? "procedural",
+            source: path,
+          });
           return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result };
         }
-        const report = reviewText(text, { mode: params.mode ?? "review", source });
+        const report = reviewText(text, {
+          mode: params.mode ?? "review",
+          standard: params.standard ?? "none",
+          documentType: params.documentType ?? "procedural",
+          source,
+        });
         return { content: [{ type: "text", text: JSON.stringify(report, null, 2) }], details: report };
       } catch (error) {
         const report = blockedReport(error?.message ?? String(error));
