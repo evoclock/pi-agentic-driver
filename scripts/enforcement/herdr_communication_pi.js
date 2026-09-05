@@ -9,11 +9,12 @@ import {
   statSync,
 } from "node:fs";
 import { spawn } from "node:child_process";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 export const HERDR_COMMUNICATION_TOOL = "agentic_herdr_communication";
 export const HERDR_COMMUNICATION_SCHEMA = "agentic-driver.herdr-communication.v1";
-export const HERDR_VERSION = "0.7.5";
+export const HERDR_VERSION = "0.8.2";
 // One versioned policy: every schema-valid dynamic role is eligible except the
 // coordinator class (`coordinator` and `coordinator-*`).
 export const HERDR_ROLE_POLICY = Object.freeze({
@@ -24,7 +25,7 @@ export const HERDR_ROLE_PATTERN = "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$";
 const HERDR_ROLE_REGEXP = new RegExp(HERDR_ROLE_PATTERN);
 export const HERDR_COMMUNICATION_ACTIONS = Object.freeze(["list", "get", "prompt", "wait", "read"]);
 
-// The Homebrew link is the configured driver-node path observed for Herdr 0.7.5.
+// The Homebrew link is the configured driver-node path observed for Herdr 0.8.2.
 // It is deliberately not resolved through PATH or HERDR_BIN_PATH.  A package
 // upgrade changes the realpath and therefore fails closed until this pin is
 // reviewed.  Linux callers have no configured production path in this package.
@@ -251,13 +252,35 @@ function checkedRegistryPath(primary) {
     if (registryReal !== resolve(primaryReal, WORKER_REPOSITORY_REGISTRY)) {
       throw communicationError("worker_registry_invalid", "the Herdr worker repository registry escapes the configured repository");
     }
+    return registryPath;
   } catch (error) {
     if (error instanceof HerdrCommunicationError) throw error;
     if (error?.code !== "ENOENT") {
       throw communicationError("worker_registry_invalid", "the Herdr worker repository registry could not be canonicalized");
     }
   }
-  return registryPath;
+  // Registry lookup order (coordinator decision): the session repository's
+  // own config first; when missing (ENOENT only) the active Pi profile's
+  // shared config under {PI_CODING_AGENT_DIR}/config/ (fallback
+  // ~/.pi/agent/config/). When neither exists, return the repo-local path so
+  // the caller's primary-only fallback applies exactly as before.
+  const profileDir = process.env.PI_CODING_AGENT_DIR;
+  const base = typeof profileDir === "string" && profileDir.trim()
+    ? resolve(profileDir.trim())
+    : resolve(homedir(), ".pi", "agent");
+  const sharedPath = resolve(base, WORKER_REPOSITORY_REGISTRY);
+  try {
+    const baseReal = realpathSync(base);
+    const sharedReal = realpathSync(sharedPath);
+    if (sharedReal !== resolve(baseReal, WORKER_REPOSITORY_REGISTRY)) {
+      throw communicationError("worker_registry_invalid", "the Herdr worker repository registry escapes the profile configuration");
+    }
+    return sharedPath;
+  } catch (error) {
+    if (error instanceof HerdrCommunicationError) throw error;
+    if (error?.code === "ENOENT") return registryPath;
+    throw communicationError("worker_registry_invalid", "the Herdr worker repository registry could not be canonicalized");
+  }
 }
 
 function checkedWorkerRepositoryPath(primary, name) {
@@ -380,7 +403,7 @@ function validateParams(params) {
 
 function productionExecutable() {
   if (process.platform !== "darwin") {
-    throw communicationError("trusted_executable_unavailable", "the configured Herdr 0.7.5 executable is unavailable");
+    throw communicationError("trusted_executable_unavailable", `the configured Herdr ${HERDR_VERSION} executable is unavailable`);
   }
   let real;
   try {
@@ -389,7 +412,7 @@ function productionExecutable() {
     accessSync(real, fsConstants.X_OK);
     if (!stat.isFile() || !real.endsWith(TRUSTED_HERDR_REALPATH_FRAGMENT)) throw new Error("version mismatch");
   } catch {
-    throw communicationError("trusted_executable_unavailable", "the configured Herdr 0.7.5 executable was not observed");
+    throw communicationError("trusted_executable_unavailable", `the configured Herdr ${HERDR_VERSION} executable was not observed`);
   }
   return TRUSTED_HERDR_EXECUTABLE;
 }
@@ -654,6 +677,13 @@ async function invokeHerdr(action, params, context, options = {}, signal) {
       externalCode = extractExternalErrorCode(parsed);
     } catch {
       externalCode = undefined;
+    }
+    // Herdr sometimes reports a stale role mapping only on stderr for a
+    // non-zero exit with no JSON error envelope; map it only when the error
+    // is identifiable (Tranche 04 mapping table).
+    if (externalCode === undefined
+        && /agent_name_not_found|agent_not_running|target_not_found/.test(normalized.stderr)) {
+      externalCode = "agent_name_not_found";
     }
     throw processFailure(externalCode, "blocked");
   }

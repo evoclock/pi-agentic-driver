@@ -1,4 +1,4 @@
-# pi-agentic-driver v0.1.1
+# pi-agentic-driver v0.1.11
 
 <p align="center">
   <img src="assets/Yamagane-origami.png" alt="pi-agentic-driver — Yamagane origami mark" width="140"/>
@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL%20v3-blue?style=flat" alt="License: AGPL v3"/></a>
-  <img src="https://img.shields.io/badge/version-0.1.1-blue?style=flat" alt="Version 0.1.1"/>
+  <img src="https://img.shields.io/badge/version-0.1.11-blue?style=flat" alt="Version 0.1.11"/>
   <img src="https://img.shields.io/badge/status-active%20development%20%26%20testing-orange?style=flat" alt="Status"/>
   <img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=flat&logo=javascript&logoColor=black" alt="JavaScript"/>
   <img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat&logo=typescript&logoColor=white" alt="TypeScript"/>
@@ -89,11 +89,11 @@ only, not a runtime dependency).
 
 *Extensions for bounded coordination between agents and boards.*
 
-### herdr-communication — bounded role communication *(released, 0.1.1)*
+### herdr-communication — bounded role communication *(released, 0.1.11)*
 
 `agentic_herdr_communication` exchanges bounded, marked reports with
-configured Pi worker roles running under [Herdr](https://github.com/herdr)
-0.7.5. Each operation:
+configured Pi worker roles running under [Herdr](https://herdr.dev/)
+0.8.2. Each operation:
 
 - **Lists and observes** worker roles (`list`, `get`) filtered to trusted
   repositories only — a checked-in registry plus canonical-path validation;
@@ -115,13 +115,34 @@ configured Pi worker roles running under [Herdr](https://github.com/herdr)
   is eligible; `list` observes every live agent in one call. Fan-out is
   sequential by design: one role per prompt, one complete exchange, no
   broadcast primitive.
-- **Agent/pane lifecycle (in development)** — from a session, in natural
-  language: "spawn an agent in a split pane to the right, make it an
-  implementer, set the model to X." Creates panes with directional splits,
-  spawns agents into roles, assigns model and working directory at spawn
-  time, and verifies what was created, trusted repositories only, the
-  coordinator class reserved, no shell or credential surface. Not part of
-  the released 0.1.1 tool; ships when its own qualification passes.
+### herdr-lifecycle — role-labelled worker dispatch *(released, 0.1.11)*
+
+`agentic_herdr_spawn_worker` turns one natural-language request into Herdr's
+native documented lifecycle. Select `right`, `below`, or `tab`; give the
+worker a safe role label; choose a model from the active Pi model roster; and
+name a trusted repository. The extension:
+
+- creates a right/down split pane or an individual labelled tab;
+- starts exactly one Pi agent in the returned shell pane;
+- verifies the role, model arguments, pane identity and canonical repository;
+- requires native confirmation before changing layout or starting a process;
+- uses fixed argv with `shell: false`, with no arbitrary Herdr or shell surface;
+- returns explicit `pane_created`, `tab_created`, or `agent_started` partial
+  states when only part of the operation succeeds; and
+- never retries, moves, closes, or deletes created state automatically.
+
+![A role-labelled worker spawned in a right-hand pane](assets/spawn-right-pane.png)
+
+The same request can place a worker below the coordinator or retain it in an
+individual tab:
+
+<p>
+  <img src="assets/spawn-below-pane.png" alt="A role-labelled worker spawned below the coordinator" width="49%">
+  <img src="assets/spawn-worker-tab.png" alt="A role-labelled worker spawned in an individual tab" width="49%">
+</p>
+
+See [Dispatching a Multi-Model Workforce from Anywhere](https://evoclock.github.io/fieldnotes/articles/herdr-natural-language-agent-automation.html)
+for the wider task/model-routing and remote-session workflow.
 
 **Under development in this theme:**
 

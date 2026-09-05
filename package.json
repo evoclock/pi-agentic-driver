@@ -1,7 +1,7 @@
 {
   "name": "@evoclock/pi-agentic-driver",
-  "version": "0.1.1",
-  "description": "Guardrail extensions for agentic development: advisory code review (code-phage) and bounded, non-authorizing role communication (herdr).",
+  "version": "0.1.11",
+  "description": "Guardrail extensions for Agentic Driver: advisory review, bounded Herdr communication, and guarded worker lifecycle.",
   "type": "module",
   "license": "AGPL-3.0-or-later",
   "keywords": [
@@ -22,7 +22,13 @@
     "lib/typescript_ast_metrics.mjs",
     "scripts/enforcement/herdr_communication_pi.js",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "extensions/herdr-lifecycle.ts",
+    "scripts/enforcement/herdr_lifecycle_pi.js",
+    "scripts/lifecycle_mode_core.js",
+    "scripts/lifecycle_mode_pi.js",
+    "config/herdr-worker-repositories.v1.json",
+    "config/lifecycle-mode-contract.v1.json"
   ],
   "pi": {
     "extensions": [
