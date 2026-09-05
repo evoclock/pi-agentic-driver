@@ -13,6 +13,7 @@ export const LINUX_MICROVM_CUTOVER_SCHEMA = "agentic-driver.linux-microvm-cutove
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REMOTE_FIXTURE = join(SCRIPT_DIR, "linux_microvm_remote_fixture.sh");
 const REGISTRATIONS = new WeakSet();
+const PLANNED_ISOLATION_MODES = new Set(["planned", "planned-interactive", "planned-autonomous"]);
 const HASH = /^[0-9a-f]{64}$/;
 const MAX_DETAIL = 512;
 let inFlight = false;
@@ -235,7 +236,13 @@ function normalizedForwardedStderr(result, fallbackPhase, fallbackCode, fallback
 }
 
 export async function runLinuxMicroVMCutover(context, options = {}) {
-  if (options.workMode !== "ad-hoc") return denied("blocked", reason("policy", "ad-hoc-required", "Select ad-hoc mode before the Linux microVM cutover."));
+  if (!PLANNED_ISOLATION_MODES.has(options.workMode)) {
+    return denied("blocked", reason("policy", "planned-isolation-required", "Linux microVM execution is reserved for planned or automated work."));
+  }
+  const isolationEnabled = options.isolationEnabled ?? options.runtime?.isolationEnabled;
+  if (isolationEnabled !== true) {
+    return denied("blocked", reason("policy", "planned-isolation-not-enabled", "The planned isolation execution path is not enabled yet."));
+  }
   if (!isNativeTuiContext(context) || typeof context?.ui?.confirm !== "function") {
     return denied("blocked", reason("policy", "native-tui-required", "Open the Linux microVM cutover in the interactive Pi TUI."));
   }
@@ -303,7 +310,11 @@ export function registerLinuxMicroVMCutoverInterface(pi, options = {}) {
   const execute = async (_id, params, _signal, _update, context) => {
     const value = params && Object.keys(params).length
       ? denied("denied", reason("input", "model-parameters-not-allowed", "Linux microVM cutover accepts no model parameters"))
-      : await runLinuxMicroVMCutover(context, { ...options, workMode: options.runtime?.workMode });
+      : await runLinuxMicroVMCutover(context, {
+          ...options,
+          workMode: options.runtime?.workMode,
+          isolationEnabled: options.runtime?.isolationEnabled,
+        });
     return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
   };
   pi.registerTool({ name: LINUX_MICROVM_CUTOVER_TOOL, label: "Verify Linux microVM",

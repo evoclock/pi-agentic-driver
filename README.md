@@ -1,4 +1,4 @@
-# pi-agentic-driver v0.2.0
+# pi-agentic-driver v0.2.1
 
 <p align="center">
   <img src="assets/Yamagane-origami.png" alt="pi-agentic-driver — Yamagane origami mark" width="140"/>
@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL%20v3-blue?style=flat" alt="License: AGPL v3"/></a>
-  <img src="https://img.shields.io/badge/version-0.2.0-blue?style=flat" alt="Version 0.2.0"/>
+  <img src="https://img.shields.io/badge/version-0.2.1-blue?style=flat" alt="Version 0.2.1"/>
   <img src="https://img.shields.io/badge/status-active%20development%20%26%20testing-orange?style=flat" alt="Status"/>
   <img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=flat&logo=javascript&logoColor=black" alt="JavaScript"/>
   <img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat&logo=typescript&logoColor=white" alt="TypeScript"/>
@@ -93,7 +93,7 @@ only, not a runtime dependency).
 *Extensions for bounded coordination between agents and boards.*
 
 <details>
-<summary><strong>herdr-communication — bounded role communication</strong> <em>(released, 0.2.0)</em></summary>
+<summary><strong>herdr-communication — bounded role communication</strong> <em>(released, 0.2.1)</em></summary>
 
 `agentic_herdr_communication` exchanges bounded, marked reports with
 configured Pi worker roles running under [Herdr](https://herdr.dev/)
@@ -123,7 +123,7 @@ configured Pi worker roles running under [Herdr](https://herdr.dev/)
 </details>
 
 <details>
-<summary><strong>herdr-lifecycle — role-labelled worker dispatch</strong> <em>(released, 0.2.0)</em></summary>
+<summary><strong>herdr-lifecycle — role-labelled worker dispatch</strong> <em>(released, 0.2.1)</em></summary>
 
 `agentic_herdr_spawn_worker` turns one natural-language request into Herdr's
 native documented lifecycle. Select `right`, `below`, or `tab`; give the
@@ -183,22 +183,16 @@ for the wider task/model-routing and remote-session workflow.
 **In development:**
 
 <details>
-<summary><strong>microVM-isolation proof</strong> <em>(released, 0.2.0)</em></summary>
+<summary><strong>microVM-isolation proof</strong> <em>(qualified, activation deferred)</em></summary>
 
-`agentic_linux_microvm_cutover` runs one native-confirmed transient
-QEMU/KVM proof on the fixed `linux-backend` alias. Select `ad-hoc` mode through
-the companion work-mode tool before invoking the proof. The released closure
-includes the Pi adapter, the hash-bound BusyBox fixture, and the checked
-receipt contract:
+`agentic_linux_microvm_cutover` is the reviewed native proof for a transient
+QEMU/KVM guest on `linux-backend`. It returns a non-authorizing receipt with
+the marker, hashes, isolation context, checked domain teardown, and ACL
+restoration. The live qualification returned `VERIFIED`.
 
-- disk, network, host shares, credentials, and GPU access are absent;
-- the fixture marker, script, and initramfs hashes are retained;
-- the domain is transient, destroyed, and checked absent with `virsh`;
-- temporary ACLs are restored and before/after hashes must be equal; and
-- the receipt remains non-authorizing and accepts no model parameters.
-
-The live qualification returned `VERIFIED` with the domain absent, exact ACL
-restoration, and no persistent runtime.
+Runtime isolation is reserved for the planned and automated execution paths;
+it is not part of ordinary ad-hoc work. Public activation remains deferred
+until those paths are enabled.
 
 </details>
 

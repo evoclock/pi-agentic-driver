@@ -33,3 +33,8 @@ This repository is the public package source for `@evoclock/pi-agentic-driver`.
   its fixed read-only `/workspace`, no-network `/bin/pwd` probe returned
   `/workspace` and `--rm` removal was verified. A native macOS Pi adapter is
   not claimed by this release yet.
+- Release 0.2.1 corrects the isolation mode boundary: microVM/container
+  runtime activation is reserved for planned or automated execution paths and
+  is not ordinary ad-hoc work. The shipped microVM closure remains qualified
+  but activation is deferred until the planned isolation execution path is
+  enabled; the adapter now fails closed when that activation flag is absent.
