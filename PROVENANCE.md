@@ -44,8 +44,12 @@ This repository is the public package source for `@evoclock/pi-agentic-driver`.
   guidance. It captures the last assistant response for review, preserves
   code/frontmatter by excluding fenced prose from analysis, and never edits a
   file automatically; normal confirmed Pi editing remains the write boundary.
-- Release 0.4.0 adds an explicit AI;DR file-apply action. A caller supplies the
+- Release 0.4.0 adds an explicit AI;DR file-apply action and an
+  ASD-STE100-informed advisory profile. The profile checks a bounded set of
+  controlled-English risks; it does not reproduce the licensed approved-word
+  dictionary or certify conformance. ASD-STE100 remains the external
+  controlled-language source; no licensed dictionary text is bundled. For file edits, a caller supplies the
   proposed replacement; AI;DR shows a bounded diff preview, requires native
-  confirmation, revalidates the file has not drifted, writes only the exact
-  confirmed replacement, and returns before/after hashes. Last-response and
-  supplied-text reviews remain read-only.
+  confirmation, revalidates that the file has not drifted, writes only the
+  exact confirmed replacement, and returns before/after hashes. Last-response
+  and supplied-text reviews remain read-only.
