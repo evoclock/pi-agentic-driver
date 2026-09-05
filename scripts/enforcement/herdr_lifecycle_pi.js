@@ -47,7 +47,7 @@ function resolvePiModelsPath() {
   }
   return join(homedir(), ".pi", "agent", "models.json");
 }
-const MODEL_ID_REGEXP = /^[a-z0-9][a-z0-9._-]{0,63}(\/[a-z0-9][a-z0-9._-]{0,127})?$/;
+const MODEL_ID_REGEXP = /^[a-z0-9][a-z0-9._-]{0,63}(?:\/[a-z0-9][a-z0-9._-]{0,127})*$/;
 // Closed response keys. Shapes beyond `.result.move_result.pane.pane_id` are
 // provisional from tagged-source evidence (Tranche 07) and fail closed on
 // anything extra.
