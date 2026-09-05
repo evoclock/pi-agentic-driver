@@ -31,7 +31,8 @@
     "config/lifecycle-mode-contract.v1.json",
     "extensions/linux-microvm.ts",
     "scripts/enforcement/linux_microvm_cutover_pi.js",
-    "scripts/enforcement/linux_microvm_remote_fixture.sh"
+    "scripts/enforcement/linux_microvm_remote_fixture.sh",
+    "PROVENANCE.md"
   ],
   "pi": {
     "extensions": [

@@ -186,7 +186,8 @@ for the wider task/model-routing and remote-session workflow.
 <summary><strong>microVM-isolation proof</strong> <em>(released, 0.2.0)</em></summary>
 
 `agentic_linux_microvm_cutover` runs one native-confirmed transient
-QEMU/KVM proof on the fixed `linux-backend` alias. The released closure
+QEMU/KVM proof on the fixed `linux-backend` alias. Select `ad-hoc` mode through
+the companion work-mode tool before invoking the proof. The released closure
 includes the Pi adapter, the hash-bound BusyBox fixture, and the checked
 receipt contract:
 

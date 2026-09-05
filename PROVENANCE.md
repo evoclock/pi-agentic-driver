@@ -14,3 +14,22 @@ This repository is the public package source for `@evoclock/pi-agentic-driver`.
 - No third-party code is bundled. Concept credit for the cognitive-
   complexity signals is recorded in the README and the extension
   description; no code was copied from credited sources.
+- Release 0.2.0 adds the existing reviewed Linux microVM closure. Native
+  qualification on 5 September 2026 used fixture
+  `microvm-220fc33307638cda1d9fd4c6` on `ubuntu-backend` and returned
+  `VERIFIED`. The retained probe marker hash is
+  `043d2846707b67eb4a1e4e577ff070346da881d713b91d0f905da96ea68b4844`;
+  the fixture script hash is
+  `05e9071c027a128c7cd2e20d126fbdd7915d093c9f91047d6fe67d26e01849b1`;
+  and the initramfs hash is
+  `721de3392f8d975cd0c1f46190ee266c7e0cb3c50e93c4af3bc5d411bc8ab523`.
+  The transient domain was checked absent, the initramfs entry was removed,
+  and ACL before/after hashes were equal
+  (`31de5110ae73bbece4c86ea49b0338c2f933ed372a409abc9d8108b3d0f61ebd`).
+  No disk, host share, credentials, GPU, network, authority, or persistent
+  runtime was created. The native macOS Container runtime was separately
+  qualified with local image digest
+  `sha256:0019eef4a42554b1ad94d7c42203a1c58f964714eac60e7d9559742ee3ad494f`;
+  its fixed read-only `/workspace`, no-network `/bin/pwd` probe returned
+  `/workspace` and `--rm` removal was verified. A native macOS Pi adapter is
+  not claimed by this release yet.
