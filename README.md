@@ -176,6 +176,27 @@ for the wider task/model-routing and remote-session workflow.
   blocked) without owning board authority: no admission, completion,
   reconciliation, or migration by the agent itself.
 
+## Writing clearly
+
+*AI;DR (AI Didn't Read) keeps technical writing clear without flattening the writer's voice.*
+
+<details>
+<summary><strong>AI;DR — writing review</strong> <em>(released, 0.3.0)</em></summary>
+
+`agentic_aidr` reviews the last assistant response, supplied prose, or a
+Markdown/documentation file. It checks four principles:
+
+- **Clarity:** strip each sentence to its cleanest useful parts.
+- **Simplicity:** remove clutter, pompous phrases, and needless jargon.
+- **Brevity:** say the same thing in fewer words when possible.
+- **Humanity:** keep an authentic human voice rather than machine-sounding prose.
+
+It also flags dense paragraphs, suggests bullets where they reduce working-memory
+load, and supports plain-language and analogy modes. AI;DR is read-only. File
+changes use the normal confirmed Pi edit flow.
+
+</details>
+
 ## Executing in isolation
 
 *Extensions that prove automation ran — and stopped — exactly as declared.*
