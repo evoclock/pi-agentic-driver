@@ -1,0 +1,263 @@
+{
+  "schema": "agentic-driver.lifecycle-mode-contract.v1",
+  "phase": "card-free-mode-core",
+  "requiredContext": ["repository", "workspace", "purpose"],
+  "restrictedContext": ["action"],
+  "allowedInputFields": ["mode", "repository", "workspace", "purpose", "action"],
+  "maxTextLength": 240,
+  "intentRouting": {
+    "schema": "agentic-driver.intent-routing.v1",
+    "defaultRoute": {
+      "tool": "agentic_work_mode",
+      "mode": "ad-hoc",
+      "covers": [
+        "ordinary-work",
+        "troubleshooting",
+        "context-recovery",
+        "architecture-discussion",
+        "buildout-orchestration"
+      ]
+    },
+    "promptedLifecycle": {
+      "tool": "agentic_prompted_lifecycle",
+      "covers": [
+        "card-create",
+        "card-admit",
+        "card-reconcile",
+        "planned-assignment",
+        "planned-dispatch",
+        "recovery-checkpoint-mutation"
+      ]
+    },
+    "observeOnly": {
+      "surface": "project-status",
+      "covers": ["read-only-project-status"],
+      "selectsMode": false,
+      "promptsOnAmbiguity": false
+    },
+    "git": {
+      "tool": "agentic_git_action",
+      "exclusiveFor": [
+        "stage",
+        "commit",
+        "push",
+        "remote-branch-cleanup"
+      ]
+    },
+    "ambiguous": {
+      "behavior": "ask-one-semantic-choice",
+      "choices": ["ordinary-ad-hoc-work", "planned-lifecycle"],
+      "neverDefaultsTo": "card-creation"
+    },
+    "invariants": {
+      "startupObserveOnly": true,
+      "headlessCannotFakeNativeDecisions": true,
+      "absentKanbanStateBlocksOrdinaryWork": false,
+      "modelSuppliedMechanicsAccepted": false,
+      "newAuthoritiesCreated": 0
+    }
+  },
+  "plannedTarget": {
+    "enabled": false,
+    "profiles": {
+      "planned-interactive": {
+        "humanSupervision": "native-tui",
+        "ordinaryWorkWithinEnvelope": true,
+        "assignedBranchCommitPush": "native-confirmation",
+        "protectedMergeAllowed": true,
+        "completionAllowed": "native-confirmation"
+      },
+      "planned-autonomous": {
+        "humanSupervision": "review-at-stop",
+        "ordinaryWorkWithinEnvelope": true,
+        "assignedBranchCommitPush": "pre-authorized-envelope",
+        "protectedMergeAllowed": false,
+        "completionAllowed": false,
+        "terminalExecutionState": "AWAITING_HUMAN_REVIEW"
+      }
+    },
+    "dispatchEligibility": {
+      "requiredState": "READY_FOR_DISPATCH",
+      "legacyDispatchable": false,
+      "requiresValidatedStages": true
+    },
+    "assignmentUi": {
+      "enabled": true,
+      "syntheticDemonstrationEnabled": true,
+      "sessionLocalRepresentation": true,
+      "autonomousActivation": false,
+      "trustedInteraction": "native-pi-tui",
+      "stalePreviewRevalidation": true
+    },
+    "roleLanes": [
+      "planner",
+      "implementer",
+      "reviewer",
+      "security-reviewer",
+      "evidence-reviewer",
+      "human-review"
+    ],
+    "claimContract": {
+      "implementationEnabled": false,
+      "atomicTaskStageRunCreation": true,
+      "maxActiveRunsPerStage": 1,
+      "identitySource": "trusted-host"
+    },
+    "runContract": {
+      "implementationEnabled": false,
+      "priorAttemptsImmutable": true,
+      "terminalOutcomes": [
+        "completed",
+        "review_requested",
+        "changes_requested",
+        "blocked",
+        "crashed",
+        "timed_out",
+        "reclaimed",
+        "spawn_failed",
+        "protocol_violation",
+        "gave_up"
+      ]
+    },
+    "handoffContract": {
+      "required": ["summary", "metadata"],
+      "metadataCategories": [
+        "changed_paths",
+        "checks",
+        "artifacts",
+        "decisions",
+        "limitations",
+        "findings",
+        "open_questions"
+      ]
+    },
+    "pulseContract": {
+      "fields": ["last_pulse_at", "pulse_interval", "pulse_timeout"],
+      "events": ["assignment_pulse", "pulse_missing", "pulse_expired"],
+      "grantsAuthority": false
+    },
+    "retryContract": {
+      "bounded": true,
+      "preserveAttempts": true,
+      "circuitBreakerOutcome": "gave_up"
+    },
+    "initialState": "DRAFT",
+    "states": [
+      "DRAFT",
+      "AWAITING_ASSIGNMENT_REVIEW",
+      "ACTIVE_INTERACTIVE",
+      "ACTIVE_AUTONOMOUS",
+      "AWAITING_HUMAN_REVIEW",
+      "REVISION_REQUESTED",
+      "AWAITING_MERGE_REVIEW",
+      "STOPPED",
+      "MERGED",
+      "AWAITING_COMPLETION_REVIEW",
+      "COMPLETED"
+    ],
+    "transitions": {
+      "DRAFT": ["AWAITING_ASSIGNMENT_REVIEW"],
+      "AWAITING_ASSIGNMENT_REVIEW": ["ACTIVE_INTERACTIVE", "ACTIVE_AUTONOMOUS", "STOPPED"],
+      "ACTIVE_INTERACTIVE": ["AWAITING_MERGE_REVIEW", "STOPPED"],
+      "ACTIVE_AUTONOMOUS": ["AWAITING_HUMAN_REVIEW", "STOPPED"],
+      "AWAITING_HUMAN_REVIEW": ["REVISION_REQUESTED", "AWAITING_MERGE_REVIEW", "STOPPED"],
+      "REVISION_REQUESTED": ["ACTIVE_INTERACTIVE", "ACTIVE_AUTONOMOUS", "STOPPED"],
+      "AWAITING_MERGE_REVIEW": ["MERGED", "REVISION_REQUESTED", "STOPPED"],
+      "MERGED": ["AWAITING_COMPLETION_REVIEW"],
+      "AWAITING_COMPLETION_REVIEW": ["COMPLETED", "REVISION_REQUESTED", "STOPPED"],
+      "STOPPED": [],
+      "COMPLETED": []
+    }
+  },
+  "forbiddenInputFields": [
+    "cardId",
+    "parentId",
+    "ticketId",
+    "leaseId",
+    "workOrderId",
+    "sessionId",
+    "machineId",
+    "hash",
+    "sha256",
+    "approval",
+    "approvalRef",
+    "approvalHash",
+    "timestamp",
+    "nonce",
+    "command",
+    "route",
+    "signature"
+  ],
+  "modes": {
+    "ad-hoc": {
+      "status": "allowed",
+      "decision": "allow",
+      "humanBoundary": "none",
+      "ordinaryWorkAllowed": true,
+      "executionAllowed": false,
+      "canonicalMutation": false,
+      "boardMutation": false,
+      "checkpointMutation": false,
+      "leaseIssued": false,
+      "workOrderCreated": false,
+      "runtimeActivated": false,
+      "nextAction": "Ordinary read, edit, and test work may proceed inside the named workspace."
+    },
+    "planned": {
+      "status": "plan-ready",
+      "decision": "review",
+      "humanBoundary": "semantic-review",
+      "ordinaryWorkAllowed": false,
+      "executionAllowed": false,
+      "canonicalMutation": false,
+      "boardMutation": false,
+      "checkpointMutation": false,
+      "leaseIssued": false,
+      "workOrderCreated": false,
+      "runtimeActivated": false,
+      "nextAction": "Review the temporary bounded plan. Planned-work and Kanban integration are deferred until the mode matrix passes."
+    },
+    "planned-interactive": {
+      "status": "plan-ready",
+      "decision": "review",
+      "humanBoundary": "semantic-review",
+      "ordinaryWorkAllowed": false,
+      "executionAllowed": false,
+      "canonicalMutation": false,
+      "boardMutation": false,
+      "checkpointMutation": false,
+      "leaseIssued": false,
+      "workOrderCreated": false,
+      "runtimeActivated": false,
+      "nextAction": "Review the temporary bounded plan. Interactive execution requires the native assignment review; it is not enabled by this mode choice."
+    },
+    "planned-autonomous": {
+      "status": "plan-ready",
+      "decision": "review",
+      "humanBoundary": "semantic-review",
+      "ordinaryWorkAllowed": false,
+      "executionAllowed": false,
+      "canonicalMutation": false,
+      "boardMutation": false,
+      "checkpointMutation": false,
+      "leaseIssued": false,
+      "workOrderCreated": false,
+      "runtimeActivated": false,
+      "nextAction": "Review the temporary bounded plan. Autonomous dispatch is preview-only and remains disabled until separately enabled."
+    },
+    "restricted": {
+      "status": "awaiting-native-confirmation",
+      "decision": "confirm",
+      "humanBoundary": "native-confirmation",
+      "ordinaryWorkAllowed": false,
+      "executionAllowed": false,
+      "canonicalMutation": false,
+      "boardMutation": false,
+      "checkpointMutation": false,
+      "leaseIssued": false,
+      "workOrderCreated": false,
+      "runtimeActivated": false,
+      "nextAction": "Use the native harness confirmation for the exact semantic action. This contract creates no authority."
+    }
+  }
+}
