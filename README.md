@@ -43,7 +43,8 @@ ones are listed for transparency and are not yet packaged.
 
 *Extensions that review, route, and bound what an agent does.*
 
-### code-phage — advisory code review *(released, 0.1.1)*
+<details>
+<summary><strong>code-phage — advisory code review</strong> <em>(released, 0.1.1)</em></summary>
 
 `code_phage` like a bacteriophage but for your code, it reviews a proposed change against a stated goal before code is
 written or committed. Given a goal, candidate files, accepted requirements,
@@ -72,6 +73,8 @@ Concept credit: Matty Stratton, "Cognitive Complexity" (2024-09-20, concept
 only, no code copied); `flake8-cognitive-complexity` 0.1.0, MIT (concept
 only, not a runtime dependency).
 
+</details>
+
 **Under development in this theme:**
 
 - **work-mode routing** — an `ad-hoc` / `planned` / `restricted` contract
@@ -89,7 +92,8 @@ only, not a runtime dependency).
 
 *Extensions for bounded coordination between agents and boards.*
 
-### herdr-communication — bounded role communication *(released, 0.1.11)*
+<details>
+<summary><strong>herdr-communication — bounded role communication</strong> <em>(released, 0.1.11)</em></summary>
 
 `agentic_herdr_communication` exchanges bounded, marked reports with
 configured Pi worker roles running under [Herdr](https://herdr.dev/)
@@ -115,7 +119,11 @@ configured Pi worker roles running under [Herdr](https://herdr.dev/)
   is eligible; `list` observes every live agent in one call. Fan-out is
   sequential by design: one role per prompt, one complete exchange, no
   broadcast primitive.
-### herdr-lifecycle — role-labelled worker dispatch *(released, 0.1.11)*
+
+</details>
+
+<details>
+<summary><strong>herdr-lifecycle — role-labelled worker dispatch</strong> <em>(released, 0.1.11)</em></summary>
 
 `agentic_herdr_spawn_worker` turns one natural-language request into Herdr's
 native documented lifecycle. Select `right`, `below`, or `tab`; give the
@@ -143,6 +151,8 @@ individual tab:
 
 See [Dispatching a Multi-Model Workforce from Anywhere](https://evoclock.github.io/fieldnotes/articles/herdr-natural-language-agent-automation.html)
 for the wider task/model-routing and remote-session workflow.
+
+</details>
 
 **Under development in this theme:**
 
