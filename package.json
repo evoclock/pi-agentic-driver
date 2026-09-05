@@ -1,6 +1,6 @@
 {
   "name": "@evoclock/pi-agentic-driver",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Guardrail extensions for Agentic Driver: advisory review, bounded Herdr communication, and guarded worker lifecycle.",
   "type": "module",
   "license": "AGPL-3.0-or-later",
