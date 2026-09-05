@@ -1,4 +1,4 @@
-# pi-agentic-driver v0.1.12
+# pi-agentic-driver v0.2.0
 
 <p align="center">
   <img src="assets/Yamagane-origami.png" alt="pi-agentic-driver — Yamagane origami mark" width="140"/>
@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL%20v3-blue?style=flat" alt="License: AGPL v3"/></a>
-  <img src="https://img.shields.io/badge/version-0.1.12-blue?style=flat" alt="Version 0.1.12"/>
+  <img src="https://img.shields.io/badge/version-0.2.0-blue?style=flat" alt="Version 0.2.0"/>
   <img src="https://img.shields.io/badge/status-active%20development%20%26%20testing-orange?style=flat" alt="Status"/>
   <img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=flat&logo=javascript&logoColor=black" alt="JavaScript"/>
   <img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat&logo=typescript&logoColor=white" alt="TypeScript"/>
@@ -93,7 +93,7 @@ only, not a runtime dependency).
 *Extensions for bounded coordination between agents and boards.*
 
 <details>
-<summary><strong>herdr-communication — bounded role communication</strong> <em>(released, 0.1.12)</em></summary>
+<summary><strong>herdr-communication — bounded role communication</strong> <em>(released, 0.2.0)</em></summary>
 
 `agentic_herdr_communication` exchanges bounded, marked reports with
 configured Pi worker roles running under [Herdr](https://herdr.dev/)
@@ -123,7 +123,7 @@ configured Pi worker roles running under [Herdr](https://herdr.dev/)
 </details>
 
 <details>
-<summary><strong>herdr-lifecycle — role-labelled worker dispatch</strong> <em>(released, 0.1.12)</em></summary>
+<summary><strong>herdr-lifecycle — role-labelled worker dispatch</strong> <em>(released, 0.2.0)</em></summary>
 
 `agentic_herdr_spawn_worker` turns one natural-language request into Herdr's
 native documented lifecycle. Select `right`, `below`, or `tab`; give the
@@ -182,20 +182,31 @@ for the wider task/model-routing and remote-session workflow.
 
 **In development:**
 
-- **container-isolation proof** — a parameter-free, natively confirmed
-  probe that a pinned local Podman image runs with `--network none`, a
-  read-only workspace mount, no privilege/PID/socket surface, mechanically
-  enforced no-pull (`--pull=never`), and verified container teardown.
-  Planning, argv construction, and the receipt come from one audited
-  planner; the adapter is orchestration only.
-- **microVM-isolation proof** — a transient, diskless, network-less
-  QEMU/KVM guest on a fixed remote backend: BusyBox initramfs built
-  per-run and hash-bound, `virsh create` with destroy-on-exit, exact ACL
-  restoration on every success and failure path, and a checked
-  domain-absence proof. Evidence is one structured receipt, never
-  self-attested strings.
+<details>
+<summary><strong>microVM-isolation proof</strong> <em>(released, 0.2.0)</em></summary>
+
+`agentic_linux_microvm_cutover` runs one native-confirmed transient
+QEMU/KVM proof on the fixed `linux-backend` alias. The released closure
+includes the Pi adapter, the hash-bound BusyBox fixture, and the checked
+receipt contract:
+
+- disk, network, host shares, credentials, and GPU access are absent;
+- the fixture marker, script, and initramfs hashes are retained;
+- the domain is transient, destroyed, and checked absent with `virsh`;
+- temporary ACLs are restored and before/after hashes must be equal; and
+- the receipt remains non-authorizing and accepts no model parameters.
+
+The live qualification returned `VERIFIED` with the domain absent, exact ACL
+restoration, and no persistent runtime.
+
+</details>
 
 **Under development in this theme:**
+
+- **native macOS container proof** — the native Apple Container runtime has
+  passed a fixed local `/bin/pwd` isolation qualification with a read-only
+  repository mount, no network, and automatic removal. The native Pi adapter
+  remains under development and is not yet part of the released package.
 
 - **attended-authority guard** — the safety net between an agent and your
   shell: when a model tries to delete, overwrite, or push, the guard
