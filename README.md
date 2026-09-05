@@ -1,4 +1,4 @@
-# pi-agentic-driver v0.1.11
+# pi-agentic-driver v0.1.12
 
 <p align="center">
   <img src="assets/Yamagane-origami.png" alt="pi-agentic-driver — Yamagane origami mark" width="140"/>
@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL%20v3-blue?style=flat" alt="License: AGPL v3"/></a>
-  <img src="https://img.shields.io/badge/version-0.1.11-blue?style=flat" alt="Version 0.1.11"/>
+  <img src="https://img.shields.io/badge/version-0.1.12-blue?style=flat" alt="Version 0.1.12"/>
   <img src="https://img.shields.io/badge/status-active%20development%20%26%20testing-orange?style=flat" alt="Status"/>
   <img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=flat&logo=javascript&logoColor=black" alt="JavaScript"/>
   <img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat&logo=typescript&logoColor=white" alt="TypeScript"/>
@@ -93,7 +93,7 @@ only, not a runtime dependency).
 *Extensions for bounded coordination between agents and boards.*
 
 <details>
-<summary><strong>herdr-communication — bounded role communication</strong> <em>(released, 0.1.11)</em></summary>
+<summary><strong>herdr-communication — bounded role communication</strong> <em>(released, 0.1.12)</em></summary>
 
 `agentic_herdr_communication` exchanges bounded, marked reports with
 configured Pi worker roles running under [Herdr](https://herdr.dev/)
@@ -123,7 +123,7 @@ configured Pi worker roles running under [Herdr](https://herdr.dev/)
 </details>
 
 <details>
-<summary><strong>herdr-lifecycle — role-labelled worker dispatch</strong> <em>(released, 0.1.11)</em></summary>
+<summary><strong>herdr-lifecycle — role-labelled worker dispatch</strong> <em>(released, 0.1.12)</em></summary>
 
 `agentic_herdr_spawn_worker` turns one natural-language request into Herdr's
 native documented lifecycle. Select `right`, `below`, or `tab`; give the
