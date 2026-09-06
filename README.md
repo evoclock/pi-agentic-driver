@@ -338,6 +338,29 @@ pi install git:github.com/evoclock/pi-agentic-driver@v0.4.3
 
 Released extensions load standalone; neither requires the other.
 
+### Choose which extensions load
+
+A normal install loads all five extensions by default. You can load only the
+extensions you want by using the object form in your Pi settings:
+
+```json
+{
+  "packages": [
+    {
+      "source": "npm:@evoclock/pi-agentic-driver@0.4.3",
+      "extensions": [
+        "extensions/aidr.ts",
+        "extensions/code-phage.js"
+      ]
+    }
+  ]
+}
+```
+
+The package also includes `herdr-communication.ts`, `herdr-lifecycle.ts`, and
+`linux-microvm.ts`. Use `pi config` to enable or disable individual resources
+from an installed package. You are not required to use every extension.
+
 ## License
 
 AGPL-3.0-or-later with author-attribution additional terms (Section 7(b));
