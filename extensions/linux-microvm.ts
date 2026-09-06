@@ -1,10 +1,14 @@
-import { registerLinuxMicroVMCutoverInterface } from "../scripts/enforcement/linux_microvm_cutover_pi.js";
+// SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+import { registerLinuxMicroVMCutoverInterface, registerIsolationSwitchCommands, createIsolationSwitch } from "../scripts/enforcement/linux_microvm_cutover_pi.js";
 
 export default function registerLinuxMicroVMCutover(pi: any) {
-  // Registration is limited to the activation-deferred cutover interface:
-  // native confirmation, trusted facts, and fixed boundaries are preserved by
-  // the interface itself; the transient runtime is local to this
-  // registration and only carries adapter state it observes at cutover time.
-  const runtime: { workMode?: string; workContext?: unknown; isolationEnabled?: boolean } = {};
-  return registerLinuxMicroVMCutoverInterface(pi, { runtime });
+  // Registration is limited to the activation-deferred cutover interface and
+  // the session-scoped isolation switch commands. The legacy work-mode
+  // lifecycle is not registered: agentic_work_mode is not exposed.
+  // The isolation switch state is created per registration, so each fresh
+  // extension registration (session) starts disabled.
+  const isolationSwitch = registerIsolationSwitchCommands(pi, { isolationSwitch: createIsolationSwitch() });
+  registerLinuxMicroVMCutoverInterface(pi, { isolationSwitch });
 }
