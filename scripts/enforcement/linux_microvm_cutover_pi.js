@@ -16,10 +16,18 @@ const REGISTRATIONS = new WeakSet();
 const SWITCH_REGISTRATIONS = new WeakSet();
 const HASH = /^[0-9a-f]{64}$/;
 const MAX_DETAIL = 512;
-// Session-scoped isolation switch. Held in module memory only: never read
-// from or written to settings, and never settable by the model (no tool
+// Isolation switch state is per-registration: each registerIsolationSwitchCommands
+// call creates a fresh flag in the registration closure, so a new extension
+// registration (session) starts disabled. It is held in memory only, never
+// read from or written to settings, and never settable by the model (no tool
 // exposes it; only the native TUI enable/disable commands mutate it).
-const ISOLATION_ENABLED = { value: false, get() { return this.value === true; }, set(v) { this.value = v === true; } };
+export function createIsolationSwitch() {
+  let enabled = false;
+  return {
+    get() { return enabled === true; },
+    set(value) { enabled = value === true; },
+  };
+}
 let inFlight = false;
 
 function boundedText(value, fallback = "unknown failure") {
@@ -242,7 +250,7 @@ function normalizedForwardedStderr(result, fallbackPhase, fallbackCode, fallback
 export async function runLinuxMicroVMCutover(context, options = {}) {
   // Session-scoped user switch: only the explicit enable command can set this
   // flag in memory; it never persists to settings and the model cannot set it.
-  if (ISOLATION_ENABLED.get() !== true) {
+  if (options.isolationSwitch?.get() !== true) {
     return denied("blocked", reason("policy", "isolation-not-enabled",
       "Isolation activation is not enabled in this session. Run the agentic-isolation-enable command in the Pi TUI."));
   }
@@ -334,30 +342,32 @@ export function registerLinuxMicroVMCutoverInterface(pi, options = {}) {
 const ISOLATION_ENABLE_COMMAND = "agentic-isolation-enable";
 const ISOLATION_DISABLE_COMMAND = "agentic-isolation-disable";
 export const ISOLATION_COMMANDS = { enable: ISOLATION_ENABLE_COMMAND, disable: ISOLATION_DISABLE_COMMAND };
-export const isolationSwitch = {
-  get enabled() { return ISOLATION_ENABLED.get() === true; },
-};
 
-export function registerIsolationSwitchCommands(pi) {
+export function registerIsolationSwitchCommands(pi, options = {}) {
   if (typeof pi?.registerCommand !== "function" || SWITCH_REGISTRATIONS.has(pi)) return;
   SWITCH_REGISTRATIONS.add(pi);
-  const switchNotice = () => ISOLATION_ENABLED.get() === true
+  // Fresh, registration-scoped switch state: a new registration starts disabled.
+  const isolationSwitch = options.isolationSwitch ?? createIsolationSwitch();
+  const switchNotice = () => isolationSwitch.get()
     ? "Isolation activation is ENABLED for this session only. It does not persist to settings and resets when the session ends."
     : "Isolation activation is DISABLED. No microVM proof can run in this session until it is enabled.";
   const switchResult = (ok, status, code, detail) => ({
     schema: LINUX_MICROVM_CUTOVER_SCHEMA, ok, status,
     reason: ok ? undefined : reason("policy", code, detail),
-    isolationEnabled: ISOLATION_ENABLED.get() === true,
+    isolationEnabled: isolationSwitch.get(),
     persisted: false,
   });
+  const rejectArguments = () => switchResult(false, "denied", "command-arguments-not-allowed",
+    "The isolation switch commands accept no command arguments.");
   pi.registerCommand(ISOLATION_ENABLE_COMMAND, {
     description: "Enable the Linux microVM isolation switch for this session (native confirmation required)",
-    handler: async (_args, context) => {
+    handler: async (args, context) => {
+      if (commandArgumentsPresent(args)) return rejectArguments();
       if (!isNativeTuiContext(context) || typeof context?.ui?.confirm !== "function") {
         return switchResult(false, "blocked", "native-tui-required",
           "Open the interactive Pi TUI to enable isolation; headless sessions cannot enable it.");
       }
-      if (ISOLATION_ENABLED.get() === true) {
+      if (isolationSwitch.get()) {
         return switchResult(true, "ALREADY_ENABLED", "", "");
       }
       let confirmed;
@@ -374,13 +384,14 @@ export function registerIsolationSwitchCommands(pi) {
       if (confirmed !== true) {
         return switchResult(false, "stopped", "not-granted", "Isolation activation was not enabled; native confirmation was not granted.");
       }
-      ISOLATION_ENABLED.set(true);
+      isolationSwitch.set(true);
       return switchResult(true, "ENABLED", "", "");
     },
   });
   pi.registerCommand(ISOLATION_DISABLE_COMMAND, {
     description: "Disable the Linux microVM isolation switch for this session (native confirmation required)",
-    handler: async (_args, context) => {
+    handler: async (args, context) => {
+      if (commandArgumentsPresent(args)) return rejectArguments();
       if (!isNativeTuiContext(context) || typeof context?.ui?.confirm !== "function") {
         return switchResult(false, "blocked", "native-tui-required",
           "Open the interactive Pi TUI to disable isolation; headless sessions cannot change the switch.");
@@ -397,9 +408,10 @@ export function registerIsolationSwitchCommands(pi) {
       if (confirmed !== true) {
         return switchResult(false, "stopped", "not-granted", "Isolation activation remains enabled; native confirmation was not granted.");
       }
-      ISOLATION_ENABLED.set(false);
+      isolationSwitch.set(false);
       return switchResult(true, "DISABLED", "", "");
     },
   });
+  return isolationSwitch;
 }
 export default registerLinuxMicroVMCutoverInterface;

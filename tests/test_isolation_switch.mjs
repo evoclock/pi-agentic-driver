@@ -9,7 +9,7 @@ import {
   registerIsolationSwitchCommands,
   runLinuxMicroVMCutover,
   LINUX_MICROVM_CUTOVER_SCHEMA,
-  isolationSwitch,
+  createIsolationSwitch,
 } from "../scripts/enforcement/linux_microvm_cutover_pi.js";
 import registerLinuxMicroVMCutover from "../extensions/linux-microvm.ts";
 
@@ -50,7 +50,7 @@ function stubReceipt(fixtureId, scriptHash) {
 // Runs the cutover with injected facts observation and a structured receipt
 // stub derived from the real invocation arguments; no ssh, no network, no
 // real remote execution.
-function stubEnvironment({ confirm = async () => true, factsSequence } = {}) {
+function stubEnvironment({ confirm = async () => true, factsSequence, isolationSwitch } = {}) {
   let observed = 0;
   let lastFixtureId;
   const observe = (_execute, fixtureId) => {
@@ -68,7 +68,7 @@ function stubEnvironment({ confirm = async () => true, factsSequence } = {}) {
     return { code: 0, stdout: "", stderr: "", error: undefined };
   };
   const context = { mode: "tui", hasUI: true, ui: { confirm } };
-  return { context, options: { execute, observeFacts: observe }, lastFixtureId: () => lastFixtureId };
+  return { context, options: { execute, observeFacts: observe, isolationSwitch }, lastFixtureId: () => lastFixtureId };
 }
 
 function harness() {
@@ -77,17 +77,19 @@ function harness() {
     registerTool: () => {},
     registerCommand: (name, def) => { commands[name] = def; },
   };
-  registerLinuxMicroVMCutoverInterface(pi);
-  registerIsolationSwitchCommands(pi);
-  const run = async (name, context) => commands[name].handler("", context);
-  return { commands, run };
+  const switchState = createIsolationSwitch();
+  registerIsolationSwitchCommands(pi, { isolationSwitch: switchState });
+  registerLinuxMicroVMCutoverInterface(pi, { isolationSwitch: switchState });
+  const run = async (name, context, args = "") => commands[name].handler(args, context);
+  return { commands, run, switchState };
 }
 
 const HEADLESS = { mode: "print" };
 const tuiContext = () => ({ mode: "tui", hasUI: true, ui: { confirm: async () => true } });
 
 test("switch starts disabled and cutover fails closed before any confirmation", async () => {
-  assert.equal(isolationSwitch.enabled, false);
+  const { run, switchState } = harness();
+  assert.equal(switchState.get(), false);
   const { context, options } = stubEnvironment();
   const value = await runLinuxMicroVMCutover(context, options);
   assert.equal(value.ok, false);
@@ -96,54 +98,57 @@ test("switch starts disabled and cutover fails closed before any confirmation", 
 });
 
 test("headless enable is denied and never flips the switch", async () => {
-  const { run } = harness();
+  const { run, switchState } = harness();
   const value = await run("agentic-isolation-enable", HEADLESS);
   assert.equal(value.ok, false);
   assert.equal(value.reason.code, "native-tui-required");
   assert.equal(value.isolationEnabled, false);
   assert.equal(value.persisted, false);
-  assert.equal(isolationSwitch.enabled, false);
+  assert.equal(switchState.get(), false);
 });
 
 test("declined native confirmation leaves the switch disabled", async () => {
-  const { run } = harness();
+  const { run, switchState } = harness();
   const value = await run("agentic-isolation-enable", { mode: "tui", hasUI: true, ui: { confirm: async () => false } });
   assert.equal(value.ok, false);
   assert.equal(value.status, "stopped");
   assert.equal(value.reason.code, "not-granted");
-  assert.equal(isolationSwitch.enabled, false);
+  assert.equal(switchState.get(), false);
 });
 
 test("enable with native confirmation sets the session-scoped flag only", async () => {
-  const { run } = harness();
+  const { run, switchState } = harness();
   const value = await run("agentic-isolation-enable", tuiContext());
   assert.equal(value.ok, true);
   assert.equal(value.status, "ENABLED");
   assert.equal(value.persisted, false);
-  assert.equal(isolationSwitch.enabled, true);
+  assert.equal(switchState.get(), true);
   const again = await run("agentic-isolation-enable", tuiContext());
   assert.equal(again.status, "ALREADY_ENABLED");
 });
 
 test("run requires the enabled switch, native TUI, and confirmation; receipt validates", async () => {
-  const { run } = harness();
+  const { run, switchState } = harness();
   await run("agentic-isolation-enable", tuiContext());
-  const headless = await runLinuxMicroVMCutover(HEADLESS, stubEnvironment().options);
+  const headless = await runLinuxMicroVMCutover(HEADLESS, stubEnvironment({ isolationSwitch: switchState }).options);
   assert.equal(headless.ok, false);
   assert.equal(headless.reason.code, "native-tui-required");
+  const disabledAgain = await run("agentic-isolation-disable", tuiContext());
+  assert.equal(disabledAgain.ok, true);
+  await run("agentic-isolation-enable", tuiContext());
 
-  const declined = stubEnvironment({ confirm: async () => false });
+  const declined = stubEnvironment({ confirm: async () => false, isolationSwitch: switchState });
   const declinedValue = await runLinuxMicroVMCutover(declined.context, declined.options);
   assert.equal(declinedValue.ok, false);
   assert.equal(declinedValue.status, "stopped");
   assert.equal(declinedValue.reason.code, "not-granted");
 
-  const changed = stubEnvironment({ factsSequence: [stubFacts, (id) => ({ ...stubFacts(id), kernel: "6.9.0-generic" })] });
+  const changed = stubEnvironment({ factsSequence: [stubFacts, (id) => ({ ...stubFacts(id), kernel: "6.9.0-generic" })], isolationSwitch: switchState });
   const changedValue = await runLinuxMicroVMCutover(changed.context, changed.options);
   assert.equal(changedValue.ok, false);
   assert.equal(changedValue.reason.code, "facts-changed");
 
-  const happy = stubEnvironment();
+  const happy = stubEnvironment({ isolationSwitch: switchState });
   const receipt = await runLinuxMicroVMCutover(happy.context, happy.options);
   assert.equal(receipt.ok, true);
   assert.equal(receipt.status, "VERIFIED");
@@ -154,19 +159,19 @@ test("run requires the enabled switch, native TUI, and confirmation; receipt val
 });
 
 test("disable with native confirmation clears the switch and cutover fails closed again", async () => {
-  const { run } = harness();
+  const { run, switchState } = harness();
   await run("agentic-isolation-enable", tuiContext());
-  assert.equal(isolationSwitch.enabled, true);
+  assert.equal(switchState.get(), true);
   const headless = await run("agentic-isolation-disable", HEADLESS);
   assert.equal(headless.ok, false);
   assert.equal(headless.reason.code, "native-tui-required");
-  assert.equal(isolationSwitch.enabled, true);
+  assert.equal(switchState.get(), true);
   const value = await run("agentic-isolation-disable", tuiContext());
   assert.equal(value.ok, true);
   assert.equal(value.status, "DISABLED");
   assert.equal(value.persisted, false);
-  assert.equal(isolationSwitch.enabled, false);
-  const { context, options } = stubEnvironment();
+  assert.equal(switchState.get(), false);
+  const { context, options } = stubEnvironment({ isolationSwitch: switchState });
   const blocked = await runLinuxMicroVMCutover(context, options);
   assert.equal(blocked.reason.code, "isolation-not-enabled");
 });
@@ -181,4 +186,42 @@ test("public registration ships the switch commands and never agentic_work_mode"
   assert.equal(commands["agentic-isolation-enable"], true);
   assert.equal(commands["agentic-isolation-disable"], true);
   assert.equal(Object.keys(commands).includes("agentic-work-mode"), false);
+});
+
+test("isolation switch commands reject non-empty arguments", async () => {
+  const { run, switchState } = harness();
+  for (const args of ["extra", "  spaced  ", ["a"], { key: "v" }]) {
+    const enabled = await run("agentic-isolation-enable", tuiContext(), args);
+    assert.equal(enabled.ok, false, `enable args: ${JSON.stringify(args)}`);
+    assert.equal(enabled.status, "denied");
+    assert.equal(enabled.reason.code, "command-arguments-not-allowed");
+    assert.equal(switchState.get(), false);
+    const disabled = await run("agentic-isolation-disable", tuiContext(), args);
+    assert.equal(disabled.ok, false, `disable args: ${JSON.stringify(args)}`);
+    assert.equal(disabled.status, "denied");
+    assert.equal(disabled.reason.code, "command-arguments-not-allowed");
+  }
+  // Empty arguments stay accepted (headless still blocked, but not by arguments).
+  const empty = await run("agentic-isolation-enable", HEADLESS, "");
+  assert.equal(empty.reason.code, "native-tui-required");
+});
+
+test("a second registration in the same process starts with a fresh disabled switch", async () => {
+  const first = harness();
+  await first.run("agentic-isolation-enable", tuiContext());
+  assert.equal(first.switchState.get(), true);
+
+  const second = harness();
+  assert.equal(second.switchState.get(), false, "fresh registration must start disabled");
+  const blocked = await runLinuxMicroVMCutover(stubEnvironment({ isolationSwitch: second.switchState }).context, stubEnvironment({ isolationSwitch: second.switchState }).options);
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.reason.code, "isolation-not-enabled");
+
+  // Enabling the second instance must not affect the first.
+  await second.run("agentic-isolation-enable", tuiContext());
+  assert.equal(second.switchState.get(), true);
+  assert.equal(first.switchState.get(), true);
+  await first.run("agentic-isolation-disable", tuiContext());
+  assert.equal(first.switchState.get(), false);
+  assert.equal(second.switchState.get(), true, "first-instance disable must not leak into the second");
 });
