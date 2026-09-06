@@ -53,3 +53,8 @@ This repository is the public package source for `@evoclock/pi-agentic-driver`.
   confirmation, revalidates that the file has not drifted, writes only the
   exact confirmed replacement, and returns before/after hashes. Last-response
   and supplied-text reviews remain read-only.
+- Release 0.4.1 hardens Herdr communication for independent concurrent
+  exchanges and repeated terminal history. The transport keeps fixed argv,
+  `shell: false`, trusted repository and role checks, exact-once exchange
+  semantics, bounded process diagnostics, non-authorizing receipts, and
+  strict role-specific report extraction around echoed prompt markers.

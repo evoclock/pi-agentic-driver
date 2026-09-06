@@ -1,4 +1,4 @@
-# pi-agentic-driver v0.4.0
+# pi-agentic-driver v0.4.1
 
 <p align="center">
   <img src="assets/Yamagane-origami.png" alt="pi-agentic-driver — Yamagane origami mark" width="140"/>
@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL%20v3-blue?style=flat" alt="License: AGPL v3"/></a>
-  <img src="https://img.shields.io/badge/version-0.4.0-blue?style=flat" alt="Version 0.4.0"/>
+  <img src="https://img.shields.io/badge/version-0.4.1-blue?style=flat" alt="Version 0.4.1"/>
   <img src="https://img.shields.io/badge/status-active%20development%20%26%20testing-orange?style=flat" alt="Status"/>
   <img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=flat&logo=javascript&logoColor=black" alt="JavaScript"/>
   <img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat&logo=typescript&logoColor=white" alt="TypeScript"/>
