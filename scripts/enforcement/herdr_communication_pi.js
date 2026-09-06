@@ -36,9 +36,11 @@ const WORKER_REPOSITORY_SCHEMA = "agentic-driver.herdr-worker-repositories.v1";
 const WORKER_REPOSITORY_FIELDS = new Set(["schema", "repositories"]);
 const MAX_PROMPT_BYTES = 32 * 1024;
 const MAX_PROCESS_OUTPUT_BYTES = 128 * 1024;
+const MAX_FAILURE_DIAGNOSTIC_BYTES = 4 * 1024;
 const MAX_REPORT_BYTES = 32 * 1024;
 const MAX_IDENTITY_FIELD_BYTES = 4 * 1024;
 const MAX_MARKER_HORIZONTAL_WHITESPACE = 128;
+const MAX_PROMPT_CONTRACT_ECHO_BYTES = 4 * 1024;
 const MAX_READ_LINES = 400;
 const MAX_WAIT_TIMEOUT_MS = 300_000;
 const MAX_IMPLEMENTER_PROMPT_TIMEOUT_MS = 120_000;
@@ -54,6 +56,7 @@ export const HERDR_REPORT_MARKERS = Object.freeze({
   }),
 });
 const REPORT_MARKERS = HERDR_REPORT_MARKERS;
+const REPORT_CONTRACT_LINE = "Return exactly one complete role report, and no additional report, bounded by these literal markers:";
 const AGENT_STATUSES = new Set(["idle", "working", "blocked", "done", "unknown"]);
 const WAIT_STATUSES = new Set(["idle", "done", "blocked"]);
 const PROMPTABLE_STATUSES = new Set(["idle"]);
@@ -127,6 +130,7 @@ function errorResult(operation, error) {
     operation,
     code: known.code,
     reason: known.message,
+    ...(known.diagnostic ? { diagnostic: known.diagnostic } : {}),
     nonAuthorizing: true,
     authorityCreated: false,
   };
@@ -346,7 +350,7 @@ function requireRole(value) {
 }
 
 function isReviewerRole(role) {
-  return role === "reviewer" || role.startsWith("reviewer-");
+  return typeof role === "string" && role.split("-").includes("reviewer");
 }
 
 function reportMarkersForRole(role) {
@@ -468,7 +472,7 @@ function promptWithReportRequirement(role, prompt) {
     ...(isReviewerRole(role) ? ["Remain strictly read-only; do not modify files, state, or Git."] : [
       "MANDATORY ATOMIC EXECUTION CONTRACT: execute one acceptance-checked step only; do not continue to a second file, test group, or follow-up; stop and report incomplete work as CHANGES_REQUIRED before the two-minute boundary.",
     ]),
-    "Return exactly one complete role report, and no additional report, bounded by these literal markers:",
+    REPORT_CONTRACT_LINE,
     marker.open,
     marker.close,
   ].join("\n");
@@ -479,23 +483,45 @@ function promptWithReportRequirement(role, prompt) {
   return value;
 }
 
-function processFailure(code, status = "blocked") {
+function boundedFailureDiagnostic(value) {
+  if (typeof value !== "string") return undefined;
+  const text = value.replaceAll("\u0000", "").trim();
+  if (!text) return undefined;
+  if (Buffer.byteLength(text, "utf8") <= MAX_FAILURE_DIAGNOSTIC_BYTES) return text;
+  const suffix = "…";
+  const prefix = Buffer.from(text, "utf8")
+    .subarray(0, MAX_FAILURE_DIAGNOSTIC_BYTES - Buffer.byteLength(suffix, "utf8"))
+    .toString("utf8");
+  return `${prefix}${suffix}`;
+}
+
+function processFailure(code, status = "blocked", diagnostic) {
+  let failure;
   if (code === "timeout" || code === "timed_out" || code === "process_timeout") {
-    return communicationError("process_timeout", "Herdr communication timed out", "timeout");
+    failure = communicationError("process_timeout", "Herdr communication timed out", "timeout");
+  } else if (code === "agent_name_not_found" || code === "agent_not_running" || code === "target_not_found") {
+    failure = communicationError("stale_role_mapping", "the configured role is no longer mapped to the expected live agent");
+  } else if (code === "agent_prompt_stalled") {
+    failure = communicationError("prompt_stalled", "Herdr did not observe the prompted role advance");
+  } else if (code === "aborted") {
+    failure = communicationError("aborted", "Herdr communication was aborted");
+  } else {
+    failure = communicationError("herdr_process_failed", "Herdr returned a process failure", status);
   }
-  if (code === "agent_name_not_found" || code === "agent_not_running" || code === "target_not_found") {
-    return communicationError("stale_role_mapping", "the configured role is no longer mapped to the expected live agent");
-  }
-  if (code === "agent_prompt_stalled") {
-    return communicationError("prompt_stalled", "Herdr did not observe the prompted role advance");
-  }
-  if (code === "aborted") return communicationError("aborted", "Herdr communication was aborted");
-  return communicationError("herdr_process_failed", "Herdr returned a process failure", status);
+  if (diagnostic) failure.diagnostic = boundedFailureDiagnostic(diagnostic);
+  return failure;
+}
+
+function externalErrorDetails(value) {
+  if (!isPlainObject(value) || !isPlainObject(value.error)) return {};
+  return {
+    code: typeof value.error.code === "string" ? value.error.code : undefined,
+    message: typeof value.error.message === "string" ? value.error.message : undefined,
+  };
 }
 
 function extractExternalErrorCode(value) {
-  if (!isPlainObject(value) || !isPlainObject(value.error)) return undefined;
-  return typeof value.error.code === "string" ? value.error.code : undefined;
+  return externalErrorDetails(value).code;
 }
 
 function normalizeFakeProcess(value) {
@@ -629,9 +655,12 @@ async function invokeHerdr(action, params, context, options = {}, signal) {
     ? params.timeoutMs
     : COMMAND_TIMEOUT_MS;
   const processTimeout = requestedTimeout;
+  // Give each concurrent exchange an immutable environment snapshot. The
+  // fixed argv and shell boundary remain per-call and cannot share mutable
+  // process metadata through the injected or real process seam.
   const spawnOptions = {
     cwd: expectedCwd,
-    env: process.env,
+    env: Object.freeze({ ...process.env }),
     shell: false,
   };
   const injected = options.runProcess;
@@ -669,23 +698,28 @@ async function invokeHerdr(action, params, context, options = {}, signal) {
   }
   if (normalized.code !== 0) {
     // A failed raw-text read is still a process failure; do not reinterpret
-    // its terminal text as a JSON error envelope.
-    if (action === "read") throw processFailure(undefined, "blocked");
-    let externalCode;
+    // its terminal text as a JSON error envelope. Preserve bounded stderr so
+    // parallel failures remain diagnosable without becoming authority.
+    if (action === "read") throw processFailure(undefined, "blocked", normalized.stderr);
+    let external;
     try {
       const parsed = JSON.parse(normalized.stdout || "{}");
-      externalCode = extractExternalErrorCode(parsed);
+      external = externalErrorDetails(parsed);
     } catch {
-      externalCode = undefined;
+      external = {};
     }
     // Herdr sometimes reports a stale role mapping only on stderr for a
     // non-zero exit with no JSON error envelope; map it only when the error
     // is identifiable (Tranche 04 mapping table).
-    if (externalCode === undefined
+    if (external.code === undefined
         && /agent_name_not_found|agent_not_running|target_not_found/.test(normalized.stderr)) {
-      externalCode = "agent_name_not_found";
+      external.code = "agent_name_not_found";
     }
-    throw processFailure(externalCode, "blocked");
+    throw processFailure(
+      external.code,
+      "blocked",
+      normalized.stderr || external.message,
+    );
   }
   // Herdr's agent read command is the one intentional raw-text exception:
   // its stdout is terminal text, not a response envelope. Every other
@@ -958,9 +992,56 @@ function allMarkerOccurrences(text, standaloneOnly = false, additionalPair = und
   return occurrences.sort((left, right) => left.index - right.index || left.end - right.end);
 }
 
+function promptContractRange(text, marker, occurrenceIndex) {
+  const anchor = text.lastIndexOf(REPORT_CONTRACT_LINE, occurrenceIndex);
+  if (anchor < 0) return undefined;
+  const markerStart = anchor + REPORT_CONTRACT_LINE.length;
+  const open = text.indexOf(marker.open, markerStart);
+  if (open < 0 || open > occurrenceIndex) return undefined;
+  const close = text.indexOf(marker.close, open + marker.open.length);
+  if (close < occurrenceIndex) return undefined;
+  const end = close + marker.close.length;
+  if (Buffer.byteLength(text.slice(anchor, end), "utf8") > MAX_PROMPT_CONTRACT_ECHO_BYTES) return undefined;
+  if (!/^\s*$/.test(text.slice(markerStart, open)) || !/^\s*$/.test(text.slice(open + marker.open.length, close))) return undefined;
+  const otherMarkers = [...new Set(Object.values(REPORT_MARKERS)
+    .flatMap((pair) => [pair.open, pair.close]))]
+    .filter((value) => value !== marker.open && value !== marker.close);
+  if (otherMarkers.some((value) => text.slice(markerStart, end).includes(value))) return undefined;
+  return { start: anchor, open, end };
+}
+
+function isPromptContractMarker(text, occurrence, marker) {
+  const range = promptContractRange(text, marker, occurrence.index);
+  return Boolean(range && occurrence.index >= range.open && occurrence.end <= range.end);
+}
+
+function removePromptContractEchoes(text, marker) {
+  const ranges = [];
+  for (const occurrence of allMarkerOccurrences(text, false, marker)) {
+    const range = promptContractRange(text, marker, occurrence.index);
+    if (range && !ranges.some((item) => item.start === range.start && item.end === range.end)) {
+      let end = range.end;
+      if (text.startsWith("\r\n", end)) end += 2;
+      else if (text[end] === "\n") end += 1;
+      ranges.push({ start: range.start, end });
+    }
+  }
+  if (!ranges.length) return text;
+  ranges.sort((left, right) => left.start - right.start);
+  let result = "";
+  let from = 0;
+  for (const range of ranges) {
+    result += text.slice(from, range.start);
+    from = range.end;
+  }
+  return result + text.slice(from);
+}
+
 function extractLatestReport(text, role) {
   const marker = reportMarkersForRole(role);
-  const relevant = allMarkerOccurrences(text, true, marker).filter((item) => item.marker === marker.open || item.marker === marker.close);
+  const relevant = allMarkerOccurrences(text, true, marker)
+    .filter((item) => (item.marker === marker.open || item.marker === marker.close)
+      && !isPromptContractMarker(text, item, marker));
   if (!relevant.length) throw communicationError("report_missing", "no complete role-specific report was observed");
   const close = relevant.at(-1);
   if (close.marker === marker.open) {
@@ -984,13 +1065,15 @@ function extractLatestReport(text, role) {
     }
   }
   const rawBody = text.slice(open.end, close.index);
-  if (allMarkerOccurrences(rawBody, false, marker).length) {
+  const nestedMarkers = allMarkerOccurrences(rawBody, false, marker)
+    .filter((item) => !isPromptContractMarker(rawBody, item, marker));
+  if (nestedMarkers.length) {
     throw communicationError("report_nested", "the latest role report contains a nested report marker");
   }
   // `recent-unwrapped` is a bounded terminal window and can begin inside an
-  // older report. Ignore only that unmatched historical prefix; the latest
-  // two role markers must still form one exact complete pair.
-  const body = rawBody
+  // older report. Remove only the exact echoed prompt contract; all other
+  // marker text remains a report-integrity failure.
+  const body = removePromptContractEchoes(rawBody, marker)
     .replace(/^[ \t]*\r?\n/, "")
     .replace(/\r?\n[ \t]*$/, "");
   if (!body.trim()) throw communicationError("report_empty", "the latest role report is empty");
