@@ -38,7 +38,7 @@ it passes fixture-based acceptance, native tests, live-session checks, and
 independent model review. You can install released components. This README
 lists pending components for transparency; pending components are not packaged.
 
-## Keeping work bounded
+## Code review and planning
 
 *Extensions that review, route, and bound what an agent does.*
 
@@ -84,9 +84,9 @@ only, not a runtime dependency).
 - **inventory refresh** — Git-aware codebase inventory regeneration with
   verification receipts, so prior-art matching stays honest.
 
-## Communicating without granting authority
+## Multi-agent communication
 
-*Extensions for bounded coordination between agents and boards.*
+*Extensions for bounded coordination between agents.*
 
 <details>
 <summary><strong>herdr-communication — bounded role communication</strong> <em>(released, 0.2.1)</em></summary>
@@ -206,22 +206,23 @@ bounded inputs, atomic replacement, drift checks, and exact write verification.
 
 </details>
 
-## Executing in isolation
+## Sandboxed execution
 
-*Extensions that prove automation ran — and stopped — exactly as declared.*
+*Extensions that run agent jobs in a sealed environment and prove it.*
 
 **In development:**
 
 <details>
-<summary><strong>microVM-isolation proof</strong> <em>(qualified, activation deferred)</em></summary>
+<summary><strong>microVM isolation</strong> <em>(tested, disabled)</em></summary>
 
-`agentic_linux_microvm_cutover` proves that a transient QEMU/KVM guest ran
-in isolation on a Linux host. The live qualification passed. After each run
-it checks that the guest is gone and the host is unchanged.
+The `agentic_linux_microvm_cutover` tool runs a single job inside a throwaway
+QEMU/KVM virtual machine on a Linux host. The job cannot reach the host, the
+network, or anything else outside the machine. When the job ends, the machine
+is deleted. A live test on a real Linux host passed.
 
-The tool is installed but refuses to run. It stays disabled until the
-planned-isolation execution path ships. This is deliberate: it prevents an
-agent from running isolation proofs in an ordinary session.
+The tool is not callable yet. Turning it on needs the planned-session switch,
+which this package does not ship yet; until then it denies every request with
+a clear reason. There is nothing for you to configure today.
 
 </details>
 
@@ -241,9 +242,9 @@ agent from running isolation proofs in an ordinary session.
   headless runs where no human can confirm, the system refuses destructive
   commands rather than silently allowing them.
 
-## Managing context pressure, compaction, and avoiding lossy handover
+## Session continuity
 
-*Extensions for session continuity when context runs out or a session ends.*
+*Managing context pressure, compaction, and avoiding lossy handover.*
 
 **In development:**
 
@@ -283,7 +284,7 @@ agent from running isolation proofs in an ordinary session.
   to a verified assignment, so consequential Git operations carry their
   own recorded provenance.
 
-## Trust in the extension set itself
+## Package integrity
 
 *Extensions that keep the installed set honest and the record bounded.*
 
@@ -306,10 +307,10 @@ acceptance with all prohibited effects absent.
 
 ### Portable repository contract
 
-`templates/AGENTS.md` is a portable starting contract for repositories that
-use Pi agents. It keeps routine work low-friction, requires bounded tasks and
-realistic tests, and treats reports as non-authorizing evidence. It does not
-overwrite repository-specific instructions or create a second authority store.
+`templates/AGENTS.md` is a starting contract you can copy into any repository
+that uses Pi agents. It asks for bounded tasks and realistic tests, and
+treats agent reports as untrusted evidence. It never overwrites an existing
+`AGENTS.md`; add your project rules below it.
 
 ## Install
 
