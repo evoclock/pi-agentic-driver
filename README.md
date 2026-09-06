@@ -215,14 +215,13 @@ bounded inputs, atomic replacement, drift checks, and exact write verification.
 <details>
 <summary><strong>microVM-isolation proof</strong> <em>(qualified, activation deferred)</em></summary>
 
-`agentic_linux_microvm_cutover` is the reviewed native proof for a transient
-QEMU/KVM guest on `linux-backend`. It returns a non-authorizing receipt with
-the marker, hashes, isolation context, checked domain teardown, and ACL
-restoration. The live qualification returned `VERIFIED`.
+`agentic_linux_microvm_cutover` proves that a transient QEMU/KVM guest ran
+in isolation on a Linux host. The live qualification passed. After each run
+it checks that the guest is gone and the host is unchanged.
 
-The system reserves runtime isolation for planned and automated execution
-paths. It excludes runtime isolation from ordinary ad-hoc work. Public
-activation remains deferred until the system enables those paths.
+The tool is installed but refuses to run. It stays disabled until the
+planned-isolation execution path ships. This is deliberate: it prevents an
+agent from running isolation proofs in an ordinary session.
 
 </details>
 
