@@ -33,6 +33,16 @@ Extensions for [Pi](https://github.com/earendil-works/pi-coding-agent):
 advisory code review, bounded role communication, and governed isolation
 proofs for agentic workflows.
 
+## Shipped features
+
+| Tool | What it does | Status |
+|------|--------------|--------|
+| `code_phage` | Reviews a plan against a stated goal before code is written. | shipped |
+| `agentic_herdr_communication` | Exchanges marked reports with worker agents; never grants authority. | shipped |
+| `agentic_herdr_spawn_worker` | Starts one Pi worker in a pane or tab, with native confirmation. | shipped |
+| `agentic_aidr` | Reviews writing for clarity, simplicity, brevity, and humanity. | shipped |
+| `agentic_linux_microvm_cutover` | Runs one job in a throwaway QEMU/KVM virtual machine on a Linux host. | tested, not callable yet |
+
 **Status: active development and testing.** Each extension ships only after
 it passes fixture-based acceptance, native tests, live-session checks, and
 independent model review. You can install released components. This README
