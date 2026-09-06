@@ -370,3 +370,65 @@ test("prohibited effects unchanged: handoff spawns through the lifecycle boundar
   registerWorkerDispatchInterface(pi);
   assert.deepEqual(tools, ["agentic_worker_dispatch"]);
 });
+
+test("production wiring: hung handoff spawns a real replacement through the lifecycle boundary", async () => {
+  const { executeHerdrSpawnWorker } = await import("../scripts/enforcement/herdr_lifecycle_pi.js");
+  const lifecycleCalls = [];
+  const root = process.cwd();
+  const model = "ds4/deepseek-v4-flash";
+  const lifecycleRunProcess = async ({ argv, shell, spawnOptions }) => {
+    lifecycleCalls.push([...argv]);
+    assert.equal(shell, false);
+    assert.equal(spawnOptions.shell, false);
+    const [verb, sub] = argv;
+    const env = (result) => JSON.stringify({ id: 1, result });
+    if (verb === "agent" && sub === "list") return { code: 0, stdout: JSON.stringify({ type: "agents", agents: [] }) };
+    if (verb === "tab") return { code: 0, stdout: env({ root_pane: { pane_id: "p1" }, tab: { tab_id: "t1" } }) };
+    if (verb === "agent" && sub === "start") return { code: 0, stdout: env({ type: "agent_started", argv, agent: { name: argv[2], agent: "pi", pane_id: "p1", cwd: root } }) };
+    if (verb === "agent" && sub === "get") return { code: 0, stdout: env({ type: "agent_info", agent: { name: argv[2], agent: "pi", pane_id: "p1", cwd: root } }) };
+    if (verb === "pane") return { code: 0, stdout: JSON.stringify({ type: "pane_info", pane: { pane_id: "p1", cwd: root } }) };
+    throw new Error(`unexpected lifecycle call: ${argv.join(" ")}`);
+  };
+
+  // The public dispatch seam with the production spawnReplacement wiring from
+  // extensions/herdr-dispatch.ts; only process/model-roll seams are stubbed.
+  // Directly exercise the same wiring the extension installs.
+  const dispatchModule = await import("../scripts/enforcement/herdr_async_dispatch_pi.js");
+  const lifecycleModule = await import("../scripts/enforcement/herdr_lifecycle_pi.js");
+  const spawnSeam = ({ role, repository, model: modelArg, context, signal }) =>
+    lifecycleModule.executeHerdrSpawnWorker(
+      { placement: "tab", role, model: modelArg, repository },
+      context, { runProcess: lifecycleRunProcess, listModels: `provider model\nds4 deepseek-v4-flash` }, signal,
+    );
+  void spawnSeam;
+
+  const journey = await dispatchModule.runWorkerJourney(
+    { action: "dispatch", role: "worker", stepPrompt: "x" },
+    tuiContext(),
+    {
+      runProcess: async ({ argv }) => argv[1] === "get"
+        ? { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: "worker", agent: "pi", status: "working", repository: root } }) }
+        : { code: 0, stdout: "{}" },
+      taskStore: taskStore([{ id: "1", status: "pending" }]),
+      model: model,
+      repository: "pi-agentic-driver",
+      spawnReplacement: spawnSeam,
+    },
+  );
+  assert.equal(journey.status, "worker-hung");
+  assert.equal(journey.handoff.attempted, true);
+  assert.equal(journey.handoff.ok, true, "the replacement spawn must succeed through the lifecycle boundary");
+  assert.equal(journey.handoff.role, "worker");
+  assert.deepEqual(journey.handoff.modelArgv, ["--model", model]);
+  assert.equal(journey.handoff.nonAuthorizing, true);
+  assert.match(journey.report, /handoff: attempted=true ok=true role=worker/);
+
+  // Fixed lifecycle argv sequence: list (duplicate check), tab create,
+  // agent start (with the validated model tail), agent get, pane get.
+  assert.deepEqual(lifecycleCalls.map((argv) => `${argv[0]} ${argv[1]}`), [
+    "agent list", "tab create", "agent start", "agent get", "pane get",
+  ]);
+  const startArgv = lifecycleCalls.find((argv) => argv[1] === "start");
+  assert.equal(startArgv[0], "agent");
+  assert.deepEqual(startArgv.slice(-2), ["--model", model]);
+});

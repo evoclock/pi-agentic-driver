@@ -230,7 +230,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
     }
     let spawned;
     try {
-      spawned = await spawnReplacement({ role, context, signal });
+      spawned = await spawnReplacement({ role, repository: options.repository, model: options.model, context, signal });
     } catch (error) {
       journey.handoff = { attempted: true, ok: false, error: String(error?.message || error).slice(0, 256) };
       return finish("worker-hung");
@@ -240,6 +240,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       ok: spawned?.ok === true,
       role: spawned?.role ?? role,
       repository: spawned?.repository,
+      modelArgv: spawned?.modelArgv,
       nonAuthorizing: true,
     };
     return finish("worker-hung");
