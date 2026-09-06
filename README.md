@@ -1,4 +1,4 @@
-# pi-agentic-driver v0.4.3
+# pi-agentic-driver v0.5.0
 
 <p align="center">
   <img src="assets/Yamagane-origami.png" alt="pi-agentic-driver — Yamagane origami mark" width="140"/>
@@ -7,7 +7,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL%20v3-blue?style=flat" alt="License: AGPL v3"/></a>
   <a href="https://www.npmjs.com/package/@evoclock/pi-agentic-driver"><img src="https://img.shields.io/npm/v/@evoclock/pi-agentic-driver?style=flat" alt="npm version"/></a>
-  <img src="https://img.shields.io/badge/version-0.4.3-blue?style=flat" alt="Version 0.4.3"/>
+  <img src="https://img.shields.io/badge/version-0.5.0-blue?style=flat" alt="Version 0.5.0"/>
   <img src="https://img.shields.io/badge/status-active%20development%20%26%20testing-orange?style=flat" alt="Status"/>
   <img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=flat&logo=javascript&logoColor=black" alt="JavaScript"/>
   <img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat&logo=typescript&logoColor=white" alt="TypeScript"/>
@@ -41,7 +41,7 @@ proofs for agentic workflows.
 | `agentic_herdr_communication` | Exchanges marked reports with worker agents; never grants authority. | shipped |
 | `agentic_herdr_spawn_worker` | Starts one Pi worker in a pane or tab, with native confirmation. | shipped |
 | `agentic_aidr` | Reviews writing for clarity, simplicity, brevity, and humanity. | shipped |
-| `agentic_linux_microvm_cutover` | Runs one job in a throwaway QEMU/KVM virtual machine on a Linux host. | tested, not callable yet |
+| `agentic_linux_microvm_cutover` | Runs one job in a throwaway QEMU/KVM virtual machine on a Linux host. | user-enabled, native confirmation |
 
 **Status: active development and testing.** Each extension ships only after
 it passes fixture-based acceptance, native tests, live-session checks, and
@@ -220,19 +220,22 @@ bounded inputs, atomic replacement, drift checks, and exact write verification.
 
 *Extensions that run agent jobs in a sealed environment and prove it.*
 
-**In development:**
+**Available in this release:**
 
 <details>
-<summary><strong>microVM isolation</strong> <em>(tested, disabled)</em></summary>
+<summary><strong>microVM isolation</strong> <em>(user-enabled, native confirmation)</em></summary>
 
 The `agentic_linux_microvm_cutover` tool runs a single job inside a throwaway
 QEMU/KVM virtual machine on a Linux host. The job cannot reach the host, the
-network, or anything else outside the machine. When the job ends, the machine
-is deleted. A live test on a real Linux host passed.
+network, or anything else outside the machine. The system deletes the machine
+after the job ends.
 
-The tool is not callable yet. Turning it on needs the planned-session switch,
-which this package does not ship yet; until then it denies every request with
-a clear reason. There is nothing for you to configure today.
+Each session starts with isolation disabled. In the interactive Pi TUI, run
+`/agentic-isolation-enable` to enable it for the current session. The command
+requires native confirmation. The model cannot run this command. Each microVM run
+requires a separate native confirmation. Run `/agentic-isolation-disable` to
+turn it off; the switch is not saved to settings. Headless sessions remain
+blocked.
 
 </details>
 
@@ -333,7 +336,7 @@ pi install npm:@evoclock/pi-agentic-driver
 Or from Git at a pinned tag:
 
 ```sh
-pi install git:github.com/evoclock/pi-agentic-driver@v0.4.3
+pi install git:github.com/evoclock/pi-agentic-driver@v0.5.0
 ```
 
 Released extensions load standalone; neither requires the other.
@@ -347,7 +350,7 @@ extensions you want by using the object form in your Pi settings:
 {
   "packages": [
     {
-      "source": "npm:@evoclock/pi-agentic-driver@0.4.3",
+      "source": "npm:@evoclock/pi-agentic-driver@0.5.0",
       "extensions": [
         "extensions/aidr.ts",
         "extensions/code-phage.js"

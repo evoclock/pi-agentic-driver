@@ -67,3 +67,8 @@ This repository is the public package source for `@evoclock/pi-agentic-driver`.
   native-TUI predicate and remain fail-closed. This release also adds the
   portable `templates/AGENTS.md` repository contract. The release artifact is
   built from this repository revision.
+- Release 0.5.0 adds session-scoped microVM activation. Users enable or disable
+  the switch from the native Pi TUI for the current session. The model cannot
+  change it, the switch is not persisted, and each microVM run still requires
+  native confirmation. Headless sessions fail closed. The existing trusted
+  facts, fixed argv, receipt validation, and cleanup checks remain unchanged.
