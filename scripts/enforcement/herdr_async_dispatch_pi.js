@@ -21,14 +21,15 @@ export const WORKER_DISPATCH_TOOL = "agentic_worker_dispatch";
 export const WORKER_DISPATCH_SCHEMA = "agentic-driver.worker-dispatch.v1";
 export const WORKER_DISPATCH_MODES = Object.freeze(["continuous", "turn-by-turn"]);
 export const DEFAULT_MODE = "continuous";
-const MAX_JOURNEY_STEPS = 8;
+const DEFAULT_JOURNEY_STEPS = 50;
+const MAX_JOURNEY_STEPS = 200;
 const MAX_REPORT_BYTES = 32 * 1024;
 const REGISTRATIONS = new WeakSet();
 
 // Terminal journey states. Only `cancelled` and `failed` are failures; every
 // other terminal state is an observed outcome, and no state is retried.
 export const WORKER_DISPATCH_TERMINAL_STATES = Object.freeze([
-  "completed", "exhausted", "role-blocked", "cancelled", "failed", "waiting-approval",
+  "completed", "exhausted", "role-blocked", "cancelled", "failed", "waiting-approval", "worker-hung",
 ]);
 
 export const WORKER_DISPATCH_PARAMETERS = Object.freeze({
@@ -40,6 +41,7 @@ export const WORKER_DISPATCH_PARAMETERS = Object.freeze({
     mode: { type: "string", enum: WORKER_DISPATCH_MODES },
     maxSteps: { type: "integer", minimum: 1, maximum: MAX_JOURNEY_STEPS },
     stepPrompt: { type: "string", minLength: 1, maxLength: 8192 },
+    model: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,63}(?:\\/[a-z0-9][a-z0-9._-]{0,127})*$", maxLength: 192 },
   },
   required: ["action", "role"],
   allOf: [
@@ -147,6 +149,7 @@ function journeyReceipt(journey) {
     `role: ${journey.role}`,
     `steps: ${journey.steps.length}`,
     `status: ${journey.status}`,
+    ...(journey.handoff ? [`handoff: attempted=${journey.handoff.attempted} ok=${journey.handoff.ok ?? false} role=${journey.handoff.role ?? journey.role} reason=${journey.handoff.reason ?? "none"}`] : []),
     ...journey.steps.map((step, index) =>
       `step ${index + 1}: task=${step.taskId ?? "none"} status=${step.status} report=${step.report ?? "(none)"}`),
     "[WORKER_JOURNEY_REPORT_END]",
@@ -160,13 +163,20 @@ function journeyReceipt(journey) {
 // One continuous journey. Each step: pulse (liveness + eligibility), observe
 // the next dispatchable item, one prompt exchange (no retry on any failure),
 // read the marked report, collate. Bounded by maxSteps, never wall-clock.
+// A worker that is not idle within an observed exchange cycle is hung for
+// dispatch purposes and ends the journey explicitly as worker-hung.
 export async function runWorkerJourney(params, context, options = {}, signal) {
   const mode = params.mode ?? DEFAULT_MODE;
-  const maxSteps = params.maxSteps ?? MAX_JOURNEY_STEPS;
+  const maxSteps = params.maxSteps ?? DEFAULT_JOURNEY_STEPS;
+  if (!Number.isInteger(maxSteps) || maxSteps < 1 || maxSteps > MAX_JOURNEY_STEPS) {
+    return failure("dispatch", dispatchError("max-steps-invalid",
+      `maxSteps must be an integer between 1 and ${MAX_JOURNEY_STEPS}`, "denied"));
+  }
   const role = params.role;
   const stepPrompt = params.stepPrompt;
   const taskStore = options.taskStore;
-  const journey = { mode, role, steps: [], status: "failed", code: null };
+  const spawnReplacement = typeof options.spawnReplacement === "function" ? options.spawnReplacement : null;
+  const journey = { mode, role, steps: [], status: "failed", code: null, handoff: null };
   const dispatched = new Set();
   const communicationOptions = options.communication ?? options;
 
@@ -182,9 +192,58 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
     code: journey.code,
     report: journeyReceipt(journey),
     reportMarkers: { open: "[WORKER_JOURNEY_REPORT_BEGIN]", close: "[WORKER_JOURNEY_REPORT_END]" },
+    handoff: journey.handoff,
     nonAuthorizing: true,
     persisted: false,
   });
+
+  // Explicit unstuck path: with native confirmation, spin up a replacement
+  // worker for the same trusted repository/role through the existing
+  // herdr-lifecycle spawn boundary (fixed argv, shell:false) and resume the
+  // pending task sequence. Reuses the same task cards; never duplicates them.
+  const handoffToReplacement = async (reason, taskId = null) => {
+    journey.status = "worker-hung";
+    journey.code = "worker-hung";
+    journey.steps.push({ step: journey.steps.length + 1, taskId, status: "worker-hung", error: reason });
+    if (!spawnReplacement) {
+      journey.handoff = { attempted: false, reason: "replacement spawn is not available in this context" };
+      return finish("worker-hung");
+    }
+    if (!isNativeTuiContext(context) || typeof context?.ui?.confirm !== "function") {
+      journey.handoff = { attempted: false, reason: "native TUI confirmation unavailable for replacement spawn" };
+      return finish("worker-hung");
+    }
+    let confirmed;
+    try {
+      confirmed = await context.ui.confirm("Spin up replacement worker", [
+        `Worker role ${role} appears hung (${reason}).`,
+        "Spin up one replacement worker through the guarded herdr-lifecycle spawn boundary?",
+        "The replacement resumes the same pending task sequence; existing task cards are reused, never duplicated.",
+      ].join("\n"));
+    } catch (error) {
+      journey.handoff = { attempted: false, reason: `confirmation failed: ${error.message}` };
+      return finish("worker-hung");
+    }
+    if (confirmed !== true) {
+      journey.handoff = { attempted: false, reason: "native confirmation was not granted for the replacement spawn" };
+      return finish("worker-hung");
+    }
+    let spawned;
+    try {
+      spawned = await spawnReplacement({ role, context, signal });
+    } catch (error) {
+      journey.handoff = { attempted: true, ok: false, error: String(error?.message || error).slice(0, 256) };
+      return finish("worker-hung");
+    }
+    journey.handoff = {
+      attempted: true,
+      ok: spawned?.ok === true,
+      role: spawned?.role ?? role,
+      repository: spawned?.repository,
+      nonAuthorizing: true,
+    };
+    return finish("worker-hung");
+  };
 
   if (!HERDR_COMMUNICATION_ACTIONS.includes) { /* unreachable guard */ }
   if (mode !== "continuous" && mode !== "turn-by-turn") {
@@ -209,14 +268,17 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       return finish(journey.status);
     }
     if (!pulse.alive) {
-      journey.status = "failed";
-      journey.steps.push({ step: stepIndex, taskId: null, status: "failed", error: "worker role is not alive" });
-      return finish("failed");
+      return handoffToReplacement("worker role is not alive");
     }
     if (!pulse.dispatchEligible) {
-      journey.status = pulse.status === "blocked" ? "role-blocked" : "waiting-approval";
-      journey.steps.push({ step: stepIndex, taskId: null, status: journey.status, workerStatus: pulse.status });
-      return finish(journey.status);
+      if (pulse.status === "blocked") {
+        journey.status = "role-blocked";
+        journey.code = "role_blocked";
+        journey.steps.push({ step: stepIndex, taskId: null, status: "role-blocked", workerStatus: pulse.status });
+        return finish("role-blocked");
+      }
+      // Not idle within an observed exchange cycle: hung for dispatch.
+      return handoffToReplacement(`worker not idle in the observed exchange cycle (status: ${pulse.status})`);
     }
 
     // Observe the next dispatchable item; never create or mutate cards.
@@ -275,9 +337,13 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       signal,
     );
     if (exchange.ok !== true) {
+      const hung = exchange.code === "prompt_stalled" || exchange.code === "process_timeout";
+      if (hung) {
+        return handoffToReplacement(`exchange ended with ${exchange.code}`, task.id);
+      }
       journey.status = exchange.code === "role_blocked" ? "role-blocked" : "failed";
       journey.code = exchange.code || "exchange-failed";
-      journey.steps.push({ step: stepIndex, taskId: task.id, status: journey.status, error: exchange.error || exchange.code });
+      journey.steps.push({ step: stepIndex, taskId: task.id, status: journey.status, error: exchange.reason || exchange.error || exchange.code });
       return finish(journey.status);
     }
     journey.steps.push({

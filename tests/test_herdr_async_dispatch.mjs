@@ -232,9 +232,10 @@ test("role-blocked and non-eligible workers end the journey explicitly", async (
         : { code: 0, stdout: "{}" },
     },
   );
-  assert.equal(working.ok, true, "waiting-approval is a resumable pause, not a failure");
-  assert.equal(working.status, "waiting-approval");
+  assert.equal(working.ok, false, "a hung worker ends the journey explicitly");
+  assert.equal(working.status, "worker-hung");
   assert.equal(working.stepCount, 0);
+  assert.equal(working.handoff.attempted, false, "no spawn seam configured, no handoff attempted");
 });
 
 test("journeys are bounded by maxSteps, not a wall-clock timeout", async () => {
@@ -250,4 +251,122 @@ test("journeys are bounded by maxSteps, not a wall-clock timeout", async () => {
   assert.equal(journey.status, "completed");
   assert.equal(journey.stepCount, 2, "the journey stops at maxSteps, independent of elapsed time");
   assert.equal(journey.schema, WORKER_DISPATCH_SCHEMA);
+});
+
+test("maxSteps defaults to 50, accepts up to 200, and rejects out-of-bound values", async () => {
+  const overBound = await runWorkerJourney(
+    { action: "dispatch", role: "worker", maxSteps: 201, stepPrompt: "x" },
+    tuiContext(),
+    { runProcess: herdrFixture().runProcess, taskStore: taskStore([{ id: "1", status: "pending" }]) },
+  );
+  assert.equal(overBound.ok, false);
+  assert.equal(overBound.code, "max-steps-invalid");
+
+  const zero = await runWorkerJourney(
+    { action: "dispatch", role: "worker", maxSteps: 0, stepPrompt: "x" },
+    tuiContext(),
+    { runProcess: herdrFixture().runProcess, taskStore: taskStore([{ id: "1", status: "pending" }]) },
+  );
+  assert.equal(zero.code, "max-steps-invalid");
+
+  // Default (no maxSteps) is 50: a store with 51 pending tasks completes 50.
+  const state = Array.from({ length: 51 }, (_, index) => ({ id: String(index + 1), status: "pending" }));
+  const fixture = herdrFixture();
+  const long = await runWorkerJourney(
+    { action: "dispatch", role: "worker", stepPrompt: "x" },
+    tuiContext(),
+    { runProcess: fixture.runProcess, taskStore: taskStore(state) },
+  );
+  assert.equal(long.ok, true);
+  assert.equal(long.status, "completed");
+  assert.equal(long.stepCount, 50);
+  assert.equal(fixture.calls.filter((call) => call.action === "prompt").length, 50);
+});
+
+test("a worker not idle across observed exchange cycles is hung and ends explicitly", async () => {
+  const journey = await runWorkerJourney(
+    { action: "dispatch", role: "worker", stepPrompt: "x" },
+    tuiContext(),
+    {
+      taskStore: taskStore([{ id: "1", status: "pending" }]),
+      runProcess: async ({ argv }) => argv[1] === "get"
+        ? { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: "worker", agent: "pi", status: "working", repository: root } }) }
+        : { code: 0, stdout: "{}" },
+    },
+  );
+  assert.equal(journey.ok, false);
+  assert.equal(journey.status, "worker-hung");
+  assert.equal(journey.code, "worker-hung");
+  assert.match(journey.report, /status: worker-hung/);
+  assert.equal(journey.handoff.attempted, false, "no handoff is attempted without a spawn seam");
+  assert.match(journey.handoff.reason, /not available in this context/);
+});
+
+test("hung-worker replacement handoff records the handoff and reuses task cards", async () => {
+  const spawned = [];
+  const fixture = herdrFixture();
+  const journey = await runWorkerJourney(
+    { action: "dispatch", role: "worker", stepPrompt: "x" },
+    tuiContext(),
+    {
+      runProcess: async ({ argv }) => argv[1] === "get"
+        ? { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: "worker", agent: "pi", status: "working", repository: root } }) }
+        : { code: 0, stdout: "{}" },
+      taskStore: taskStore([{ id: "1", status: "pending" }]),
+      spawnReplacement: async ({ role }) => {
+        spawned.push(role);
+        return { ok: true, role, repository: root };
+      },
+    },
+  );
+  assert.equal(journey.status, "worker-hung");
+  assert.equal(journey.handoff.attempted, true);
+  assert.equal(journey.handoff.ok, true);
+  assert.equal(journey.handoff.role, "worker");
+  assert.equal(journey.handoff.nonAuthorizing, true);
+  assert.deepEqual(spawned, ["worker"]);
+  assert.match(journey.report, /handoff: attempted=true ok=true role=worker/);
+
+  // Declined replacement confirmation records the explicit refusal.
+  const declined = await runWorkerJourney(
+    { action: "dispatch", role: "worker", stepPrompt: "x" },
+    { mode: "tui", hasUI: true, cwd: root, ui: { confirm: async () => false } },
+    {
+      runProcess: async ({ argv }) => argv[1] === "get"
+        ? { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: "worker", agent: "pi", status: "working", repository: root } }) }
+        : { code: 0, stdout: "{}" },
+      taskStore: taskStore([{ id: "1", status: "pending" }]),
+      spawnReplacement: async () => { throw new Error("must not be called"); },
+    },
+  );
+  assert.equal(declined.status, "worker-hung");
+  assert.equal(declined.handoff.attempted, false);
+  assert.match(declined.handoff.reason, /not granted/);
+
+  // A stuck exchange (stalled prompt) triggers the same explicit handoff.
+  const stalled = await runWorkerJourney(
+    { action: "dispatch", role: "worker", stepPrompt: "x" },
+    tuiContext(),
+    {
+      taskStore: taskStore([{ id: "1", status: "pending" }]),
+      runProcess: async ({ argv }) => {
+        if (argv[1] === "get") return { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: "worker", agent: "pi", status: "idle", repository: root } }) };
+        if (argv[1] === "prompt") return { code: 2, stdout: JSON.stringify({ error: { code: "agent_prompt_stalled", message: "stalled" } }) };
+        return { code: 0, stdout: "{}" };
+      },
+      spawnReplacement: async ({ role }) => ({ ok: true, role, repository: root }),
+    },
+  );
+  assert.equal(stalled.status, "worker-hung");
+  assert.equal(stalled.handoff.attempted, true);
+  assert.equal(stalled.stepCount, 0, "the stuck exchange is never retried on the same worker");
+});
+
+test("prohibited effects unchanged: handoff spawns through the lifecycle boundary only", () => {
+  // The dispatch module exposes no pane/agent management commands: its only
+  // registration is the single dispatch/pulse tool.
+  const tools = [];
+  const pi = { registerTool: (tool) => tools.push(tool.name) };
+  registerWorkerDispatchInterface(pi);
+  assert.deepEqual(tools, ["agentic_worker_dispatch"]);
 });
