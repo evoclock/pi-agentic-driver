@@ -39,7 +39,9 @@ test("package file list matches the public extension set", () => {
     "extensions/aidr.ts",
     "extensions/code-phage.js",
     "extensions/herdr-communication.ts",
+    "extensions/herdr-dispatch.ts",
     "extensions/herdr-lifecycle.ts",
     "extensions/linux-microvm.ts",
   ]);
+  assert.ok(pkg.files.includes("scripts/enforcement/herdr_async_dispatch_pi.js"), "missing: dispatch module");
 });
