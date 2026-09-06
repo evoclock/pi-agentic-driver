@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { createHash } from "node:crypto";
-import { readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { extname, isAbsolute, resolve, relative } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import fs, { realpathSync } from "node:fs";
+import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 
 export const AIDR_SCHEMA = "agentic-driver.aidr.v1";
 const MAX_TEXT_BYTES = 256 * 1024;
@@ -353,6 +353,7 @@ function resolveReviewFile(requestedPath, cwd) {
 }
 
 async function applyConfirmedFileReplacement(path, before, replacement, context) {
+  boundedText(before, "file");
   boundedText(replacement, "replacement");
   if (before === replacement) return blockedReport("the proposed replacement is identical to the current file", { action: "apply", path });
   if (typeof context?.ui?.confirm !== "function") {
@@ -364,23 +365,38 @@ async function applyConfirmedFileReplacement(path, before, replacement, context)
     `File: ${path}\n\n${preview}\n\nApply this exact replacement?`,
   );
   if (!confirmed) return blockedReport("native confirmation declined", { action: "apply", path, diffPreview: preview });
-  const current = readFileSync(path, "utf8");
+  const current = fs.readFileSync(path, "utf8");
   if (current !== before) return blockedReport("the file changed after review; no write was performed", { action: "apply", path, diffPreview: preview });
-  writeFileSync(path, replacement, "utf8");
-  const after = readFileSync(path, "utf8");
-  if (after !== replacement) throw new Error("the file did not match the confirmed replacement after writing");
-  return {
-    schema: AIDR_SCHEMA,
-    ok: true,
-    status: "applied",
-    action: "apply",
-    path,
-    diffPreview: preview,
-    beforeHash: sha256(before),
-    afterHash: sha256(after),
-    nonAuthorizing: true,
-    authorityCreated: false,
-  };
+
+  let temporaryPath;
+  try {
+    temporaryPath = join(dirname(path), `.aidr-${randomUUID()}.tmp`);
+    fs.writeFileSync(temporaryPath, replacement, { encoding: "utf8", flag: "wx" });
+    const revalidated = fs.readFileSync(path, "utf8");
+    if (revalidated !== before) return blockedReport("the file changed after review; no write was performed", { action: "apply", path, diffPreview: preview });
+    fs.renameSync(temporaryPath, path);
+    temporaryPath = undefined;
+
+    const after = fs.readFileSync(path);
+    const expected = Buffer.from(replacement, "utf8");
+    if (!after.equals(expected)) {
+      return blockedReport("the file did not match the confirmed replacement after writing", { action: "apply", path, diffPreview: preview });
+    }
+    return {
+      schema: AIDR_SCHEMA,
+      ok: true,
+      status: "applied",
+      action: "apply",
+      path,
+      diffPreview: preview,
+      beforeHash: sha256(before),
+      afterHash: sha256(after.toString("utf8")),
+      nonAuthorizing: true,
+      authorityCreated: false,
+    };
+  } finally {
+    if (temporaryPath) fs.rmSync(temporaryPath, { force: true });
+  }
 }
 
 export function registerAidrInterface(pi) {
@@ -416,16 +432,17 @@ export function registerAidrInterface(pi) {
         let text;
         let source = params.source;
         let path;
+        if (!["last-response", "text", "file"].includes(source)) throw new Error("AI;DR source must be last-response, text, or file");
+        if (action === "apply" && source !== "file") throw new Error("AI;DR apply is available only for files");
         if (source === "last-response") text = lastAssistantText;
         else if (source === "text") text = params.text;
-        else if (source === "file") {
+        else {
           path = resolveReviewFile(params.path, context.cwd);
-          text = readFileSync(path, "utf8");
+          text = fs.readFileSync(path, "utf8");
           source = path;
-        } else throw new Error("AI;DR source must be last-response, text, or file");
+        }
         if (!text) throw new Error("there is no text available for AI;DR to review");
         if (action === "apply") {
-          if (source !== path) throw new Error("AI;DR apply is available only for files");
           const result = await applyConfirmedFileReplacement(path, text, params.replacement, context);
           if (result.ok) result.review = reviewText(params.replacement, {
             mode: params.mode ?? "simple",

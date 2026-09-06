@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import fs from "node:fs";
+import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -180,4 +181,96 @@ test("AI;DR rejects unsupported file types and paths outside the project", async
   assert.equal(unsupported.details.ok, false);
   const outside = await registrations[0].execute("id", { source: "file", path: "../README.md" }, undefined, undefined, { cwd: root });
   assert.equal(outside.details.ok, false);
+});
+
+test("AI;DR follow-ups bound sources, ship registration, and verify exact writes", async () => {
+  const registrations = [];
+  let messageEnd;
+  registerAidrInterface({
+    registerTool(tool) { registrations.push(tool); },
+    on(event, handler) { if (event === "message_end") messageEnd = handler; },
+  });
+  const tool = registrations[0];
+  let confirmations = 0;
+  await messageEnd({ message: { role: "assistant", content: [{ type: "text", text: "Last response." }] } });
+  for (const source of ["last-response", "text"]) {
+    const result = await tool.execute(
+      "id",
+      { action: "apply", source, text: "Supplied text.", replacement: "Replacement." },
+      undefined,
+      undefined,
+      { cwd: process.cwd(), ui: { async confirm() { confirmations += 1; return true; } } },
+    );
+    const report = JSON.parse(result.content[0].text);
+    assert.equal(report.ok, false);
+    assert.match(report.reason, /only for files/);
+  }
+  assert.equal(confirmations, 0);
+
+  assert.throws(() => reviewText("x".repeat(256 * 1024 + 1)), /bounded review size/);
+  const root = await mkdtemp(join(tmpdir(), "aidr-"));
+  const path = join(root, "README.md");
+  const original = "# Example\n";
+  await writeFile(path, original);
+  let oversizedConfirmations = 0;
+  const oversized = await tool.execute(
+    "id",
+    { action: "apply", source: "file", path: "README.md", replacement: "x".repeat(256 * 1024 + 1) },
+    undefined,
+    undefined,
+    { cwd: root, ui: { async confirm() { oversizedConfirmations += 1; return true; } } },
+  );
+  const oversizedReport = JSON.parse(oversized.content[0].text);
+  assert.equal(oversizedReport.ok, false);
+  assert.match(oversizedReport.reason, /bounded review size/);
+  assert.equal(oversizedConfirmations, 0);
+  assert.equal(await readFile(path, "utf8"), original);
+
+  const entry = await readFile(new URL("../extensions/aidr.ts", import.meta.url), "utf8");
+  assert.match(entry, /export default function registerAidr/);
+  assert.match(entry, /registerAidrInterface/);
+  const packageManifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  assert.ok(packageManifest.pi.extensions.includes("./extensions"));
+  assert.ok(packageManifest.files.includes("extensions/aidr.ts"));
+  assert.ok(packageManifest.files.includes("scripts/aidr_writing_review.js"));
+
+  const review = reviewText("Utilize the tool.", { mode: "review", standard: "none" });
+  assert.equal(review.standard, "none");
+  assert.equal(review.standards, undefined);
+  const explicitStandard = reviewText("Utilize the tool.", { mode: "review", standard: "asd-ste100" });
+  assert.equal(explicitStandard.standard, "asd-ste100");
+  assert.equal(explicitStandard.standards["ASD-STE100"].profile, "ASD-STE100-informed");
+  const steMode = reviewText("Use the tool.", { mode: "ste", standard: "none" });
+  assert.equal(steMode.standard, "asd-ste100");
+  assert.match(steMode.standards["ASD-STE100"].limitation, /does not certify conformance/);
+
+  const replacement = "# Replaced\n";
+  const originalReadFileSync = fs.readFileSync;
+  const actualPath = fs.realpathSync(path);
+  let mismatchReads = 0;
+  fs.readFileSync = (...args) => {
+    const result = originalReadFileSync(...args);
+    if (args[0] === actualPath && args.length === 1) {
+      mismatchReads += 1;
+      return Buffer.from("unexpected\n");
+    }
+    return result;
+  };
+  try {
+    const mismatch = await tool.execute(
+      "id",
+      { action: "apply", source: "file", path: "README.md", replacement },
+      undefined,
+      undefined,
+      { cwd: root, ui: { async confirm() { return true; } } },
+    );
+    const mismatchReport = JSON.parse(mismatch.content[0].text);
+    assert.equal(mismatchReport.ok, false);
+    assert.match(mismatchReport.reason, /did not match the confirmed replacement/);
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+  }
+  assert.equal(mismatchReads, 1);
+  assert.equal(await readFile(path, "utf8"), replacement);
+  assert.deepEqual(await readdir(root), ["README.md"]);
 });
