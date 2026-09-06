@@ -1,4 +1,4 @@
-# pi-agentic-driver v0.4.1
+# pi-agentic-driver v0.4.3
 
 <p align="center">
   <img src="assets/Yamagane-origami.png" alt="pi-agentic-driver — Yamagane origami mark" width="140"/>
@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL%20v3-blue?style=flat" alt="License: AGPL v3"/></a>
-  <img src="https://img.shields.io/badge/version-0.4.1-blue?style=flat" alt="Version 0.4.1"/>
+  <img src="https://img.shields.io/badge/version-0.4.3-blue?style=flat" alt="Version 0.4.3"/>
   <img src="https://img.shields.io/badge/status-active%20development%20%26%20testing-orange?style=flat" alt="Status"/>
   <img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=flat&logo=javascript&logoColor=black" alt="JavaScript"/>
   <img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat&logo=typescript&logoColor=white" alt="TypeScript"/>
@@ -14,9 +14,9 @@
 </p>
 
 Without guardrails, an agent can rewrite code that an existing abstraction
-already covers, ship to the wrong remote, lose context at the worst time, and
-report success without evidence. Pi is an excellent agent harness. I need
-these guardrails for the way I work.
+already covers. It can ship to the wrong remote, lose context, or report
+success without evidence. Pi is an excellent agent harness. I need these
+guardrails for the way I work.
 
 **pi-agentic-driver adds these guardrails as Pi extensions. The agent does the
 work. Each extension makes the work verifiable and bounded.** Review happens
@@ -75,9 +75,6 @@ only, not a runtime dependency).
 
 **Under development in this theme:**
 
-- **work-mode routing** — an `ad-hoc` / `planned` / `restricted` contract
-  that keeps routine read/edit/test work free of lifecycle ceremony while
-  consequential operations stay behind native confirmation.
 - **prompted planning lifecycle** — natural-language goals derived into
   complete semantic proposals with parent/scope choices at native
   boundaries; no retry loops, no model-supplied identifiers.
@@ -178,7 +175,7 @@ for the wider task/model-routing and remote-session workflow.
 *AI;DR (AI; Didn't Read) keeps technical writing clear without flattening the writer's voice.*
 
 <details>
-<summary><strong>AI;DR — writing review</strong> <em>(released, 0.4.0)</em></summary>
+<summary><strong>AI;DR — writing review</strong> <em>(released, 0.4.2)</em></summary>
 
 `agentic_aidr` reviews the last assistant response, supplied prose, or a
 Markdown/documentation file. It checks four principles:
@@ -196,14 +193,15 @@ rule and an example for each finding.
 
 Use `simple` for the four principles plus the profile. Use `ste` for a
 profile-focused report. The profile is advisory. It does not include the
-licensed ASD-STE100 approved-word dictionary and does not certify conformance.
+licensed ASD-STE100 approved-word dictionary. It does not certify conformance.
 Check final text against the licensed specification and your project
 terminology list.
 
 AI;DR also flags dense paragraphs, suggests bullets when they reduce working
 memory load, and supports plain-language and analogy modes. Review is
-read-only. An explicit file apply action can show a bounded diff and write the
-exact proposed replacement only after native confirmation.
+read-only. An explicit file apply action shows a bounded diff and writes the
+exact proposed replacement only after native confirmation. Release 0.4.2 adds
+bounded inputs, atomic replacement, drift checks, and exact write verification.
 
 </details>
 
@@ -230,9 +228,10 @@ activation remains deferred until the system enables those paths.
 **Under development in this theme:**
 
 - **native macOS container proof** — the native Apple Container runtime has
-  passed a fixed local `/bin/pwd` isolation qualification with a read-only
-  repository mount, no network, and automatic removal. The native Pi adapter
-  remains under development and is not yet part of the released package.
+  passed a fixed local `/bin/pwd` isolation qualification. The probe used a
+  read-only repository mount, no network, and automatic removal. The native Pi
+  adapter remains under development and is not yet part of the released
+  package.
 
 - **attended-authority guard** — the safety net between an agent and your
   shell: when a model tries to delete, overwrite, or push, the guard
@@ -276,12 +275,10 @@ activation remains deferred until the system enables those paths.
 
 **In development:**
 
-- **git workflow safeguards** — exact-file staging with semantic
-  derivation, native confirmation, post-confirmation drift revalidation,
-  and protected-operation boundaries (no force push, no default-branch
-  deletion, no history rewrite), while routine status/diff/stage/commit
-  stays low-friction. We are removing arbitrary wall-clock truncation of
-  healthy operations.
+- **git workflow safeguards** — design only. The package contains no Git
+  extension yet. The planned capability covers exact-file staging, native
+  confirmation, post-confirmation drift checks, and protected-operation
+  boundaries.
 - **assignment-aware Git journeys** — merge and protected-push flows bound
   to a verified assignment, so consequential Git operations carry their
   own recorded provenance.
@@ -306,6 +303,13 @@ activation remains deferred until the system enables those paths.
 
 Each item lands here as its own extension when its scenario passes
 acceptance with all prohibited effects absent.
+
+### Portable repository contract
+
+`templates/AGENTS.md` is a portable starting contract for repositories that
+use Pi agents. It keeps routine work low-friction, requires bounded tasks and
+realistic tests, and treats reports as non-authorizing evidence. It does not
+overwrite repository-specific instructions or create a second authority store.
 
 ## Install
 

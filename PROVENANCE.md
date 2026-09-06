@@ -58,3 +58,12 @@ This repository is the public package source for `@evoclock/pi-agentic-driver`.
   `shell: false`, trusted repository and role checks, exact-once exchange
   semantics, bounded process diagnostics, non-authorizing receipts, and
   strict role-specific report extraction around echoed prompt markers.
+- Release 0.4.2 hardens AI;DR file replacement. Reviews and replacements stay
+  bounded. The write path uses a same-directory temporary file, an atomic
+  rename, drift revalidation, exact byte verification, and cleanup. Apply is
+  available only for files and remains behind native confirmation.
+- Release 0.4.3 removes legacy lifecycle-mode files from the shipped public
+  package. The Linux isolation and Herdr lifecycle interfaces share a small
+  native-TUI predicate and remain fail-closed. This release also adds the
+  portable `templates/AGENTS.md` repository contract. The release artifact is
+  built from this repository revision.

@@ -17,7 +17,7 @@ import {
   HERDR_ROLE_POLICY,
   resolveTrustedHerdrExecutable,
 } from "./herdr_communication_pi.js";
-import { isNativeTuiContext } from "../lifecycle_mode_pi.js";
+import { isNativeTuiContext } from "./native_tui_context.js";
 
 export const HERDR_SPAWN_WORKER_TOOL = "agentic_herdr_spawn_worker";
 export const HERDR_LIFECYCLE_SCHEMA = "agentic-driver.herdr-lifecycle.v1";

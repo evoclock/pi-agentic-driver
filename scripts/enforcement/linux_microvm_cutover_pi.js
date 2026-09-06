@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { isNativeTuiContext } from "../lifecycle_mode_pi.js";
+import { isNativeTuiContext } from "./native_tui_context.js";
 
 export const LINUX_MICROVM_CUTOVER_TOOL = "agentic_linux_microvm_cutover";
 export const LINUX_MICROVM_CUTOVER_SCHEMA = "agentic-driver.linux-microvm-cutover.v1";

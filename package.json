@@ -1,6 +1,6 @@
 {
   "name": "@evoclock/pi-agentic-driver",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Guardrail extensions for Agentic Driver: advisory review, bounded Herdr communication, and guarded worker lifecycle.",
   "type": "module",
   "license": "AGPL-3.0-or-later",
@@ -25,16 +25,15 @@
     "LICENSE",
     "extensions/herdr-lifecycle.ts",
     "scripts/enforcement/herdr_lifecycle_pi.js",
-    "scripts/lifecycle_mode_core.js",
-    "scripts/lifecycle_mode_pi.js",
     "config/herdr-worker-repositories.v1.json",
-    "config/lifecycle-mode-contract.v1.json",
     "extensions/linux-microvm.ts",
     "scripts/enforcement/linux_microvm_cutover_pi.js",
+    "scripts/enforcement/native_tui_context.js",
     "scripts/enforcement/linux_microvm_remote_fixture.sh",
     "PROVENANCE.md",
     "extensions/aidr.ts",
-    "scripts/aidr_writing_review.js"
+    "scripts/aidr_writing_review.js",
+    "templates/AGENTS.md"
   ],
   "pi": {
     "extensions": [
