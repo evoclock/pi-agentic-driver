@@ -6,6 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL%20v3-blue?style=flat" alt="License: AGPL v3"/></a>
+  <a href="https://www.npmjs.com/package/@evoclock/pi-agentic-driver"><img src="https://img.shields.io/npm/v/@evoclock/pi-agentic-driver?style=flat" alt="npm version"/></a>
   <img src="https://img.shields.io/badge/version-0.4.3-blue?style=flat" alt="Version 0.4.3"/>
   <img src="https://img.shields.io/badge/status-active%20development%20%26%20testing-orange?style=flat" alt="Status"/>
   <img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=flat&logo=javascript&logoColor=black" alt="JavaScript"/>
@@ -313,8 +314,16 @@ overwrite repository-specific instructions or create a second authority store.
 
 ## Install
 
+From npm:
+
 ```sh
-pi install <tarball-or-npm-package>
+pi install npm:@evoclock/pi-agentic-driver
+```
+
+Or from Git at a pinned tag:
+
+```sh
+pi install git:github.com/evoclock/pi-agentic-driver@v0.4.3
 ```
 
 Released extensions load standalone; neither requires the other.
