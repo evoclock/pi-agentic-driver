@@ -13,9 +13,13 @@ export const LINUX_MICROVM_CUTOVER_SCHEMA = "agentic-driver.linux-microvm-cutove
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REMOTE_FIXTURE = join(SCRIPT_DIR, "linux_microvm_remote_fixture.sh");
 const REGISTRATIONS = new WeakSet();
-const PLANNED_ISOLATION_MODES = new Set(["planned", "planned-interactive", "planned-autonomous"]);
+const SWITCH_REGISTRATIONS = new WeakSet();
 const HASH = /^[0-9a-f]{64}$/;
 const MAX_DETAIL = 512;
+// Session-scoped isolation switch. Held in module memory only: never read
+// from or written to settings, and never settable by the model (no tool
+// exposes it; only the native TUI enable/disable commands mutate it).
+const ISOLATION_ENABLED = { value: false, get() { return this.value === true; }, set(v) { this.value = v === true; } };
 let inFlight = false;
 
 function boundedText(value, fallback = "unknown failure") {
@@ -236,15 +240,15 @@ function normalizedForwardedStderr(result, fallbackPhase, fallbackCode, fallback
 }
 
 export async function runLinuxMicroVMCutover(context, options = {}) {
-  if (!PLANNED_ISOLATION_MODES.has(options.workMode)) {
-    return denied("blocked", reason("policy", "planned-isolation-required", "Linux microVM execution is reserved for planned or automated work."));
+  // Session-scoped user switch: only the explicit enable command can set this
+  // flag in memory; it never persists to settings and the model cannot set it.
+  if (ISOLATION_ENABLED.get() !== true) {
+    return denied("blocked", reason("policy", "isolation-not-enabled",
+      "Isolation activation is not enabled in this session. Run the agentic-isolation-enable command in the Pi TUI."));
   }
-  const isolationEnabled = options.isolationEnabled ?? options.runtime?.isolationEnabled;
-  if (isolationEnabled !== true) {
-    return denied("blocked", reason("policy", "planned-isolation-not-enabled", "The planned isolation execution path is not enabled yet."));
-  }
-  if (!isNativeTuiContext(context) || typeof context?.ui?.confirm !== "function") {
-    return denied("blocked", reason("policy", "native-tui-required", "Open the Linux microVM cutover in the interactive Pi TUI."));
+  if (!isNativeTuiContext(context)) {
+    return denied("blocked", reason("policy", "native-tui-required",
+      "Open the Linux microVM cutover in the interactive Pi TUI; headless runs are denied."));
   }
   if (inFlight) return denied("denied", reason("execution", "already-active", "another Linux microVM cutover is active in this host session"));
 
@@ -310,19 +314,92 @@ export function registerLinuxMicroVMCutoverInterface(pi, options = {}) {
   const execute = async (_id, params, _signal, _update, context) => {
     const value = params && Object.keys(params).length
       ? denied("denied", reason("input", "model-parameters-not-allowed", "Linux microVM cutover accepts no model parameters"))
-      : await runLinuxMicroVMCutover(context, {
-          ...options,
-          workMode: options.runtime?.workMode,
-          isolationEnabled: options.runtime?.isolationEnabled,
-        });
+      : await runLinuxMicroVMCutover(context, options);
     return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
   };
   pi.registerTool({ name: LINUX_MICROVM_CUTOVER_TOOL, label: "Verify Linux microVM",
-    description: "Run one native-confirmed transient QEMU/KVM microVM proof on linux-backend.",
+    description: "Run one native-confirmed transient QEMU/KVM microVM proof on linux-backend. Requires the session isolation switch (agentic-isolation-enable command) and native confirmation.",
     parameters: { type: "object", additionalProperties: false, properties: {} }, execute });
   pi.registerCommand?.("agentic-linux-microvm-cutover", { description: "Run the native-confirmed Linux microVM proof",
     handler: async (args, context) => commandArgumentsPresent(args)
       ? denied("denied", reason("input", "command-arguments-not-allowed", "Linux microVM cutover accepts no command arguments"))
       : (await execute("command", {}, undefined, undefined, context)).details });
+}
+
+// Session-scoped isolation switch commands. The flag lives only in this
+// module's memory: the model has no tool to set or read it, it is never
+// written to settings, and each command itself requires a native TUI
+// confirmation. Disabling always succeeds once confirmed; enabling requires
+// the interactive Pi TUI.
+const ISOLATION_ENABLE_COMMAND = "agentic-isolation-enable";
+const ISOLATION_DISABLE_COMMAND = "agentic-isolation-disable";
+export const ISOLATION_COMMANDS = { enable: ISOLATION_ENABLE_COMMAND, disable: ISOLATION_DISABLE_COMMAND };
+export const isolationSwitch = {
+  get enabled() { return ISOLATION_ENABLED.get() === true; },
+};
+
+export function registerIsolationSwitchCommands(pi) {
+  if (typeof pi?.registerCommand !== "function" || SWITCH_REGISTRATIONS.has(pi)) return;
+  SWITCH_REGISTRATIONS.add(pi);
+  const switchNotice = () => ISOLATION_ENABLED.get() === true
+    ? "Isolation activation is ENABLED for this session only. It does not persist to settings and resets when the session ends."
+    : "Isolation activation is DISABLED. No microVM proof can run in this session until it is enabled.";
+  const switchResult = (ok, status, code, detail) => ({
+    schema: LINUX_MICROVM_CUTOVER_SCHEMA, ok, status,
+    reason: ok ? undefined : reason("policy", code, detail),
+    isolationEnabled: ISOLATION_ENABLED.get() === true,
+    persisted: false,
+  });
+  pi.registerCommand(ISOLATION_ENABLE_COMMAND, {
+    description: "Enable the Linux microVM isolation switch for this session (native confirmation required)",
+    handler: async (_args, context) => {
+      if (!isNativeTuiContext(context) || typeof context?.ui?.confirm !== "function") {
+        return switchResult(false, "blocked", "native-tui-required",
+          "Open the interactive Pi TUI to enable isolation; headless sessions cannot enable it.");
+      }
+      if (ISOLATION_ENABLED.get() === true) {
+        return switchResult(true, "ALREADY_ENABLED", "", "");
+      }
+      let confirmed;
+      try {
+        confirmed = await context.ui.confirm("Enable Linux microVM isolation", [
+          "Enable the isolation-activation switch for this session?",
+          switchNotice(),
+          "Effect: the agentic_linux_microvm_cutover tool may run one native-confirmed transient QEMU/KVM microVM proof on linux-backend per invocation.",
+          "The switch is session-scoped: it never persists to settings and the model cannot change it.",
+        ].join("\n"));
+      } catch (error) {
+        return switchResult(false, "blocked", "confirmation-failed", `Native confirmation failed: ${error.message}`);
+      }
+      if (confirmed !== true) {
+        return switchResult(false, "stopped", "not-granted", "Isolation activation was not enabled; native confirmation was not granted.");
+      }
+      ISOLATION_ENABLED.set(true);
+      return switchResult(true, "ENABLED", "", "");
+    },
+  });
+  pi.registerCommand(ISOLATION_DISABLE_COMMAND, {
+    description: "Disable the Linux microVM isolation switch for this session (native confirmation required)",
+    handler: async (_args, context) => {
+      if (!isNativeTuiContext(context) || typeof context?.ui?.confirm !== "function") {
+        return switchResult(false, "blocked", "native-tui-required",
+          "Open the interactive Pi TUI to disable isolation; headless sessions cannot change the switch.");
+      }
+      let confirmed;
+      try {
+        confirmed = await context.ui.confirm("Disable Linux microVM isolation", [
+          "Disable the isolation-activation switch for this session?",
+          switchNotice(),
+        ].join("\n"));
+      } catch (error) {
+        return switchResult(false, "blocked", "confirmation-failed", `Native confirmation failed: ${error.message}`);
+      }
+      if (confirmed !== true) {
+        return switchResult(false, "stopped", "not-granted", "Isolation activation remains enabled; native confirmation was not granted.");
+      }
+      ISOLATION_ENABLED.set(false);
+      return switchResult(true, "DISABLED", "", "");
+    },
+  });
 }
 export default registerLinuxMicroVMCutoverInterface;
