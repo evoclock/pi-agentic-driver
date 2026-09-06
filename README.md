@@ -6,6 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL%20v3-blue?style=flat" alt="License: AGPL v3"/></a>
+  <a href="https://www.npmjs.com/package/@evoclock/pi-agentic-driver"><img src="https://img.shields.io/npm/v/@evoclock/pi-agentic-driver?style=flat" alt="npm version"/></a>
   <img src="https://img.shields.io/badge/version-0.4.3-blue?style=flat" alt="Version 0.4.3"/>
   <img src="https://img.shields.io/badge/status-active%20development%20%26%20testing-orange?style=flat" alt="Status"/>
   <img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=flat&logo=javascript&logoColor=black" alt="JavaScript"/>
@@ -214,14 +215,13 @@ bounded inputs, atomic replacement, drift checks, and exact write verification.
 <details>
 <summary><strong>microVM-isolation proof</strong> <em>(qualified, activation deferred)</em></summary>
 
-`agentic_linux_microvm_cutover` is the reviewed native proof for a transient
-QEMU/KVM guest on `linux-backend`. It returns a non-authorizing receipt with
-the marker, hashes, isolation context, checked domain teardown, and ACL
-restoration. The live qualification returned `VERIFIED`.
+`agentic_linux_microvm_cutover` proves that a transient QEMU/KVM guest ran
+in isolation on a Linux host. The live qualification passed. After each run
+it checks that the guest is gone and the host is unchanged.
 
-The system reserves runtime isolation for planned and automated execution
-paths. It excludes runtime isolation from ordinary ad-hoc work. Public
-activation remains deferred until the system enables those paths.
+The tool is installed but refuses to run. It stays disabled until the
+planned-isolation execution path ships. This is deliberate: it prevents an
+agent from running isolation proofs in an ordinary session.
 
 </details>
 
@@ -313,8 +313,16 @@ overwrite repository-specific instructions or create a second authority store.
 
 ## Install
 
+From npm:
+
 ```sh
-pi install <tarball-or-npm-package>
+pi install npm:@evoclock/pi-agentic-driver
+```
+
+Or from Git at a pinned tag:
+
+```sh
+pi install git:github.com/evoclock/pi-agentic-driver@v0.4.3
 ```
 
 Released extensions load standalone; neither requires the other.
