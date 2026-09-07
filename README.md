@@ -238,23 +238,23 @@ turn it off; the switch is not saved to settings. Headless sessions remain
 blocked.
 
 **One-time setup — trusted target.** The cutover target is user-configured and
-deny-by-default; the model cannot choose or change it. Copy
-`config/microvm-target.v1.example.json` to `~/.pi/pi/config/microvm-target.v1.json`
-and set:
+deny-by-default; the model cannot choose or change it. You make one decision:
+where the microVM runs. Copy `config/microvm-target.v1.example.json` to
+`~/.pi/pi/config/microvm-target.v1.json` and set either:
 
-- `host` — the SSH alias of the machine that runs the proof;
-- `expectedArch` — the expected machine architecture (for example `x86_64`);
-  the probe checks `uname -m`, `/dev/kvm`, and the matching
-  `qemu-system-<expectedArch>` binary on the configured host. The shipped
-  fixture guest itself is built for x86_64, so the full proof currently
-  requires `expectedArch: "x86_64"` and an x86_64 KVM host.
-- `libvirtUri` — the expected libvirt URI (for example `qemu:///system`);
-- `expectedKernelPrefix` — the expected kernel version prefix (for example `6.`).
+- `"sshTarget": "user@host-or-ip"` — a remote Linux machine (used verbatim in
+  fixed `ssh user@host ...` arguments); or
+- `"local": true` — this session already runs directly on a Linux machine
+  (commands run locally, never through ssh).
 
-Every run probes the configured host and compares the observed facts against
-these expectations; a mismatch denies the run before any mutation. The fixed
-`ssh <configured-host>` arguments are built only from this config file — never
-from model input.
+Everything technical is auto-discovered from the target at probe time — you do
+not configure it: architecture from `uname -m`, kernel from `uname -r`, and the
+libvirt URI from `virsh uri`. The probe enforces honest safety checks that need
+no user expertise: `/dev/kvm` exists and is accessible, libvirt reports the
+system-level driver (`qemu:///system`), and a `qemu-system-<arch>` binary
+matching the discovered architecture is present. A mismatch denies the run
+before any mutation. Note: the shipped fixture guest is built for x86_64, so
+the full proof currently requires an x86_64 KVM host.
 
 </details>
 

@@ -79,14 +79,19 @@ function fixtureDomainForId(fixtureId) {
   return `agentic-driver-${fixtureId}`;
 }
 // --- User-configured trusted target (deny-by-default) -----------------------
-// The cutover target is never hardcoded and never model-supplied. It is read
-// read-only from the user's own config (~/.pi/pi/config/microvm-target.v1.json)
-// first, then a package-local config/microvm-target.v1.json. The shipped
-// package file is a template without personal values; absence or invalid
-// content denies with target-not-configured and setup guidance.
-const TARGET_FIELDS = new Set(["schema", "host", "expectedArch", "libvirtUri", "expectedKernelPrefix"]);
+// The user makes one decision: where the microVM runs. Either
+// { "sshTarget": "user@host-or-ip" } for a remote machine, or { "local": true }
+// when this session runs directly on a Linux machine. Nothing else is
+// user-supplied: arch, libvirt URI, and kernel are auto-discovered from the
+// target at probe time (informational, not configured). The model cannot
+// choose or change the target. Read order: the user's own config
+// (~/.pi/pi/config/microvm-target.v1.json) first, then the package-local
+// config/microvm-target.v1.json (shipped as a REPLACE-WITH template).
+const TARGET_FIELDS = new Set(["schema", "sshTarget", "local", "_comment"]);
 export function loadMicroVMTarget(options = {}) {
-  if (options.target && typeof options.target === "object") return options.target;
+  if (options.target && typeof options.target === "object") {
+    return normalizeTarget(options.target);
+  }
   const paths = [
     ...(typeof options.targetPath === "string" ? [options.targetPath] : []),
     TARGET_USER_CONFIG,
@@ -98,14 +103,9 @@ export function loadMicroVMTarget(options = {}) {
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
       if (Object.keys(parsed).some((key) => !TARGET_FIELDS.has(key))) continue;
       if (parsed.schema !== TARGET_SCHEMA) continue;
-      if (typeof parsed.host !== "string" || !parsed.host.trim()
-          || typeof parsed.expectedArch !== "string" || !parsed.expectedArch.trim()
-          || typeof parsed.libvirtUri !== "string" || !parsed.libvirtUri.trim()
-          || typeof parsed.expectedKernelPrefix !== "string" || !parsed.expectedKernelPrefix.trim()) continue;
-      // Template placeholders are not a configured target.
-      if ([parsed.host, parsed.expectedArch, parsed.libvirtUri, parsed.expectedKernelPrefix]
-          .some((value) => value.includes("REPLACE-WITH-"))) continue;
-      return Object.freeze({ ...parsed, __path: path });
+      const normalized = normalizeTarget(parsed);
+      if (!normalized) continue;
+      return Object.freeze({ ...normalized, __path: path });
     } catch {
       // Missing or unreadable candidate: fall through to the next path.
     }
@@ -113,9 +113,22 @@ export function loadMicroVMTarget(options = {}) {
   return null;
 }
 
+// Exactly one user decision: sshTarget XOR local:true. Returns the frozen
+// normalized target or null when the decision is absent, ambiguous, or a
+// REPLACE-WITH template placeholder.
+function normalizeTarget(parsed) {
+  const hasSshTarget = typeof parsed.sshTarget === "string" && parsed.sshTarget.trim()
+    && !parsed.sshTarget.includes("REPLACE-WITH-");
+  const hasLocal = parsed.local === true;
+  if (hasSshTarget === hasLocal) return null;
+  return Object.freeze(hasSshTarget
+    ? { mode: "ssh", sshTarget: parsed.sshTarget.trim() }
+    : { mode: "local" });
+}
+
 function targetNotConfigured() {
   return denied("blocked", reason("policy", "target-not-configured",
-    "No trusted microVM target is configured. Copy config/microvm-target.v1.example.json to ~/.pi/pi/config/microvm-target.v1.json and set host (ssh alias), expectedArch, libvirtUri, and expectedKernelPrefix; the model cannot choose the target."));
+    "No trusted microVM target is configured. Copy config/microvm-target.v1.example.json to ~/.pi/pi/config/microvm-target.v1.json and set either sshTarget (user@host or ip of the machine that runs the microVM) or local:true (this session runs on a Linux machine). The model cannot choose the target."));
 }
 
 function parseFacts(stdout, fixtureId, target) {
@@ -134,35 +147,67 @@ function parseFacts(stdout, fixtureId, target) {
     qemu: values.qemu,
     fixtureDomain: values.fixture_domain_name,
     fixtureDomainState: values.fixture_domain_state,
+    kvmAccessible: values.kvm_accessible === "yes",
   };
   const domain = fixtureDomainForId(fixtureId);
-  if (facts.host !== target.host || facts.arch !== target.expectedArch || facts.libvirt !== target.libvirtUri
-      || facts.fixtureDomain !== domain || facts.fixtureDomainState !== "absent"
-      || typeof facts.kernel !== "string" || !facts.kernel.startsWith(target.expectedKernelPrefix)
-      || typeof facts.qemu !== "string" || !facts.qemu) {
-    throw phaseError("preflight", "facts-unexpected", "observed host facts do not match the configured trusted target, or the exact fixture-domain absence check failed");
+  if (facts.fixtureDomain !== domain || facts.fixtureDomainState !== "absent") {
+    throw phaseError("preflight", "facts-unexpected", "the exact fixture-domain absence check failed");
+  }
+  return validateFacts(facts, fixtureId);
+}
+// Honest safety checks over auto-discovered facts: the target must expose
+// KVM, a system-level libvirt connection, and a qemu-system binary matching
+// the discovered architecture. No user-predicted values are involved.
+function validateFacts(facts, _fixtureId) {
+  if (!facts || typeof facts !== "object" || Array.isArray(facts)) {
+    throw phaseError("preflight", "facts-invalid", "trusted host facts are not an object");
+  }
+  if (typeof facts.host !== "string" || !facts.host || typeof facts.arch !== "string" || !facts.arch
+      || typeof facts.kernel !== "string" || !facts.kernel || typeof facts.qemu !== "string" || !facts.qemu
+      || typeof facts.libvirt !== "string" || !facts.libvirt) {
+    throw phaseError("preflight", "facts-unexpected", "the target did not report a complete set of discoverable facts");
+  }
+  if (facts.kvmAccessible !== true) {
+    throw phaseError("preflight", "kvm-unavailable", "the target does not expose an accessible /dev/kvm; hardware virtualization is required");
+  }
+  if (!facts.libvirt.startsWith("qemu:///system")) {
+    throw phaseError("preflight", "libvirt-user-level",
+      `the target libvirt connection is '${facts.libvirt}', not the system driver (qemu:///system); the microVM proof requires the system-level libvirt driver`);
+  }
+  if (!facts.qemu.startsWith(`qemu-system-${facts.arch}`)) {
+    throw phaseError("preflight", "qemu-arch-mismatch",
+      `the target qemu binary '${facts.qemu.split(" version")[0]}' does not match the discovered architecture '${facts.arch}'`);
   }
   return facts;
 }
 function sshProbe(execute = run, fixtureId, target) {
   const domain = fixtureDomainForId(fixtureId);
   const quotedDomain = shellQuote(domain);
-  // Arch expectations derive from the configured target so a non-x86_64
-  // target is probeable with the matching qemu binary name.
+  // All technical expectations are auto-discovered from the target itself;
+  // validation checks honest safety properties (KVM, system libvirt driver,
+  // qemu binary for the discovered arch) with no user-predicted values.
   const command = [
-    "set -eu", `test "$(uname -m)" = ${target.expectedArch}`, "test -r /dev/kvm -a -w /dev/kvm",
-    `test -x /usr/bin/qemu-system-${target.expectedArch}`, "test -x /usr/bin/busybox",
-    "test -x /usr/bin/cpio", "test -x /usr/bin/gzip", "test -x /usr/bin/setfacl",
-    "test -x /usr/bin/getfacl", "test -n \"$(virsh uri)\"",
+    "set -eu",
+    "test -r /dev/kvm -a -w /dev/kvm",
+    "test -x /usr/bin/qemu-system-$(uname -m)",
+    "test -x /usr/bin/busybox", "test -x /usr/bin/cpio", "test -x /usr/bin/gzip",
+    "test -x /usr/bin/setfacl", "test -x /usr/bin/getfacl", "test -n \"$(virsh uri)\"",
     "printf 'host=%s\\n' \"$(hostname)\"", "printf 'arch=%s\\n' \"$(uname -m)\"",
     "printf 'kernel=%s\\n' \"$(uname -r)\"", "printf 'libvirt=%s\\n' \"$(virsh uri)\"",
-    `printf 'qemu=%s\\n' "$(qemu-system-${target.expectedArch} --version | head -1)"`,
+    `printf 'qemu=%s\\n' "$(qemu-system-$(uname -m) --version | head -1)"`,
+    "printf 'kvm_accessible=%s\\n' \"$( test -r /dev/kvm -a -w /dev/kvm && echo yes || echo no )\"",
     `printf 'fixture_domain_name=%s\\n' ${quotedDomain}`,
     `if virsh dominfo ${quotedDomain} >/dev/null 2>&1; then printf 'fixture_domain_state=present\\n'; else names=$(virsh list --all --name); if printf '%s\\n' \"$names\" | grep -F -x -- ${quotedDomain} >/dev/null; then printf 'fixture_domain_state=present\\n'; else match_status=$?; if [ \"$match_status\" -eq 1 ]; then printf 'fixture_domain_state=absent\\n'; else exit 1; fi; fi; fi`,
   ].join("; ");
-  const result = execute("ssh", [target.host, command], { timeout: 30000 });
+  const result = target.mode === "local"
+    ? execute("bash", ["-c", command], { timeout: 30000 })
+    : execute("ssh", [target.sshTarget, command], { timeout: 30000 });
   if (result.code !== 0) {
-    throw phaseError("preflight", "probe-failed", result.stderr || result.error || "configured microVM target capability probe failed");
+    const text = result.stderr || result.error || "";
+    if (/\/dev\/kvm/i.test(text)) {
+      throw phaseError("preflight", "kvm-unavailable", "the target does not expose an accessible /dev/kvm; hardware virtualization is required");
+    }
+    throw phaseError("preflight", "probe-failed", text || "configured microVM target capability probe failed");
   }
   return parseFacts(result.stdout, fixtureId, target);
 }
@@ -179,19 +224,6 @@ function requireHash(value, label) {
 }
 function requireBoolean(value, label) {
   if (typeof value !== "boolean") throw phaseError("evidence", "receipt-invalid", `${label} is not boolean evidence`);
-}
-function validateFacts(facts, fixtureId, target) {
-  const domain = fixtureDomainForId(fixtureId);
-  if (!facts || typeof facts !== "object" || Array.isArray(facts)) {
-    throw phaseError("preflight", "facts-invalid", "trusted host facts are not an object");
-  }
-  if (facts.host !== target.host || facts.arch !== target.expectedArch || facts.libvirt !== target.libvirtUri
-      || facts.fixtureDomain !== domain || facts.fixtureDomainState !== "absent"
-      || typeof facts.kernel !== "string" || !facts.kernel.startsWith(target.expectedKernelPrefix)
-      || typeof facts.qemu !== "string" || !facts.qemu) {
-    throw phaseError("preflight", "facts-unexpected", "observed host facts do not match the configured trusted target, or the exact fixture-domain absence check failed");
-  }
-  return facts;
 }
 function parseReceipt(stdout) {
   const candidates = [];
@@ -325,11 +357,11 @@ export async function runLinuxMicroVMCutover(context, options = {}) {
   const execute = options.execute || run;
   const observe = options.observeFacts || ((executeArg, id) => sshProbe(executeArg, id, target));
   let facts;
-  try { facts = validateFacts(observe(execute, fixtureId), fixtureId, target); }
+  try { facts = validateFacts(observe(execute, fixtureId), fixtureId); }
   catch (error) { return denied("denied", reasonFromError(error, "preflight", "facts-observation-failed")); }
   const body = [
     "Run one live transient QEMU/KVM microVM proof on the configured trusted target?",
-    `Configured host: ${target.host} — observed host: ${facts.host} (${facts.arch}, kernel ${facts.kernel})`,
+    `Target: ${target.mode === "local" ? "this machine (local)" : target.sshTarget} — discovered host: ${facts.host} (${facts.arch}, kernel ${facts.kernel})`,
     `Backend: ${facts.libvirt}; ${facts.qemu}`,
     `Fixture: ${fixtureId}; domain: ${fixtureDomain} (preflight absent)`,
     `Versioned fixture SHA-256: ${scriptHash}`,
@@ -345,14 +377,16 @@ export async function runLinuxMicroVMCutover(context, options = {}) {
   if (confirmed !== true) return denied("stopped", reason("confirmation", "not-granted", "Native confirmation was not granted."));
 
   let current;
-  try { current = validateFacts(observe(execute, fixtureId), fixtureId, target); }
+  try { current = validateFacts(observe(execute, fixtureId), fixtureId); }
   catch (error) { return denied("denied", reason("reobserve", "facts-observation-failed", `MicroVM facts changed: ${error.message}`)); }
   if (JSON.stringify(current) !== JSON.stringify(facts)) {
     return denied("denied", reason("reobserve", "facts-changed", "MicroVM facts changed after confirmation"));
   }
   inFlight = true;
   try {
-    const result = execute("ssh", [target.host, "bash", "-s", "--", fixtureId, scriptHash], { input: script, timeout: 180000 });
+    const result = target.mode === "local"
+      ? execute("bash", ["-c", "bash -s -- " + shellQuote(fixtureId) + " " + shellQuote(scriptHash)], { input: script, timeout: 180000 })
+      : execute("ssh", [target.sshTarget, "bash", "-s", "--", fixtureId, scriptHash], { input: script, timeout: 180000 });
     if (!result || result.code !== 0) {
       return denied("blocked", normalizedForwardedStderr(result, "fixture", "execution-failed", "fixed microVM fixture failed"));
     }

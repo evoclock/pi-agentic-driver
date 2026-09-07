@@ -19,7 +19,8 @@ const INITRAMFS = "a".repeat(64);
 function stubFacts(fixtureId, host = "test-microvm-host") {
   return {
     host, arch: "x86_64", kernel: "6.8.0-generic",
-    libvirt: "qemu:///system", qemu: "QEMU stub 8.0",
+    libvirt: "qemu:///system", qemu: `qemu-system-x86_64 version 8.0 stub`,
+    kvmAccessible: true,
     fixtureDomain: `agentic-driver-${fixtureId}`, fixtureDomainState: "absent",
   };
 }
@@ -51,16 +52,13 @@ function stubReceipt(fixtureId, scriptHash, host = "test-microvm-host") {
 // Runs the cutover with injected facts observation and a structured receipt
 // stub derived from the real invocation arguments; no ssh, no network, no
 // real remote execution.
-function stubEnvironment({ confirm = async () => true, factsSequence, isolationSwitch, host = "test-microvm-host" } = {}) {
+function stubEnvironment({ confirm = async () => true, factsSequence, isolationSwitch, host = "test-microvm-host", mode = "ssh", sshTarget = "user@test-microvm-host" } = {}) {
   let observed = 0;
   let lastFixtureId;
-  const target = Object.freeze({
-    schema: "agentic-driver.microvm-target.v1",
-    host,
-    expectedArch: "x86_64",
-    libvirtUri: "qemu:///system",
-    expectedKernelPrefix: "6.",
-  });
+  const target = Object.freeze(mode === "local"
+    ? { mode: "local" }
+    : { mode: "ssh", sshTarget });
+  const remoteTarget = mode === "local" ? host : sshTarget;
   const observe = (_execute, fixtureId) => {
     lastFixtureId = fixtureId;
     const value = Array.isArray(factsSequence) ? factsSequence[Math.min(observed, factsSequence.length - 1)](fixtureId) : stubFacts(fixtureId, host);
@@ -68,15 +66,20 @@ function stubEnvironment({ confirm = async () => true, factsSequence, isolationS
     return structuredClone(value);
   };
   const execute = (executable, args) => {
-    if (executable === "ssh" && args[0] === host && args[1] === "bash"
-        && args[2] === "-s" && args[3] === "--") {
-      const [, , , , fixtureId, scriptHash] = args;
+    const isExec = mode === "local"
+      ? executable === "bash" && args[0] === "-c"
+      : executable === "ssh" && args[0] === sshTarget && args[1] === "bash" && args[2] === "-s" && args[3] === "--";
+    if (isExec) {
+      const fixtureId = mode === "local"
+        ? /microvm-[0-9a-f]{24}/.exec(args[1])?.[0]
+        : args[4];
+      const scriptHash = mode === "local" ? "x" : args[5];
       return { code: 0, stdout: `AGENTIC_MICROVM_RECEIPT: ${JSON.stringify(stubReceipt(fixtureId, scriptHash, host))}\n`, stderr: "", error: undefined };
     }
     return { code: 0, stdout: "", stderr: "", error: undefined };
   };
   const context = { mode: "tui", hasUI: true, ui: { confirm } };
-  return { context, options: { execute, observeFacts: observe, isolationSwitch, target }, lastFixtureId: () => lastFixtureId, target };
+  return { context, options: { execute, observeFacts: observe, isolationSwitch, target }, lastFixtureId: () => lastFixtureId, target, remoteTarget };
 }
 
 function harness() {
@@ -315,10 +318,14 @@ test("denial outcomes produce a prominent status line with the reason code", asy
   assert.deepEqual(JSON.parse(declinedText.slice(declinedText.indexOf("{"))), declined.details);
 });
 
-test("microVM target: absent config denies target-not-configured; configured target drives validation and argv", async () => {
+test("microVM target: one user decision (sshTarget XOR local); absent config denies target-not-configured", async () => {
   const { loadMicroVMTarget } = await import("../scripts/enforcement/linux_microvm_cutover_pi.js");
-  const target = loadMicroVMTarget({ target: stubEnvironment().target });
-  assert.equal(target.host, "test-microvm-host");
+  const sshTarget = loadMicroVMTarget({ target: stubEnvironment().target });
+  assert.deepEqual({ ...sshTarget }, { mode: "ssh", sshTarget: "user@test-microvm-host" });
+  const local = loadMicroVMTarget({ target: { local: true } });
+  assert.deepEqual({ ...local }, { mode: "local" });
+  // Exactly one decision: both or neither is unconfigured.
+  assert.equal(loadMicroVMTarget({ target: { mode: "ssh", sshTarget: "user@host", local: true } }), null);
   assert.equal(loadMicroVMTarget({ targetPath: "/nonexistent/path.json" }), null,
     "no config file and no override must deny by default");
 
@@ -339,13 +346,13 @@ test("microVM target: absent config denies target-not-configured; configured tar
   assert.equal(probed.length, 0, "no probe runs without a configured target");
 });
 
-test("configured target drives facts validation, argv host, and the model cannot supply a target", async () => {
+test("sshTarget flows verbatim into argv; discovered facts are validated; the model cannot supply a target", async () => {
   const { run, switchState } = harness();
   await run("agentic-isolation-enable", tuiContext());
   const hostsSeen = [];
   const stub = stubEnvironment({
     isolationSwitch: switchState,
-    host: "my-configured-host",
+    sshTarget: "deploy@192.168.1.50",
   });
   const observingExecute = (executable, args) => {
     if (executable === "ssh") hostsSeen.push(args[0]);
@@ -354,29 +361,38 @@ test("configured target drives facts validation, argv host, and the model cannot
   const journey = await runLinuxMicroVMCutover(tuiContext(), {
     ...stub.options,
     execute: observingExecute,
-    target: { ...stub.target, host: "my-configured-host" },
   });
   assert.equal(journey.ok, true);
   assert.equal(journey.status, "VERIFIED");
-  assert.ok(hostsSeen.length >= 1, "execution uses the configured host");
-  assert.ok(hostsSeen.every((host) => host === "my-configured-host"),
-    "ssh argv always uses the configured host, never a hardcoded or model-supplied one");
+  assert.ok(hostsSeen.length >= 1, "execution uses the configured sshTarget");
+  assert.ok(hostsSeen.every((host) => host === "deploy@192.168.1.50"),
+    "ssh argv uses the configured sshTarget verbatim, never a hardcoded or model-supplied one");
 
-  // Facts mismatch (wrong arch): denied facts-unexpected.
-  const mismatched = await runLinuxMicroVMCutover(tuiContext(), {
+  // Honest safety checks over discovered facts (no user-predicted values):
+  // KVM unavailable denies with a clear code.
+  const noKvm = await runLinuxMicroVMCutover(tuiContext(), {
     ...stub.options,
-    target: { ...stub.target, expectedArch: "aarch64" },
+    observeFacts: (_execute, fixtureId) => ({ ...stubFacts(fixtureId), kvmAccessible: false }),
   });
-  assert.equal(mismatched.ok, false);
-  assert.equal(mismatched.reason.code, "facts-unexpected");
+  assert.equal(noKvm.ok, false);
+  assert.equal(noKvm.reason.code, "kvm-unavailable");
 
-  // Kernel prefix mismatch: denied facts-unexpected.
-  const wrongKernel = await runLinuxMicroVMCutover(tuiContext(), {
+  // User-level libvirt driver denies with a clear code.
+  const userLibvirt = await runLinuxMicroVMCutover(tuiContext(), {
     ...stub.options,
-    target: { ...stub.target, expectedKernelPrefix: "5." },
+    observeFacts: (_execute, fixtureId) => ({ ...stubFacts(fixtureId), libvirt: "qemu:///session" }),
   });
-  assert.equal(wrongKernel.ok, false);
-  assert.equal(wrongKernel.reason.code, "facts-unexpected");
+  assert.equal(userLibvirt.ok, false);
+  assert.equal(userLibvirt.reason.code, "libvirt-user-level");
+  assert.match(userLibvirt.reason.detail, /system-level libvirt driver/);
+
+  // qemu binary not matching the discovered arch denies.
+  const archMismatch = await runLinuxMicroVMCutover(tuiContext(), {
+    ...stub.options,
+    observeFacts: (_execute, fixtureId) => ({ ...stubFacts(fixtureId), arch: "aarch64", qemu: "qemu-system-x86_64 version 8.0 stub" }),
+  });
+  assert.equal(archMismatch.ok, false);
+  assert.equal(archMismatch.reason.code, "qemu-arch-mismatch");
 
   // Model-supplied target parameters are rejected by the closed schema.
   const { registerLinuxMicroVMCutoverInterface } = await import("../scripts/enforcement/linux_microvm_cutover_pi.js");
@@ -410,30 +426,32 @@ test("the shipped REPLACE-WITH template config is rejected target-not-configured
   assert.equal(probed.length, 0, "no probe runs against the unconfigured template");
 });
 
-test("probe arch expectations derive from the configured target", async () => {
+test("local:true deploys without ssh; probe discovers arch/kernel/libvirt from the target", async () => {
   const { run, switchState } = harness();
   await run("agentic-isolation-enable", tuiContext());
   const calls = [];
   const journey = await runLinuxMicroVMCutover(tuiContext(), {
     isolationSwitch: switchState,
-    target: { ...stubEnvironment({ isolationSwitch: switchState }).target, host: "arm-host", expectedArch: "aarch64" },
-    // No observeFacts: the default probe path builds the ssh command from the
-    // configured target and sends it through this execute seam.
+    target: { local: true },
+    // No observeFacts: the default probe path runs the discovery command
+    // locally (bash -c, not ssh) and validation uses the discovered facts.
     execute: (executable, args) => {
-      calls.push(args);
-      const id = /microvm-[0-9a-f]{24}/.exec(args[1])?.[0];
+      calls.push([executable, ...args]);
       const digest = (value) => createHash("sha256").update(value).digest("hex");
-      if (id && args[1].includes("fixture_domain_name")) {
-        return { code: 0, stdout: `host=arm-host\narch=aarch64\nkernel=6.8.0-generic\nlibvirt=qemu:///system\nqemu=QEMU aarch64 stub\nfixture_domain_name=agentic-driver-${id}\nfixture_domain_state=absent`, stderr: "" };
+      const commandText = executable === "bash" ? args[1] : "";
+      const id = /microvm-[0-9a-f]{24}/.exec(commandText)?.[0];
+      if (id && commandText.includes("fixture_domain_name")) {
+        return { code: 0, stdout: `host=this-linux-machine\narch=x86_64\nkernel=6.8.0-generic\nlibvirt=qemu:///system\nqemu=qemu-system-x86_64 version 8.0 stub\nkvm_accessible=yes\nfixture_domain_name=agentic-driver-${id}\nfixture_domain_state=absent`, stderr: "" };
       }
-      const fixtureId = args[4];
+      const fixtureId = /microvm-[0-9a-f]{24}/.exec(commandText)?.[0];
+      const scriptHash = /['"]([0-9a-f]{64})['"]/.exec(commandText)?.[1];
       const domain = `agentic-driver-${fixtureId}`;
       const marker = `AGENTIC_MICROVM_PROBE:${fixtureId}`;
       const receipt = { schema: LINUX_MICROVM_CUTOVER_SCHEMA, ok: true, status: "VERIFIED",
         authorityCreated: false, runtimeActivated: false, persisted: false,
-        identity: { remoteHost: "arm-host", fixtureId, domain },
+        identity: { remoteHost: "this-linux-machine", fixtureId, domain },
         marker: { value: marker, sha256: digest(marker) },
-        scriptHash: args[5], initramfsSha256: INITRAMFS,
+        scriptHash, initramfsSha256: INITRAMFS,
         teardown: { domain: { name: domain, transient: true, destroyOnExit: true, destroyRequested: true, absent: true, checked: true, check: "virsh dominfo/list" },
           acl: { beforeSha256: "b".repeat(64), afterSha256: "b".repeat(64), equal: true, checked: true, initramfsEntryRemoved: true } },
         context: { filesystem: { summary: "disk=absent host-share=absent credentials=absent gpu=absent", disk: false, hostShare: false, credentials: false, gpu: false,
@@ -444,8 +462,14 @@ test("probe arch expectations derive from the configured target", async () => {
   });
   assert.equal(journey.ok, true);
   assert.equal(journey.status, "VERIFIED");
-  const probeCommand = calls[0][1];
-  assert.match(probeCommand, /test "\$\(uname -m\)" = aarch64/);
-  assert.match(probeCommand, /qemu-system-aarch64/);
-  assert.doesNotMatch(probeCommand, /x86_64/);
+  // Local mode never invokes ssh: both probe and execution run through bash.
+  assert.ok(calls.length >= 2, "probe and execution both run locally");
+  assert.ok(calls.every(([executable]) => executable === "bash"),
+    "local:true must not spawn ssh");
+  // The discovery command carries no configured expectations: facts are read,
+  // not predicted.
+  assert.match(calls[0][2], /printf 'arch=%s\\n' \"\$\(uname -m\)\"/);
+  assert.match(calls[0][2], /printf 'kernel=%s\\n' \"\$\(uname -r\)\"/);
+  assert.match(calls[0][2], /printf 'libvirt=%s\\n' \"\$\(virsh uri\)\"/);
+  assert.match(calls[0][2], /kvm_accessible/);
 });
