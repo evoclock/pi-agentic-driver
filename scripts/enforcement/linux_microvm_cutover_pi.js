@@ -104,7 +104,9 @@ export function loadMicroVMTarget(options = {}) {
   const paths = [
     ...(typeof options.targetPath === "string" ? [options.targetPath] : []),
     ...(typeof options.targetUserConfigPath === "string" ? [options.targetUserConfigPath] : []),
-    TARGET_USER_CONFIG,
+    // A test/override seam can replace the default user-config location so
+    // tests stay hermetic regardless of the developer's own machine.
+    ...(typeof options.userConfigPath === "string" ? [options.userConfigPath] : [TARGET_USER_CONFIG]),
     TARGET_PACKAGE_CONFIG,
   ];
   for (const path of paths) {
@@ -147,9 +149,12 @@ export function targetArgumentError(value) {
     return { code: "target-argument-placeholder", detail: "Placeholder values are not valid targets." };
   }
   if (text === "local") return null;
+  // Accepts a bare hostname/ssh-config alias, user@host, user@ip, ip[:port].
+  // ssh config resolves aliases; the string is passed verbatim in fixed argv.
   const pattern = /^(?:[a-zA-Z0-9._-]+@)?(?:\d{1,3}(?:\.\d{1,3}){3}|[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?)(?::\d{1,5})?$/;
-  if (/\s/.test(text) || !pattern.test(text)) {
-    return { code: "target-argument-invalid", detail: `${JSON.stringify(text)} is not a plausible ssh target (user@host or ip) or the literal 'local'.` };
+  const bareToken = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+  if (/\s/.test(text) || (!pattern.test(text) && !bareToken.test(text))) {
+    return { code: "target-argument-invalid", detail: `${JSON.stringify(text)} is not a plausible ssh target (alias, user@host, or ip) or the literal 'local'.` };
   }
   return null;
 }
@@ -173,6 +178,7 @@ function parseFacts(stdout, fixtureId, target) {
     kernel: values.kernel,
     libvirt: values.libvirt,
     qemu: values.qemu,
+    qemuBinaryPath: values.qemu_binary_path,
     fixtureDomain: values.fixture_domain_name,
     fixtureDomainState: values.fixture_domain_state,
     kvmAccessible: values.kvm_accessible === "yes",
@@ -202,9 +208,12 @@ function validateFacts(facts, _fixtureId) {
     throw phaseError("preflight", "libvirt-user-level",
       `the target libvirt connection is '${facts.libvirt}', not the system driver (qemu:///system); the microVM proof requires the system-level libvirt driver`);
   }
-  if (!facts.qemu.startsWith(`qemu-system-${facts.arch}`)) {
-    throw phaseError("preflight", "qemu-arch-mismatch",
-      `the target qemu binary '${facts.qemu.split(" version")[0]}' does not match the discovered architecture '${facts.arch}'`);
+  // The decisive evidence is WHICH binary resolved, not an arch token inside
+  // the version string (Debian builds omit it there).
+  if (typeof facts.qemuBinaryPath !== "string" || !facts.qemuBinaryPath.endsWith(`qemu-system-${facts.arch}`)
+      || !/^QEMU/.test(facts.qemu)) {
+    throw phaseError("preflight", "qemu-binary-missing",
+      `the target did not prove a working qemu-system-${facts.arch}: resolved binary '${facts.qemuBinaryPath || "(none)"}', version output '${facts.qemu.slice(0, 80)}'`);
   }
   return facts;
 }
@@ -222,6 +231,7 @@ function sshProbe(execute = run, fixtureId, target) {
     "test -x /usr/bin/setfacl", "test -x /usr/bin/getfacl", "test -n \"$(virsh uri)\"",
     "printf 'host=%s\\n' \"$(hostname)\"", "printf 'arch=%s\\n' \"$(uname -m)\"",
     "printf 'kernel=%s\\n' \"$(uname -r)\"", "printf 'libvirt=%s\\n' \"$(virsh uri)\"",
+    `printf 'qemu_binary_path=%s\\n' "$(command -v qemu-system-$(uname -m))"`,
     `printf 'qemu=%s\\n' "$(qemu-system-$(uname -m) --version | head -1)"`,
     "printf 'kvm_accessible=%s\\n' \"$( test -r /dev/kvm -a -w /dev/kvm && echo yes || echo no )\"",
     `printf 'fixture_domain_name=%s\\n' ${quotedDomain}`,
@@ -401,7 +411,10 @@ export async function runLinuxMicroVMCutover(context, options = {}) {
   }
   // Saved config (possibly just written above) drives the run; deny-by-default
   // when neither a target param nor saved config exists.
-  const target = loadMicroVMTarget(options);
+  const target = loadMicroVMTarget({
+    ...options,
+    ...(options.userConfigPath ? {} : { userConfigPath: options.userConfigPath }),
+  });
   if (!target) {
     return denied("blocked", reason("policy", "target-not-configured",
       "No microVM target is configured. Ask the user which machine the microVM should run on and pass it as the `target` parameter (user@host, ip, or local)."));

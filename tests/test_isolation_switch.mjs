@@ -19,7 +19,8 @@ const INITRAMFS = "a".repeat(64);
 function stubFacts(fixtureId, host = "test-microvm-host") {
   return {
     host, arch: "x86_64", kernel: "6.8.0-generic",
-    libvirt: "qemu:///system", qemu: `qemu-system-x86_64 version 8.0 stub`,
+    libvirt: "qemu:///system", qemu: "QEMU emulator version 10.2.1 (Debian 1:10.2.1+ds-1ubuntu3.1)",
+    qemuBinaryPath: "/usr/bin/qemu-system-x86_64",
     kvmAccessible: true,
     fixtureDomain: `agentic-driver-${fixtureId}`, fixtureDomainState: "absent",
   };
@@ -326,7 +327,7 @@ test("microVM target: one user decision (sshTarget XOR local); absent config den
   assert.deepEqual({ ...local }, { mode: "local" });
   // Exactly one decision: both or neither is unconfigured.
   assert.equal(loadMicroVMTarget({ target: { mode: "ssh", sshTarget: "user@host", local: true } }), null);
-  assert.equal(loadMicroVMTarget({ targetPath: "/nonexistent/path.json" }), null,
+  assert.equal(loadMicroVMTarget({ targetPath: "/nonexistent/path.json", userConfigPath: "/nonexistent/user.json" }), null,
     "no config file and no override must deny by default");
 
   // Config absent and no target param: denied with ask-the-user guidance
@@ -336,6 +337,7 @@ test("microVM target: one user decision (sshTarget XOR local); absent config den
   const probed = [];
   const unconfigured = await runLinuxMicroVMCutover(tuiContext(), {
     isolationSwitch: enabledSwitch,
+    userConfigPath: "/nonexistent/user-config.json",
     execute: (...args) => { probed.push(args); return { code: 0, stdout: "", stderr: "" }; },
   });
   assert.equal(unconfigured.ok, false);
@@ -360,6 +362,7 @@ test("sshTarget flows verbatim into argv; discovered facts are validated; the mo
   };
   const journey = await runLinuxMicroVMCutover(tuiContext(), {
     ...stub.options,
+    userConfigPath: "/nonexistent/user-config.json",
     execute: observingExecute,
   });
   assert.equal(journey.ok, true);
@@ -372,6 +375,7 @@ test("sshTarget flows verbatim into argv; discovered facts are validated; the mo
   // KVM unavailable denies with a clear code.
   const noKvm = await runLinuxMicroVMCutover(tuiContext(), {
     ...stub.options,
+    userConfigPath: "/nonexistent/user-config.json",
     observeFacts: (_execute, fixtureId) => ({ ...stubFacts(fixtureId), kvmAccessible: false }),
   });
   assert.equal(noKvm.ok, false);
@@ -380,19 +384,22 @@ test("sshTarget flows verbatim into argv; discovered facts are validated; the mo
   // User-level libvirt driver denies with a clear code.
   const userLibvirt = await runLinuxMicroVMCutover(tuiContext(), {
     ...stub.options,
+    userConfigPath: "/nonexistent/user-config.json",
     observeFacts: (_execute, fixtureId) => ({ ...stubFacts(fixtureId), libvirt: "qemu:///session" }),
   });
   assert.equal(userLibvirt.ok, false);
   assert.equal(userLibvirt.reason.code, "libvirt-user-level");
   assert.match(userLibvirt.reason.detail, /system-level libvirt driver/);
 
-  // qemu binary not matching the discovered arch denies.
+  // A broken qemu target denies: arch changed without a matching binary and
+  // a version line missing the QEMU prefix.
   const archMismatch = await runLinuxMicroVMCutover(tuiContext(), {
     ...stub.options,
-    observeFacts: (_execute, fixtureId) => ({ ...stubFacts(fixtureId), arch: "aarch64", qemu: "qemu-system-x86_64 version 8.0 stub" }),
+    userConfigPath: "/nonexistent/user-config.json",
+    observeFacts: (_execute, fixtureId) => ({ ...stubFacts(fixtureId), arch: "aarch64", qemu: "qemu-system-x86_64 version 8.0 stub", qemuBinaryPath: "/usr/bin/qemu-system-x86_64" }),
   });
   assert.equal(archMismatch.ok, false);
-  assert.equal(archMismatch.reason.code, "qemu-arch-mismatch");
+  assert.equal(archMismatch.reason.code, "qemu-binary-missing");
 
   // Model-supplied target parameters are rejected by the closed schema.
   const { registerLinuxMicroVMCutoverInterface } = await import("../scripts/enforcement/linux_microvm_cutover_pi.js");
@@ -410,7 +417,10 @@ test("sshTarget flows verbatim into argv; discovered facts are validated; the mo
 
 test("the shipped REPLACE-WITH template config is rejected target-not-configured before any probe", async () => {
   const { loadMicroVMTarget } = await import("../scripts/enforcement/linux_microvm_cutover_pi.js");
-  const target = loadMicroVMTarget({ targetPath: new URL("../config/microvm-target.v1.json", import.meta.url).pathname });
+  const target = loadMicroVMTarget({
+    targetPath: new URL("../config/microvm-target.v1.json", import.meta.url).pathname,
+    userConfigPath: "/nonexistent/user-config.json",
+  });
   assert.equal(target, null, "the shipped REPLACE-WITH template must not load as a configured target");
   const enabledSwitch = createIsolationSwitch();
   enabledSwitch.set(true);
@@ -418,6 +428,7 @@ test("the shipped REPLACE-WITH template config is rejected target-not-configured
   const denied = await runLinuxMicroVMCutover(tuiContext(), {
     isolationSwitch: enabledSwitch,
     targetPath: new URL("../config/microvm-target.v1.json", import.meta.url).pathname,
+    userConfigPath: "/nonexistent/user-config.json",
     execute: (...args) => { probed.push(args); return { code: 0, stdout: "", stderr: "" }; },
   });
   assert.equal(denied.ok, false);
@@ -432,6 +443,7 @@ test("local:true deploys without ssh; probe discovers arch/kernel/libvirt from t
   const calls = [];
   const journey = await runLinuxMicroVMCutover(tuiContext(), {
     isolationSwitch: switchState,
+    userConfigPath: "/nonexistent/user-config.json",
     target: { local: true },
     // No observeFacts: the default probe path runs the discovery command
     // locally (bash -c, not ssh) and validation uses the discovered facts.
@@ -441,7 +453,7 @@ test("local:true deploys without ssh; probe discovers arch/kernel/libvirt from t
       const commandText = executable === "bash" ? args[1] : "";
       const id = /microvm-[0-9a-f]{24}/.exec(commandText)?.[0];
       if (id && commandText.includes("fixture_domain_name")) {
-        return { code: 0, stdout: `host=this-linux-machine\narch=x86_64\nkernel=6.8.0-generic\nlibvirt=qemu:///system\nqemu=qemu-system-x86_64 version 8.0 stub\nkvm_accessible=yes\nfixture_domain_name=agentic-driver-${id}\nfixture_domain_state=absent`, stderr: "" };
+        return { code: 0, stdout: `host=this-linux-machine\narch=x86_64\nkernel=6.8.0-generic\nlibvirt=qemu:///system\nqemu_binary_path=/usr/bin/qemu-system-x86_64\nqemu=QEMU emulator version 10.2.1 (Debian 1:10.2.1+ds-1ubuntu3.1)\nkvm_accessible=yes\nfixture_domain_name=agentic-driver-${id}\nfixture_domain_state=absent`, stderr: "" };
       }
       const fixtureId = /microvm-[0-9a-f]{24}/.exec(commandText)?.[0];
       const scriptHash = /['"]([0-9a-f]{64})['"]/.exec(commandText)?.[1];
@@ -497,6 +509,7 @@ test("relayed target param: confirmed → config written → run continues in th
     ...stub.options,
     target: "deploy@192.0.2.10",
     targetUserConfigPath: writePath,
+    userConfigPath: "/nonexistent/user-config.json",
   });
   assert.equal(journey.ok, true);
   assert.equal(journey.status, "VERIFIED");
@@ -525,6 +538,7 @@ test("relayed target param: confirmed → config written → run continues in th
     ...stub.options,
     target: "not a host!",
     targetUserConfigPath: writePath,
+    userConfigPath: "/nonexistent/user-config.json",
   });
   assert.equal(invalid.ok, false);
   assert.equal(invalid.reason.code, "target-argument-invalid");
@@ -545,7 +559,7 @@ test("relayed target declined → nothing written; headless setup refused; saved
   // Declined setup confirmation: nothing written, run stopped.
   const declined = await runLinuxMicroVMCutover(
     { mode: "tui", hasUI: true, ui: { confirm: async () => false } },
-    { ...stub.options, target: "deploy@192.0.2.10", targetUserConfigPath: writePath });
+    { ...stub.options, target: "deploy@192.0.2.10", targetUserConfigPath: writePath, userConfigPath: "/nonexistent/user-config.json" });
   assert.equal(declined.ok, false);
   assert.equal(declined.status, "stopped");
   assert.equal(declined.reason.code, "not-granted");
@@ -556,6 +570,7 @@ test("relayed target declined → nothing written; headless setup refused; saved
     isolationSwitch: enabledSwitch,
     target: "deploy@192.0.2.10",
     targetUserConfigPath: writePath,
+    userConfigPath: "/nonexistent/user-config.json",
   });
   assert.equal(headless.ok, false);
   assert.equal(headless.reason.code, "native-tui-required");
@@ -567,7 +582,7 @@ test("relayed target declined → nothing written; headless setup refused; saved
   const confirmCalls = [];
   const saved = await runLinuxMicroVMCutover(
     { mode: "tui", hasUI: true, ui: { confirm: async (title, body) => { confirmCalls.push(title); return true; } } },
-    { ...stub.options, target: undefined, targetUserConfigPath: writePath });
+    { ...stub.options, target: undefined, targetUserConfigPath: writePath, userConfigPath: "/nonexistent/user-config.json" });
   assert.equal(saved.ok, false, "nothing was saved yet, so this still asks the user for a target");
   assert.equal(saved.reason.code, "target-not-configured");
 
@@ -575,14 +590,72 @@ test("relayed target declined → nothing written; headless setup refused; saved
   // subsequent runs without a setup dialog.
   const setup = await runLinuxMicroVMCutover(
     { mode: "tui", hasUI: true, ui: { confirm: async () => true } },
-    { ...stub.options, target: "deploy@192.0.2.10", targetUserConfigPath: writePath });
+    { ...stub.options, target: "deploy@192.0.2.10", targetUserConfigPath: writePath, userConfigPath: "/nonexistent/user-config.json" });
   assert.equal(setup.ok, true);
   confirmCalls.length = 0;
   const reused = await runLinuxMicroVMCutover(
     { mode: "tui", hasUI: true, ui: { confirm: async (title) => { confirmCalls.push(title); return true; } } },
-    { ...stub.options, target: undefined, targetUserConfigPath: writePath });
+    { ...stub.options, target: undefined, targetUserConfigPath: writePath, userConfigPath: "/nonexistent/user-config.json" });
   assert.equal(reused.ok, true);
   assert.equal(reused.status, "VERIFIED");
   assert.equal(confirmCalls.filter((title) => /Use this microVM host\?/.test(title)).length, 0,
     "no setup dialog when the target is already saved");
+});
+
+test("qemu validation: Debian version line passes; missing binary and garbage output deny", async () => {
+  const { run, switchState } = harness();
+  await run("agentic-isolation-enable", tuiContext());
+  const stub = stubEnvironment({ isolationSwitch: switchState, sshTarget: "alias-backend" });
+
+  // A Debian-style version line with no arch token passes when the resolved
+  // binary path ends with qemu-system-<discovered-arch>.
+  const debian = await runLinuxMicroVMCutover(tuiContext(), {
+    ...stub.options,
+    userConfigPath: "/nonexistent/user-config.json",
+    observeFacts: (_execute, fixtureId) => ({
+      ...stubFacts(fixtureId),
+      qemu: "QEMU emulator version 10.2.1 (Debian 1:10.2.1+ds-1ubuntu3.1)",
+      qemuBinaryPath: "/usr/bin/qemu-system-x86_64",
+    }),
+  });
+  assert.equal(debian.ok, true);
+  assert.equal(debian.status, "VERIFIED");
+
+  // A missing resolved binary denies.
+  const noBinary = await runLinuxMicroVMCutover(tuiContext(), {
+    ...stub.options,
+    userConfigPath: "/nonexistent/user-config.json",
+    observeFacts: (_execute, fixtureId) => ({ ...stubFacts(fixtureId), qemuBinaryPath: "" }),
+  });
+  assert.equal(noBinary.ok, false);
+  assert.equal(noBinary.reason.code, "qemu-binary-missing");
+
+  // Garbage version output denies.
+  const garbage = await runLinuxMicroVMCutover(tuiContext(), {
+    ...stub.options,
+    userConfigPath: "/nonexistent/user-config.json",
+    observeFacts: (_execute, fixtureId) => ({ ...stubFacts(fixtureId), qemu: "total garbage output" }),
+  });
+  assert.equal(garbage.ok, false);
+  assert.equal(garbage.reason.code, "qemu-binary-missing");
+});
+
+test("ssh config alias targets are accepted verbatim into argv", async () => {
+  const { run, switchState } = harness();
+  await run("agentic-isolation-enable", tuiContext());
+  const destinations = [];
+  const stub = stubEnvironment({ isolationSwitch: switchState, sshTarget: "linux-backend" });
+  const journey = await runLinuxMicroVMCutover(tuiContext(), {
+    ...stub.options,
+    userConfigPath: "/nonexistent/user-config.json",
+    execute: (executable, args) => {
+      if (executable === "ssh") destinations.push(args[0]);
+      return stub.options.execute(executable, args);
+    },
+  });
+  assert.equal(journey.ok, true);
+  assert.equal(journey.status, "VERIFIED");
+  assert.ok(destinations.length >= 1);
+  assert.ok(destinations.every((destination) => destination === "linux-backend"),
+    "the alias flows verbatim as the ssh destination; ssh config resolves it");
 });
