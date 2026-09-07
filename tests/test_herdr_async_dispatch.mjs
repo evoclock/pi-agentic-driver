@@ -232,8 +232,8 @@ test("role-blocked and non-eligible workers end the journey explicitly", async (
         : { code: 0, stdout: "{}" },
     },
   );
-  assert.equal(working.ok, false, "a hung worker ends the journey explicitly");
-  assert.equal(working.status, "worker-hung");
+  assert.equal(working.ok, false, "an unresponsive agent session ends the journey explicitly");
+  assert.equal(working.status, "worker-unresponsive");
   assert.equal(working.stepCount, 0);
   assert.equal(working.handoff.attempted, false, "no spawn seam configured, no handoff attempted");
 });
@@ -283,7 +283,7 @@ test("maxSteps defaults to 50, accepts up to 200, and rejects out-of-bound value
   assert.equal(fixture.calls.filter((call) => call.action === "prompt").length, 50);
 });
 
-test("a worker not idle across observed exchange cycles is hung and ends explicitly", async () => {
+test("a worker not idle across observed exchange cycles is unresponsive and ends explicitly", async () => {
   const journey = await runWorkerJourney(
     { action: "dispatch", role: "worker", stepPrompt: "x" },
     tuiContext(),
@@ -295,14 +295,14 @@ test("a worker not idle across observed exchange cycles is hung and ends explici
     },
   );
   assert.equal(journey.ok, false);
-  assert.equal(journey.status, "worker-hung");
-  assert.equal(journey.code, "worker-hung");
-  assert.match(journey.report, /status: worker-hung/);
+  assert.equal(journey.status, "worker-unresponsive");
+  assert.equal(journey.code, "worker-unresponsive");
+  assert.match(journey.report, /status: worker-unresponsive/);
   assert.equal(journey.handoff.attempted, false, "no handoff is attempted without a spawn seam");
   assert.match(journey.handoff.reason, /not available in this context/);
 });
 
-test("hung-worker replacement handoff records the handoff and reuses task cards", async () => {
+test("unresponsive-session replacement handoff records the handoff and reuses task cards", async () => {
   const spawned = [];
   const fixture = herdrFixture();
   const journey = await runWorkerJourney(
@@ -319,7 +319,7 @@ test("hung-worker replacement handoff records the handoff and reuses task cards"
       },
     },
   );
-  assert.equal(journey.status, "worker-hung");
+  assert.equal(journey.status, "worker-unresponsive");
   assert.equal(journey.handoff.attempted, true);
   assert.equal(journey.handoff.ok, true);
   assert.equal(journey.handoff.role, "worker");
@@ -339,7 +339,7 @@ test("hung-worker replacement handoff records the handoff and reuses task cards"
       spawnReplacement: async () => { throw new Error("must not be called"); },
     },
   );
-  assert.equal(declined.status, "worker-hung");
+  assert.equal(declined.status, "worker-unresponsive");
   assert.equal(declined.handoff.attempted, false);
   assert.match(declined.handoff.reason, /not granted/);
 
@@ -357,7 +357,7 @@ test("hung-worker replacement handoff records the handoff and reuses task cards"
       spawnReplacement: async ({ role }) => ({ ok: true, role, repository: root }),
     },
   );
-  assert.equal(stalled.status, "worker-hung");
+  assert.equal(stalled.status, "worker-unresponsive");
   assert.equal(stalled.handoff.attempted, true);
   assert.equal(stalled.stepCount, 0, "the stuck exchange is never retried on the same worker");
 });
@@ -371,7 +371,7 @@ test("prohibited effects unchanged: handoff spawns through the lifecycle boundar
   assert.deepEqual(tools, ["agentic_worker_dispatch"]);
 });
 
-test("production wiring: hung handoff spawns a real replacement through the lifecycle boundary", async (t) => {
+test("production wiring: unresponsive handoff spawns a real replacement through the lifecycle boundary", async (t) => {
   const { executeHerdrSpawnWorker } = await import("../scripts/enforcement/herdr_lifecycle_pi.js");
   const lifecycleCalls = [];
   // Hermetic trusted-repository setup: the lifecycle resolves the worker
@@ -439,7 +439,7 @@ test("production wiring: hung handoff spawns a real replacement through the life
       spawnReplacement: spawnSeam,
     },
   );
-  assert.equal(journey.status, "worker-hung");
+  assert.equal(journey.status, "worker-unresponsive");
   assert.equal(journey.handoff.attempted, true);
   assert.equal(journey.handoff.ok, true, "the replacement spawn must succeed through the lifecycle boundary");
   assert.equal(journey.handoff.role, "worker");
