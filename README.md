@@ -230,33 +230,29 @@ QEMU/KVM virtual machine on a Linux host. The job cannot reach the host, the
 network, or anything else outside the machine. The system deletes the machine
 after the job ends.
 
-Each session starts with isolation disabled. In the interactive Pi TUI, run
-`/agentic-isolation-enable` to enable it for the current session. The command
-requires native confirmation. The model cannot run this command. Each microVM run
-requires a separate native confirmation. Run `/agentic-isolation-disable` to
-turn it off; the switch is not saved to settings. Headless sessions remain
-blocked.
+Each session starts with isolation disabled. To enable it, run
+`/agentic-isolation-enable` in the interactive Pi TUI and confirm. The model
+cannot run this command. Each microVM run asks for its own confirmation. To
+turn isolation off, run `/agentic-isolation-disable`. The switch never saves
+to settings. Headless sessions stay blocked.
 
-**Setup and run — three steps.** The cutover target is user-configured and
-deny-by-default; the model cannot choose or change it.
+**Setup and run — three steps.** You choose where the microVM runs. The model
+cannot choose or change it.
 
-1. In the interactive Pi TUI, run
-   `/agentic-isolation-target user@host` (or an ip, or `local` if this session
-   already runs directly on a Linux machine). The command shows exactly what
-   will be written and where, and asks for native confirmation. You never edit
-   a config file by hand.
-2. Run `/agentic-isolation-enable` to enable isolation for this session
-   (native confirmation; not saved to settings).
-3. Invoke the cutover. Each run asks for native confirmation again.
+1. Run `/agentic-isolation-target user@host` in the interactive Pi TUI. Use an
+   IP address, or `local` if this session runs directly on a Linux machine.
+   The command shows what it will write and asks you to confirm. You never
+   edit a config file by hand.
+2. Run `/agentic-isolation-enable`, then confirm.
+3. Invoke the cutover. Each run asks for its own confirmation.
 
-Everything technical is auto-discovered from the target at probe time — you do
-not configure it: architecture from `uname -m`, kernel from `uname -r`, and the
-libvirt URI from `virsh uri`. The probe enforces honest safety checks that need
-no user expertise: `/dev/kvm` exists and is accessible, libvirt reports the
-system-level driver (`qemu:///system`), and a `qemu-system-<arch>` binary
-matching the discovered architecture is present. A mismatch denies the run
-before any mutation. Note: the shipped fixture guest is built for x86_64, so
-the full proof currently requires an x86_64 KVM host.
+The tool discovers the technical details from the machine itself. It reads the
+architecture, kernel, and libvirt URI at probe time. You configure nothing.
+Before any run, the probe checks three requirements: `/dev/kvm` exists and is
+accessible. Libvirt reports the system-level driver (`qemu:///system`). A
+matching `qemu-system-<arch>` binary is present. A failed check denies the run
+before anything happens. Note: the shipped fixture guest is x86_64-built, so
+the full proof currently needs an x86_64 KVM host.
 
 </details>
 
