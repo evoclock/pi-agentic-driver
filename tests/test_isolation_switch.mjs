@@ -391,3 +391,61 @@ test("configured target drives facts validation, argv host, and the model cannot
   assert.equal(withTargetParam.details.ok, false);
   assert.equal(withTargetParam.details.reason.code, "model-parameters-not-allowed");
 });
+
+test("the shipped REPLACE-WITH template config is rejected target-not-configured before any probe", async () => {
+  const { loadMicroVMTarget } = await import("../scripts/enforcement/linux_microvm_cutover_pi.js");
+  const target = loadMicroVMTarget({ targetPath: new URL("../config/microvm-target.v1.json", import.meta.url).pathname });
+  assert.equal(target, null, "the shipped REPLACE-WITH template must not load as a configured target");
+  const enabledSwitch = createIsolationSwitch();
+  enabledSwitch.set(true);
+  const probed = [];
+  const denied = await runLinuxMicroVMCutover(tuiContext(), {
+    isolationSwitch: enabledSwitch,
+    targetPath: new URL("../config/microvm-target.v1.json", import.meta.url).pathname,
+    execute: (...args) => { probed.push(args); return { code: 0, stdout: "", stderr: "" }; },
+  });
+  assert.equal(denied.ok, false);
+  assert.equal(denied.status, "blocked");
+  assert.equal(denied.reason.code, "target-not-configured");
+  assert.equal(probed.length, 0, "no probe runs against the unconfigured template");
+});
+
+test("probe arch expectations derive from the configured target", async () => {
+  const { run, switchState } = harness();
+  await run("agentic-isolation-enable", tuiContext());
+  const calls = [];
+  const journey = await runLinuxMicroVMCutover(tuiContext(), {
+    isolationSwitch: switchState,
+    target: { ...stubEnvironment({ isolationSwitch: switchState }).target, host: "arm-host", expectedArch: "aarch64" },
+    // No observeFacts: the default probe path builds the ssh command from the
+    // configured target and sends it through this execute seam.
+    execute: (executable, args) => {
+      calls.push(args);
+      const id = /microvm-[0-9a-f]{24}/.exec(args[1])?.[0];
+      const digest = (value) => createHash("sha256").update(value).digest("hex");
+      if (id && args[1].includes("fixture_domain_name")) {
+        return { code: 0, stdout: `host=arm-host\narch=aarch64\nkernel=6.8.0-generic\nlibvirt=qemu:///system\nqemu=QEMU aarch64 stub\nfixture_domain_name=agentic-driver-${id}\nfixture_domain_state=absent`, stderr: "" };
+      }
+      const fixtureId = args[4];
+      const domain = `agentic-driver-${fixtureId}`;
+      const marker = `AGENTIC_MICROVM_PROBE:${fixtureId}`;
+      const receipt = { schema: LINUX_MICROVM_CUTOVER_SCHEMA, ok: true, status: "VERIFIED",
+        authorityCreated: false, runtimeActivated: false, persisted: false,
+        identity: { remoteHost: "arm-host", fixtureId, domain },
+        marker: { value: marker, sha256: digest(marker) },
+        scriptHash: args[5], initramfsSha256: INITRAMFS,
+        teardown: { domain: { name: domain, transient: true, destroyOnExit: true, destroyRequested: true, absent: true, checked: true, check: "virsh dominfo/list" },
+          acl: { beforeSha256: "b".repeat(64), afterSha256: "b".repeat(64), equal: true, checked: true, initramfsEntryRemoved: true } },
+        context: { filesystem: { summary: "disk=absent host-share=absent credentials=absent gpu=absent", disk: false, hostShare: false, credentials: false, gpu: false,
+          sha256: digest(JSON.stringify({ disk: false, hostShare: false, credentials: false, gpu: false, initramfsSha256: INITRAMFS })) },
+          network: { summary: "network=absent", guest: false, sha256: digest(JSON.stringify({ network: false })) }, guestMounts: ["proc", "sysfs", "devtmpfs"] } };
+      return { code: 0, stdout: `AGENTIC_MICROVM_RECEIPT: ${JSON.stringify(receipt)}\n`, stderr: "" };
+    },
+  });
+  assert.equal(journey.ok, true);
+  assert.equal(journey.status, "VERIFIED");
+  const probeCommand = calls[0][1];
+  assert.match(probeCommand, /test "\$\(uname -m\)" = aarch64/);
+  assert.match(probeCommand, /qemu-system-aarch64/);
+  assert.doesNotMatch(probeCommand, /x86_64/);
+});

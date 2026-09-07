@@ -244,6 +244,10 @@ and set:
 
 - `host` — the SSH alias of the machine that runs the proof;
 - `expectedArch` — the expected machine architecture (for example `x86_64`);
+  the probe checks `uname -m`, `/dev/kvm`, and the matching
+  `qemu-system-<expectedArch>` binary on the configured host. The shipped
+  fixture guest itself is built for x86_64, so the full proof currently
+  requires `expectedArch: "x86_64"` and an x86_64 KVM host.
 - `libvirtUri` — the expected libvirt URI (for example `qemu:///system`);
 - `expectedKernelPrefix` — the expected kernel version prefix (for example `6.`).
 

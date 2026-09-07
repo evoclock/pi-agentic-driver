@@ -4,4 +4,6 @@
   "expectedArch": "x86_64",
   "libvirtUri": "qemu:///system",
   "expectedKernelPrefix": "6."
+,
+"_comment": "The remote probe requires a libvirt/KVM host with /dev/kvm and the matching qemu-system binary. The fixture guest itself is built for x86_64; set expectedArch to the host architecture observed by uname -m (x86_64 for the shipped fixture)."
 }

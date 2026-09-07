@@ -147,14 +147,16 @@ function parseFacts(stdout, fixtureId, target) {
 function sshProbe(execute = run, fixtureId, target) {
   const domain = fixtureDomainForId(fixtureId);
   const quotedDomain = shellQuote(domain);
+  // Arch expectations derive from the configured target so a non-x86_64
+  // target is probeable with the matching qemu binary name.
   const command = [
-    "set -eu", "test \"$(uname -m)\" = x86_64", "test -r /dev/kvm -a -w /dev/kvm",
-    "test -x /usr/bin/qemu-system-x86_64", "test -x /usr/bin/busybox",
+    "set -eu", `test "$(uname -m)" = ${target.expectedArch}`, "test -r /dev/kvm -a -w /dev/kvm",
+    `test -x /usr/bin/qemu-system-${target.expectedArch}`, "test -x /usr/bin/busybox",
     "test -x /usr/bin/cpio", "test -x /usr/bin/gzip", "test -x /usr/bin/setfacl",
     "test -x /usr/bin/getfacl", "test -n \"$(virsh uri)\"",
     "printf 'host=%s\\n' \"$(hostname)\"", "printf 'arch=%s\\n' \"$(uname -m)\"",
     "printf 'kernel=%s\\n' \"$(uname -r)\"", "printf 'libvirt=%s\\n' \"$(virsh uri)\"",
-    "printf 'qemu=%s\\n' \"$(qemu-system-x86_64 --version | head -1)\"",
+    `printf 'qemu=%s\\n' "$(qemu-system-${target.expectedArch} --version | head -1)"`,
     `printf 'fixture_domain_name=%s\\n' ${quotedDomain}`,
     `if virsh dominfo ${quotedDomain} >/dev/null 2>&1; then printf 'fixture_domain_state=present\\n'; else names=$(virsh list --all --name); if printf '%s\\n' \"$names\" | grep -F -x -- ${quotedDomain} >/dev/null; then printf 'fixture_domain_state=present\\n'; else match_status=$?; if [ \"$match_status\" -eq 1 ]; then printf 'fixture_domain_state=absent\\n'; else exit 1; fi; fi; fi`,
   ].join("; ");
