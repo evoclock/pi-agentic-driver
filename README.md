@@ -42,6 +42,7 @@ proofs for agentic workflows.
 | `agentic_herdr_spawn_worker` | Starts one Pi worker in a pane or tab, with native confirmation. | shipped |
 | `agentic_aidr` | Reviews writing for clarity, simplicity, brevity, and humanity. | shipped |
 | `agentic_linux_microvm_cutover` | Runs one job in a throwaway QEMU/KVM virtual machine on a Linux host. | user-enabled, native confirmation |
+| `agentic_worker_dispatch` | Runs bounded worker journeys and observes worker liveness. | shipped |
 
 **Status: active development and testing.** Each extension ships only after
 it passes fixture-based acceptance, native tests, live-session checks, and
@@ -130,7 +131,6 @@ configured Pi worker roles running under [Herdr](https://herdr.dev/)
 
 <details>
 <summary><strong>herdr-lifecycle — role-labelled worker dispatch</strong> <em>(released, 0.2.1)</em></summary>
-
 `agentic_herdr_spawn_worker` turns one natural-language request into Herdr's
 native documented lifecycle. Select `right`, `below`, or `tab`; give the
 worker a safe role label; choose a model from the active Pi model roster; and
@@ -172,14 +172,42 @@ for the wider task/model-routing and remote-session workflow.
   affinity is an optimisation, never authority: an incompatible or
   unavailable lane yields an explicit review-required result, never silent
   model substitution. Routing grants no dispatch or shell authority.
-- **worker pulse** — liveness observation and dispatch-eligibility
-  observation across role lanes: which agents are alive, what state they
-  are in, and what is ready for work. This observation grants no authority;
-  the system cannot dispatch planned work without it.
+- **worker pulse** — now part of the shipped `agentic_worker_dispatch` tool
+  (see below). Broader role-lane observation remains future work.
 - **task-ledger integration for planned work** — agents read and act
   within the task ledger's card states (what is dispatchable, in progress,
   blocked) without owning board authority: no admission, completion,
   reconciliation, or migration by the agent itself.
+
+<details>
+<summary><strong>herdr-dispatch — continuous worker journeys</strong> <em>(released, 0.5.0)</em></summary>
+
+`agentic_worker_dispatch` runs bounded worker journeys and observes worker
+liveness. Two actions:
+
+- **pulse** reports whether a worker role is alive, its current state, and
+  whether it is dispatch-eligible.
+- **dispatch** runs one journey. The worker works through the existing task
+  sequence (pending, unblocked, unowned items) and handles one
+  prompt-and-report exchange per task. A journey runs at most `maxSteps`
+  steps (default 50, cap 200).
+
+Continuous mode is the default: the journey keeps going until the worker
+finishes the queue or reaches the step bound. Turn-by-turn mode stops after
+each step and is explicit opt-in. Each journey emits one collated marked
+report that covers every step.
+
+A hung worker ends the journey with an explicit `worker-hung` state. A
+worker hangs when it never reaches `idle` across the observed exchange
+cycle, or when its exchange stalls. You can then spawn a replacement agent
+through the guarded lifecycle boundary. The replacement resumes the same
+pending tasks; the journey reuses existing task cards and never duplicates
+them. The stuck exchange is never resent to the same worker.
+
+Journeys never create, own, or complete task cards themselves, never retry
+silently, and return results as untrusted evidence.
+
+</details>
 
 ## Writing clearly
 
