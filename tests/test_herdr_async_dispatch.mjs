@@ -371,11 +371,35 @@ test("prohibited effects unchanged: handoff spawns through the lifecycle boundar
   assert.deepEqual(tools, ["agentic_worker_dispatch"]);
 });
 
-test("production wiring: hung handoff spawns a real replacement through the lifecycle boundary", async () => {
+test("production wiring: hung handoff spawns a real replacement through the lifecycle boundary", async (t) => {
   const { executeHerdrSpawnWorker } = await import("../scripts/enforcement/herdr_lifecycle_pi.js");
   const lifecycleCalls = [];
-  const root = process.cwd();
+  // Hermetic trusted-repository setup: the lifecycle resolves the worker
+  // registry from the coordinator cwd (repo-local first, then the Pi profile
+  // config), and the worker repository must be a Git root sibling. Build a
+  // throwaway coordinator + git-rooted worker repo and chdir into the
+  // coordinator for the duration of the test.
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+  const tempBase = mkdtempSync(join(tmpdir(), "herdr-handoff-"));
+  const coordinator = join(tempBase, "coordinator");
+  const workerRepo = join(tempBase, "worker-repo");
+  mkdirSync(join(coordinator, "config"), { recursive: true });
+  mkdirSync(workerRepo, { recursive: true });
+  writeFileSync(join(coordinator, "config", "herdr-worker-repositories.v1.json"),
+    JSON.stringify({ schema: "agentic-driver.herdr-worker-repositories.v1", repositories: ["worker-repo"] }));
+  execFileSync("git", ["-C", workerRepo, "init"]); // git root check
+  const originalCwd = process.cwd();
+  process.chdir(coordinator);
+  t.after(() => { process.chdir(originalCwd); rmSync(tempBase, { recursive: true, force: true }); });
+
+  const root = workerRepo;
   const model = "ds4/deepseek-v4-flash";
+  // Local journey context resolves the coordinator for the lifecycle; the
+  // dispatch observation stubs below still use the module-level repo root.
+  const localContext = () => ({ mode: "tui", hasUI: true, cwd: coordinator, ui: { confirm: async () => true } });
   const lifecycleRunProcess = async ({ argv, shell, spawnOptions }) => {
     lifecycleCalls.push([...argv]);
     assert.equal(shell, false);
@@ -404,14 +428,14 @@ test("production wiring: hung handoff spawns a real replacement through the life
 
   const journey = await dispatchModule.runWorkerJourney(
     { action: "dispatch", role: "worker", stepPrompt: "x" },
-    tuiContext(),
+    localContext(),
     {
       runProcess: async ({ argv }) => argv[1] === "get"
         ? { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: "worker", agent: "pi", status: "working", repository: root } }) }
         : { code: 0, stdout: "{}" },
       taskStore: taskStore([{ id: "1", status: "pending" }]),
       model: model,
-      repository: "pi-agentic-driver",
+      repository: "worker-repo",
       spawnReplacement: spawnSeam,
     },
   );
