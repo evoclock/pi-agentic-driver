@@ -49,6 +49,8 @@
     "LICENSE",
     "extensions/herdr-lifecycle.ts",
     "scripts/enforcement/herdr_lifecycle_pi.js",
+    "config/microvm-target.v1.example.json",
+    "config/microvm-target.v1.json",
     "config/herdr-worker-repositories.v1.json",
     "extensions/linux-microvm.ts",
     "scripts/enforcement/linux_microvm_cutover_pi.js",

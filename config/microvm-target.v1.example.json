@@ -1,0 +1,7 @@
+{
+  "schema": "agentic-driver.microvm-target.v1",
+  "host": "my-microvm-host",
+  "expectedArch": "x86_64",
+  "libvirtUri": "qemu:///system",
+  "expectedKernelPrefix": "6."
+}

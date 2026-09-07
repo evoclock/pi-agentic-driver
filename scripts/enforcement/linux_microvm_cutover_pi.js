@@ -6,12 +6,17 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { homedir } from "node:os";
 import { isNativeTuiContext } from "./native_tui_context.js";
 
 export const LINUX_MICROVM_CUTOVER_TOOL = "agentic_linux_microvm_cutover";
 export const LINUX_MICROVM_CUTOVER_SCHEMA = "agentic-driver.linux-microvm-cutover.v1";
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REMOTE_FIXTURE = join(SCRIPT_DIR, "linux_microvm_remote_fixture.sh");
+const TARGET_EXAMPLE = join(SCRIPT_DIR, "..", "..", "config", "microvm-target.v1.example.json");
+const TARGET_PACKAGE_CONFIG = join(SCRIPT_DIR, "..", "..", "config", "microvm-target.v1.json");
+const TARGET_USER_CONFIG = join(homedir(), ".pi", "pi", "config", "microvm-target.v1.json");
+const TARGET_SCHEMA = "agentic-driver.microvm-target.v1";
 const REGISTRATIONS = new WeakSet();
 const SWITCH_REGISTRATIONS = new WeakSet();
 const HASH = /^[0-9a-f]{64}$/;
@@ -73,7 +78,47 @@ function fixtureDomainForId(fixtureId) {
   }
   return `agentic-driver-${fixtureId}`;
 }
-function parseFacts(stdout, fixtureId) {
+// --- User-configured trusted target (deny-by-default) -----------------------
+// The cutover target is never hardcoded and never model-supplied. It is read
+// read-only from the user's own config (~/.pi/pi/config/microvm-target.v1.json)
+// first, then a package-local config/microvm-target.v1.json. The shipped
+// package file is a template without personal values; absence or invalid
+// content denies with target-not-configured and setup guidance.
+const TARGET_FIELDS = new Set(["schema", "host", "expectedArch", "libvirtUri", "expectedKernelPrefix"]);
+export function loadMicroVMTarget(options = {}) {
+  if (options.target && typeof options.target === "object") return options.target;
+  const paths = [
+    ...(typeof options.targetPath === "string" ? [options.targetPath] : []),
+    TARGET_USER_CONFIG,
+    TARGET_PACKAGE_CONFIG,
+  ];
+  for (const path of paths) {
+    try {
+      const parsed = JSON.parse(readFileSync(path, "utf8"));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      if (Object.keys(parsed).some((key) => !TARGET_FIELDS.has(key))) continue;
+      if (parsed.schema !== TARGET_SCHEMA) continue;
+      if (typeof parsed.host !== "string" || !parsed.host.trim()
+          || typeof parsed.expectedArch !== "string" || !parsed.expectedArch.trim()
+          || typeof parsed.libvirtUri !== "string" || !parsed.libvirtUri.trim()
+          || typeof parsed.expectedKernelPrefix !== "string" || !parsed.expectedKernelPrefix.trim()) continue;
+      // Template placeholders are not a configured target.
+      if ([parsed.host, parsed.expectedArch, parsed.libvirtUri, parsed.expectedKernelPrefix]
+          .some((value) => value.includes("REPLACE-WITH-"))) continue;
+      return Object.freeze({ ...parsed, __path: path });
+    } catch {
+      // Missing or unreadable candidate: fall through to the next path.
+    }
+  }
+  return null;
+}
+
+function targetNotConfigured() {
+  return denied("blocked", reason("policy", "target-not-configured",
+    "No trusted microVM target is configured. Copy config/microvm-target.v1.example.json to ~/.pi/pi/config/microvm-target.v1.json and set host (ssh alias), expectedArch, libvirtUri, and expectedKernelPrefix; the model cannot choose the target."));
+}
+
+function parseFacts(stdout, fixtureId, target) {
   const values = {};
   for (const line of String(stdout || "").split("\n")) {
     if (!line) continue;
@@ -91,15 +136,15 @@ function parseFacts(stdout, fixtureId) {
     fixtureDomainState: values.fixture_domain_state,
   };
   const domain = fixtureDomainForId(fixtureId);
-  if (facts.host !== "ubuntu-backend" || facts.arch !== "x86_64" || facts.libvirt !== "qemu:///system"
+  if (facts.host !== target.host || facts.arch !== target.expectedArch || facts.libvirt !== target.libvirtUri
       || facts.fixtureDomain !== domain || facts.fixtureDomainState !== "absent"
-      || typeof facts.kernel !== "string" || !facts.kernel
+      || typeof facts.kernel !== "string" || !facts.kernel.startsWith(target.expectedKernelPrefix)
       || typeof facts.qemu !== "string" || !facts.qemu) {
-    throw phaseError("preflight", "facts-unexpected", "fixed host facts or the exact fixture-domain absence check failed");
+    throw phaseError("preflight", "facts-unexpected", "observed host facts do not match the configured trusted target, or the exact fixture-domain absence check failed");
   }
   return facts;
 }
-function sshProbe(execute = run, fixtureId) {
+function sshProbe(execute = run, fixtureId, target) {
   const domain = fixtureDomainForId(fixtureId);
   const quotedDomain = shellQuote(domain);
   const command = [
@@ -113,11 +158,11 @@ function sshProbe(execute = run, fixtureId) {
     `printf 'fixture_domain_name=%s\\n' ${quotedDomain}`,
     `if virsh dominfo ${quotedDomain} >/dev/null 2>&1; then printf 'fixture_domain_state=present\\n'; else names=$(virsh list --all --name); if printf '%s\\n' \"$names\" | grep -F -x -- ${quotedDomain} >/dev/null; then printf 'fixture_domain_state=present\\n'; else match_status=$?; if [ \"$match_status\" -eq 1 ]; then printf 'fixture_domain_state=absent\\n'; else exit 1; fi; fi; fi`,
   ].join("; ");
-  const result = execute("ssh", ["linux-backend", command], { timeout: 30000 });
+  const result = execute("ssh", [target.host, command], { timeout: 30000 });
   if (result.code !== 0) {
-    throw phaseError("preflight", "probe-failed", result.stderr || result.error || "fixed linux-backend capability probe failed");
+    throw phaseError("preflight", "probe-failed", result.stderr || result.error || "configured microVM target capability probe failed");
   }
-  return parseFacts(result.stdout, fixtureId);
+  return parseFacts(result.stdout, fixtureId, target);
 }
 function exactKeys(value, keys, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)
@@ -133,15 +178,16 @@ function requireHash(value, label) {
 function requireBoolean(value, label) {
   if (typeof value !== "boolean") throw phaseError("evidence", "receipt-invalid", `${label} is not boolean evidence`);
 }
-function validateFacts(facts, fixtureId) {
+function validateFacts(facts, fixtureId, target) {
   const domain = fixtureDomainForId(fixtureId);
   if (!facts || typeof facts !== "object" || Array.isArray(facts)) {
     throw phaseError("preflight", "facts-invalid", "trusted host facts are not an object");
   }
-  if (facts.host !== "ubuntu-backend" || facts.arch !== "x86_64" || facts.libvirt !== "qemu:///system"
+  if (facts.host !== target.host || facts.arch !== target.expectedArch || facts.libvirt !== target.libvirtUri
       || facts.fixtureDomain !== domain || facts.fixtureDomainState !== "absent"
-      || typeof facts.kernel !== "string" || !facts.kernel || typeof facts.qemu !== "string" || !facts.qemu) {
-    throw phaseError("preflight", "facts-unexpected", "fixed host facts or the exact fixture-domain absence check failed");
+      || typeof facts.kernel !== "string" || !facts.kernel.startsWith(target.expectedKernelPrefix)
+      || typeof facts.qemu !== "string" || !facts.qemu) {
+    throw phaseError("preflight", "facts-unexpected", "observed host facts do not match the configured trusted target, or the exact fixture-domain absence check failed");
   }
   return facts;
 }
@@ -254,6 +300,10 @@ export async function runLinuxMicroVMCutover(context, options = {}) {
     return denied("blocked", reason("policy", "isolation-not-enabled",
       "Isolation activation is not enabled in this session. Run the agentic-isolation-enable command in the Pi TUI."));
   }
+  // User-configured trusted target, deny-by-default; the model cannot select
+  // or change it.
+  const target = loadMicroVMTarget(options);
+  if (!target) return targetNotConfigured();
   if (!isNativeTuiContext(context)) {
     return denied("blocked", reason("policy", "native-tui-required",
       "Open the Linux microVM cutover in the interactive Pi TUI; headless runs are denied."));
@@ -271,13 +321,13 @@ export async function runLinuxMicroVMCutover(context, options = {}) {
     return denied("denied", reasonFromError(error, "payload", "payload-read-failed"));
   }
   const execute = options.execute || run;
-  const observe = options.observeFacts || ((executeArg, id) => sshProbe(executeArg, id));
+  const observe = options.observeFacts || ((executeArg, id) => sshProbe(executeArg, id, target));
   let facts;
-  try { facts = validateFacts(observe(execute, fixtureId), fixtureId); }
+  try { facts = validateFacts(observe(execute, fixtureId), fixtureId, target); }
   catch (error) { return denied("denied", reasonFromError(error, "preflight", "facts-observation-failed")); }
   const body = [
-    "Run one live transient QEMU/KVM microVM proof on linux-backend?",
-    `Remote host: ${facts.host} (${facts.arch}, kernel ${facts.kernel})`,
+    "Run one live transient QEMU/KVM microVM proof on the configured trusted target?",
+    `Configured host: ${target.host} — observed host: ${facts.host} (${facts.arch}, kernel ${facts.kernel})`,
     `Backend: ${facts.libvirt}; ${facts.qemu}`,
     `Fixture: ${fixtureId}; domain: ${fixtureDomain} (preflight absent)`,
     `Versioned fixture SHA-256: ${scriptHash}`,
@@ -293,14 +343,14 @@ export async function runLinuxMicroVMCutover(context, options = {}) {
   if (confirmed !== true) return denied("stopped", reason("confirmation", "not-granted", "Native confirmation was not granted."));
 
   let current;
-  try { current = validateFacts(observe(execute, fixtureId), fixtureId); }
+  try { current = validateFacts(observe(execute, fixtureId), fixtureId, target); }
   catch (error) { return denied("denied", reason("reobserve", "facts-observation-failed", `MicroVM facts changed: ${error.message}`)); }
   if (JSON.stringify(current) !== JSON.stringify(facts)) {
     return denied("denied", reason("reobserve", "facts-changed", "MicroVM facts changed after confirmation"));
   }
   inFlight = true;
   try {
-    const result = execute("ssh", ["linux-backend", "bash", "-s", "--", fixtureId, scriptHash], { input: script, timeout: 180000 });
+    const result = execute("ssh", [target.host, "bash", "-s", "--", fixtureId, scriptHash], { input: script, timeout: 180000 });
     if (!result || result.code !== 0) {
       return denied("blocked", normalizedForwardedStderr(result, "fixture", "execution-failed", "fixed microVM fixture failed"));
     }
@@ -347,7 +397,7 @@ export function registerLinuxMicroVMCutoverInterface(pi, options = {}) {
     return { content: [{ type: "text", text: `${outcomeLine(value)}\n${JSON.stringify(value, null, 2)}` }], details: value };
   };
   pi.registerTool({ name: LINUX_MICROVM_CUTOVER_TOOL, label: "Verify Linux microVM",
-    description: "Run one native-confirmed transient QEMU/KVM microVM proof on linux-backend. Requires the session isolation switch (agentic-isolation-enable command) and native confirmation.",
+    description: "Run one native-confirmed transient QEMU/KVM microVM proof on the user-configured trusted target. Requires the session isolation switch (agentic-isolation-enable command) and native confirmation.",
     parameters: { type: "object", additionalProperties: false, properties: {} }, execute });
   pi.registerCommand?.("agentic-linux-microvm-cutover", { description: "Run the native-confirmed Linux microVM proof",
     handler: async (args, context) => commandArgumentsPresent(args)
@@ -396,7 +446,7 @@ export function registerIsolationSwitchCommands(pi, options = {}) {
         confirmed = await context.ui.confirm("Enable Linux microVM isolation", [
           "Enable the isolation-activation switch for this session?",
           switchNotice(),
-          "Effect: the agentic_linux_microvm_cutover tool may run one native-confirmed transient QEMU/KVM microVM proof on linux-backend per invocation.",
+          "Effect: the agentic_linux_microvm_cutover tool may run one native-confirmed transient QEMU/KVM microVM proof on the configured trusted target per invocation.",
           "The switch is session-scoped: it never persists to settings and the model cannot change it.",
         ].join("\n"));
       } catch (error) {

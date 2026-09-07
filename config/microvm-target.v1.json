@@ -1,0 +1,7 @@
+{
+  "schema": "agentic-driver.microvm-target.v1",
+  "host": "REPLACE-WITH-YOUR-SSH-ALIAS",
+  "expectedArch": "REPLACE-WITH-EXPECTED-ARCH",
+  "libvirtUri": "REPLACE-WITH-LIBVIRT-URI",
+  "expectedKernelPrefix": "REPLACE-WITH-KERNEL-PREFIX"
+}

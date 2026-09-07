@@ -16,22 +16,22 @@ import registerLinuxMicroVMCutover from "../extensions/linux-microvm.ts";
 
 const INITRAMFS = "a".repeat(64);
 
-function stubFacts(fixtureId) {
+function stubFacts(fixtureId, host = "test-microvm-host") {
   return {
-    host: "ubuntu-backend", arch: "x86_64", kernel: "6.8.0-generic",
+    host, arch: "x86_64", kernel: "6.8.0-generic",
     libvirt: "qemu:///system", qemu: "QEMU stub 8.0",
     fixtureDomain: `agentic-driver-${fixtureId}`, fixtureDomainState: "absent",
   };
 }
 
-function stubReceipt(fixtureId, scriptHash) {
+function stubReceipt(fixtureId, scriptHash, host = "test-microvm-host") {
   const domain = `agentic-driver-${fixtureId}`;
   const marker = `AGENTIC_MICROVM_PROBE:${fixtureId}`;
   const digest = (value) => createHash("sha256").update(value).digest("hex");
   return {
     schema: LINUX_MICROVM_CUTOVER_SCHEMA, ok: true, status: "VERIFIED",
     authorityCreated: false, runtimeActivated: false, persisted: false,
-    identity: { remoteHost: "ubuntu-backend", fixtureId, domain },
+    identity: { remoteHost: host, fixtureId, domain },
     marker: { value: marker, sha256: digest(marker) },
     scriptHash, initramfsSha256: INITRAMFS,
     teardown: {
@@ -51,25 +51,32 @@ function stubReceipt(fixtureId, scriptHash) {
 // Runs the cutover with injected facts observation and a structured receipt
 // stub derived from the real invocation arguments; no ssh, no network, no
 // real remote execution.
-function stubEnvironment({ confirm = async () => true, factsSequence, isolationSwitch } = {}) {
+function stubEnvironment({ confirm = async () => true, factsSequence, isolationSwitch, host = "test-microvm-host" } = {}) {
   let observed = 0;
   let lastFixtureId;
+  const target = Object.freeze({
+    schema: "agentic-driver.microvm-target.v1",
+    host,
+    expectedArch: "x86_64",
+    libvirtUri: "qemu:///system",
+    expectedKernelPrefix: "6.",
+  });
   const observe = (_execute, fixtureId) => {
     lastFixtureId = fixtureId;
-    const value = Array.isArray(factsSequence) ? factsSequence[Math.min(observed, factsSequence.length - 1)](fixtureId) : stubFacts(fixtureId);
+    const value = Array.isArray(factsSequence) ? factsSequence[Math.min(observed, factsSequence.length - 1)](fixtureId) : stubFacts(fixtureId, host);
     observed += 1;
     return structuredClone(value);
   };
   const execute = (executable, args) => {
-    if (executable === "ssh" && args[0] === "linux-backend" && args[1] === "bash"
+    if (executable === "ssh" && args[0] === host && args[1] === "bash"
         && args[2] === "-s" && args[3] === "--") {
       const [, , , , fixtureId, scriptHash] = args;
-      return { code: 0, stdout: `AGENTIC_MICROVM_RECEIPT: ${JSON.stringify(stubReceipt(fixtureId, scriptHash))}\n`, stderr: "", error: undefined };
+      return { code: 0, stdout: `AGENTIC_MICROVM_RECEIPT: ${JSON.stringify(stubReceipt(fixtureId, scriptHash, host))}\n`, stderr: "", error: undefined };
     }
     return { code: 0, stdout: "", stderr: "", error: undefined };
   };
   const context = { mode: "tui", hasUI: true, ui: { confirm } };
-  return { context, options: { execute, observeFacts: observe, isolationSwitch }, lastFixtureId: () => lastFixtureId };
+  return { context, options: { execute, observeFacts: observe, isolationSwitch, target }, lastFixtureId: () => lastFixtureId, target };
 }
 
 function harness() {
@@ -79,8 +86,14 @@ function harness() {
     registerCommand: (name, def) => { commands[name] = def; },
   };
   const switchState = createIsolationSwitch();
+  const stub = stubEnvironment({ isolationSwitch: switchState });
   registerIsolationSwitchCommands(pi, { isolationSwitch: switchState });
-  registerLinuxMicroVMCutoverInterface(pi, { isolationSwitch: switchState });
+  registerLinuxMicroVMCutoverInterface(pi, {
+    isolationSwitch: switchState,
+    target: stub.target,
+    execute: stub.options.execute,
+    observeFacts: stub.options.observeFacts,
+  });
   const run = async (name, context, args = "") => commands[name].handler(args, context);
   return { commands, run, switchState };
 }
@@ -231,8 +244,9 @@ test("cutover tool output opens with a prominent VERIFIED status line and keeps 
   const { run, switchState } = harness();
   await run("agentic-isolation-enable", tuiContext());
   const notifications = [];
+  const stub = stubEnvironment({ isolationSwitch: switchState });
   const context = { mode: "tui", hasUI: true, cwd: process.cwd(), ui: { confirm: async () => true, notify: (message, type) => notifications.push({ message, type }) } };
-  const value = await runLinuxMicroVMCutover(context, stubEnvironment({ isolationSwitch: switchState }).options);
+  const value = await runLinuxMicroVMCutover(context, stub.options);
   assert.equal(value.ok, true);
   assert.equal(value.status, "VERIFIED");
 
@@ -243,10 +257,14 @@ test("cutover tool output opens with a prominent VERIFIED status line and keeps 
   assert.equal(commandValue.ok, true);
 
   // Reconstruct the tool output text exactly as registerTool does.
-  const { registerLinuxMicroVMCutoverInterface } = await import("../scripts/enforcement/linux_microvm_cutover_pi.js");
   const registered = {};
   const pi = { registerTool: (tool) => { registered[tool.name] = tool; }, registerCommand: () => {} };
-  registerLinuxMicroVMCutoverInterface(pi, { isolationSwitch: switchState });
+  registerLinuxMicroVMCutoverInterface(pi, {
+    isolationSwitch: switchState,
+    target: stub.target,
+    execute: stub.options.execute,
+    observeFacts: stub.options.observeFacts,
+  });
   const result = await registered[LINUX_MICROVM_CUTOVER_TOOL].execute("t", {}, undefined, undefined, context);
   const text = result.content[0].text;
   const firstLine = text.split("\n")[0];
@@ -273,7 +291,8 @@ test("denial outcomes produce a prominent status line with the reason code", asy
   const switchState = createIsolationSwitch();
   const registered = {};
   const pi = { registerTool: (tool) => { registered[tool.name] = tool; }, registerCommand: () => {} };
-  registerLinuxMicroVMCutoverInterface(pi, { isolationSwitch: switchState });
+  const stub = stubEnvironment({ isolationSwitch: switchState });
+  registerLinuxMicroVMCutoverInterface(pi, { isolationSwitch: switchState, target: stub.target, execute: stub.options.execute, observeFacts: stub.options.observeFacts });
 
   // Switch off: blocked with reason code isolation-not-enabled.
   const blocked = await registered[LINUX_MICROVM_CUTOVER_TOOL].execute("t", {}, undefined, undefined, tuiContext());
@@ -294,4 +313,81 @@ test("denial outcomes produce a prominent status line with the reason code", asy
   const declinedText = declined.content[0].text;
   assert.match(declinedText.split("\n")[0], /^MICROVM CUTOVER: STOPPED — reason not-granted/);
   assert.deepEqual(JSON.parse(declinedText.slice(declinedText.indexOf("{"))), declined.details);
+});
+
+test("microVM target: absent config denies target-not-configured; configured target drives validation and argv", async () => {
+  const { loadMicroVMTarget } = await import("../scripts/enforcement/linux_microvm_cutover_pi.js");
+  const target = loadMicroVMTarget({ target: stubEnvironment().target });
+  assert.equal(target.host, "test-microvm-host");
+  assert.equal(loadMicroVMTarget({ targetPath: "/nonexistent/path.json" }), null,
+    "no config file and no override must deny by default");
+
+  // Config absent: the journey is denied with a clear setup message before any
+  // probe, even with the switch enabled and a TUI present.
+  const enabledSwitch = createIsolationSwitch();
+  enabledSwitch.set(true);
+  const probed = [];
+  const unconfigured = await runLinuxMicroVMCutover(tuiContext(), {
+    isolationSwitch: enabledSwitch,
+    execute: (...args) => { probed.push(args); return { code: 0, stdout: "", stderr: "" }; },
+  });
+  assert.equal(unconfigured.ok, false);
+  assert.equal(unconfigured.status, "blocked");
+  assert.equal(unconfigured.reason.code, "target-not-configured");
+  assert.match(unconfigured.reason.detail, /microvm-target\.v1\.example/);
+  assert.match(unconfigured.reason.detail, /\.pi\/pi\/config/);
+  assert.equal(probed.length, 0, "no probe runs without a configured target");
+});
+
+test("configured target drives facts validation, argv host, and the model cannot supply a target", async () => {
+  const { run, switchState } = harness();
+  await run("agentic-isolation-enable", tuiContext());
+  const hostsSeen = [];
+  const stub = stubEnvironment({
+    isolationSwitch: switchState,
+    host: "my-configured-host",
+  });
+  const observingExecute = (executable, args) => {
+    if (executable === "ssh") hostsSeen.push(args[0]);
+    return stub.options.execute(executable, args);
+  };
+  const journey = await runLinuxMicroVMCutover(tuiContext(), {
+    ...stub.options,
+    execute: observingExecute,
+    target: { ...stub.target, host: "my-configured-host" },
+  });
+  assert.equal(journey.ok, true);
+  assert.equal(journey.status, "VERIFIED");
+  assert.ok(hostsSeen.length >= 1, "execution uses the configured host");
+  assert.ok(hostsSeen.every((host) => host === "my-configured-host"),
+    "ssh argv always uses the configured host, never a hardcoded or model-supplied one");
+
+  // Facts mismatch (wrong arch): denied facts-unexpected.
+  const mismatched = await runLinuxMicroVMCutover(tuiContext(), {
+    ...stub.options,
+    target: { ...stub.target, expectedArch: "aarch64" },
+  });
+  assert.equal(mismatched.ok, false);
+  assert.equal(mismatched.reason.code, "facts-unexpected");
+
+  // Kernel prefix mismatch: denied facts-unexpected.
+  const wrongKernel = await runLinuxMicroVMCutover(tuiContext(), {
+    ...stub.options,
+    target: { ...stub.target, expectedKernelPrefix: "5." },
+  });
+  assert.equal(wrongKernel.ok, false);
+  assert.equal(wrongKernel.reason.code, "facts-unexpected");
+
+  // Model-supplied target parameters are rejected by the closed schema.
+  const { registerLinuxMicroVMCutoverInterface } = await import("../scripts/enforcement/linux_microvm_cutover_pi.js");
+  const registered = {};
+  const pi = { registerTool: (tool) => { registered[tool.name] = tool; }, registerCommand: () => {} };
+  registerLinuxMicroVMCutoverInterface(pi, {
+    isolationSwitch: switchState, target: stub.target,
+    execute: stub.options.execute, observeFacts: stub.options.observeFacts,
+  });
+  const withTargetParam = await registered[LINUX_MICROVM_CUTOVER_TOOL].execute(
+    "t", { host: "model-chosen-host" }, undefined, undefined, tuiContext());
+  assert.equal(withTargetParam.details.ok, false);
+  assert.equal(withTargetParam.details.reason.code, "model-parameters-not-allowed");
 });

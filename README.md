@@ -237,6 +237,21 @@ requires a separate native confirmation. Run `/agentic-isolation-disable` to
 turn it off; the switch is not saved to settings. Headless sessions remain
 blocked.
 
+**One-time setup — trusted target.** The cutover target is user-configured and
+deny-by-default; the model cannot choose or change it. Copy
+`config/microvm-target.v1.example.json` to `~/.pi/pi/config/microvm-target.v1.json`
+and set:
+
+- `host` — the SSH alias of the machine that runs the proof;
+- `expectedArch` — the expected machine architecture (for example `x86_64`);
+- `libvirtUri` — the expected libvirt URI (for example `qemu:///system`);
+- `expectedKernelPrefix` — the expected kernel version prefix (for example `6.`).
+
+Every run probes the configured host and compares the observed facts against
+these expectations; a mismatch denies the run before any mutation. The fixed
+`ssh <configured-host>` arguments are built only from this config file — never
+from model input.
+
 </details>
 
 **Under development in this theme:**
