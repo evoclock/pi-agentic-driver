@@ -318,7 +318,7 @@ test("denial outcomes produce a prominent status line with the reason code", asy
   assert.deepEqual(JSON.parse(declinedText.slice(declinedText.indexOf("{"))), declined.details);
 });
 
-test("microVM target: one user decision (sshTarget XOR local); absent config denies target-not-configured", async () => {
+test("microVM target: one user decision (sshTarget XOR local); absent config denies with ask-the-user guidance", async () => {
   const { loadMicroVMTarget } = await import("../scripts/enforcement/linux_microvm_cutover_pi.js");
   const sshTarget = loadMicroVMTarget({ target: stubEnvironment().target });
   assert.deepEqual({ ...sshTarget }, { mode: "ssh", sshTarget: "user@test-microvm-host" });
@@ -329,8 +329,8 @@ test("microVM target: one user decision (sshTarget XOR local); absent config den
   assert.equal(loadMicroVMTarget({ targetPath: "/nonexistent/path.json" }), null,
     "no config file and no override must deny by default");
 
-  // Config absent: the journey is denied with a clear setup message before any
-  // probe, even with the switch enabled and a TUI present.
+  // Config absent and no target param: denied with ask-the-user guidance
+  // before any probe, even with the switch enabled and a TUI present.
   const enabledSwitch = createIsolationSwitch();
   enabledSwitch.set(true);
   const probed = [];
@@ -341,8 +341,8 @@ test("microVM target: one user decision (sshTarget XOR local); absent config den
   assert.equal(unconfigured.ok, false);
   assert.equal(unconfigured.status, "blocked");
   assert.equal(unconfigured.reason.code, "target-not-configured");
-  assert.match(unconfigured.reason.detail, /microvm-target\.v1\.example/);
-  assert.match(unconfigured.reason.detail, /\.pi\/pi\/config/);
+  assert.match(unconfigured.reason.detail, /Ask the user which machine/);
+  assert.match(unconfigured.reason.detail, /`target` parameter/);
   assert.equal(probed.length, 0, "no probe runs without a configured target");
 });
 
@@ -474,83 +474,115 @@ test("local:true deploys without ssh; probe discovers arch/kernel/libvirt from t
   assert.match(calls[0][2], /kvm_accessible/);
 });
 
-test("agentic-isolation-target: writes the one-decision config behind confirmation; loader accepts it end-to-end", async (t) => {
+
+test("relayed target param: confirmed → config written → run continues in the same invocation", async (t) => {
   const { mkdtempSync, existsSync, readFileSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
-  const tempRoot = mkdtempSync(join(tmpdir(), "microvm-target-"));
+  const tempRoot = mkdtempSync(join(tmpdir(), "microvm-relay-"));
   t.after(() => rmSync(tempRoot, { recursive: true, force: true }));
-  const writePath = join(tempRoot, "nested", "dir", "microvm-target.v1.json");
+  const writePath = join(tempRoot, "config", "microvm-target.v1.json");
+  const { targetArgumentError } = await import("../scripts/enforcement/linux_microvm_cutover_pi.js");
+  const enabledSwitch = createIsolationSwitch();
+  enabledSwitch.set(true);
 
-  const commands = {};
-  const pi = { registerTool: () => {}, registerCommand: (name, def) => { commands[name] = def; } };
-  const { registerIsolationSwitchCommands, loadMicroVMTarget } = await import("../scripts/enforcement/linux_microvm_cutover_pi.js");
-  registerIsolationSwitchCommands(pi, { isolationSwitch: createIsolationSwitch(), targetUserConfigPath: writePath });
-  const runTarget = (args, context) => commands["agentic-isolation-target"].handler(args, context);
-  const confirmContext = (confirmValue) => ({ mode: "tui", hasUI: true, ui: { confirm: async () => confirmValue } });
+  const confirmBodies = [];
+  const stub = stubEnvironment({ isolationSwitch: enabledSwitch, sshTarget: "deploy@192.0.2.10" });
+  const confirmCalls = [];
+  const context = {
+    mode: "tui", hasUI: true, cwd: process.cwd(),
+    ui: { confirm: async (title, body) => { confirmCalls.push({ title, body }); return true; } },
+  };
+  const journey = await runLinuxMicroVMCutover(context, {
+    ...stub.options,
+    target: "deploy@192.0.2.10",
+    targetUserConfigPath: writePath,
+  });
+  assert.equal(journey.ok, true);
+  assert.equal(journey.status, "VERIFIED");
 
-  // Missing argument and bad shapes deny with clear codes; nothing is written.
-  for (const [args, code] of [
-    ["", "target-argument-required"],
-    [["   "], "target-argument-required"],
-    ["REPLACE-WITH-user@host", "target-argument-placeholder"],
-    ["not a host!", "target-argument-invalid"],
-    [["user@host extra"], "target-argument-invalid"],
-    [["local true"], "target-argument-invalid"],
-  ]) {
-    const denied = await runTarget(args, confirmContext(true));
-    assert.equal(denied.ok, false, `${JSON.stringify(args)}`);
-    assert.equal(denied.reason.code, code);
-  }
-  assert.equal(existsSync(writePath), false, "denials must not write anything");
+  // The confirmation dialog named the target explicitly.
+  assert.equal(confirmCalls.length, 2, "one setup confirmation + one per-run confirmation");
+  assert.match(confirmCalls[0].body, /deploy@192\.0\.2\.10/);
+  assert.match(confirmCalls[0].body, /saves it to your Pi config/);
 
-  // Headless is denied before any write.
-  const headless = await runTarget("user@host", { mode: "print" });
-  assert.equal(headless.reason.code, "native-tui-required");
-  assert.equal(existsSync(writePath), false);
+  // The one-decision config was written and the run continued in the same
+  // invocation using it.
+  assert.equal(existsSync(writePath), true);
+  assert.deepEqual(JSON.parse(readFileSync(writePath, "utf8")),
+    { schema: "agentic-driver.microvm-target.v1", sshTarget: "deploy@192.0.2.10" });
 
-  // Declined confirmation writes nothing.
-  const declined = await runTarget("deploy@192.168.1.50", confirmContext(false));
-  assert.equal(declined.status, "stopped");
-  assert.equal(declined.reason.code, "not-granted");
-  assert.equal(existsSync(writePath), false);
+  // Argument shape validation is exported and shared.
+  assert.equal(targetArgumentError("user@host"), null);
+  assert.equal(targetArgumentError("192.168.1.1"), null);
+  assert.equal(targetArgumentError("local"), null);
+  assert.equal(targetArgumentError("REPLACE-WITH-host")?.code, "target-argument-placeholder");
+  assert.equal(targetArgumentError("two words")?.code, "target-argument-invalid");
+  assert.equal(targetArgumentError("")?.code, "target-argument-required");
 
-  // Confirmed ssh target: creates the directory, writes the closed schema,
-  // returns a clear status line with the isolation-enable reminder.
-  const configured = await runTarget("deploy@192.168.1.50", confirmContext(true));
-  assert.equal(configured.ok, true);
-  assert.equal(configured.status, "CONFIGURED");
-  assert.deepEqual(configured.configured, { sshTarget: "deploy@192.168.1.50" });
-  assert.match(configured.detail, /isolation-enable is still required per session/);
-  assert.equal(existsSync(writePath), true, "the command must create the directory");
-  const written = JSON.parse(readFileSync(writePath, "utf8"));
-  assert.deepEqual(written, { schema: "agentic-driver.microvm-target.v1", sshTarget: "deploy@192.168.1.50" });
-
-  // The loader accepts the written file end-to-end (targetPath override).
-  const loaded = loadMicroVMTarget({ targetPath: writePath });
-  const { __path, ...loadedFields } = loaded;
-  assert.deepEqual(loadedFields, { mode: "ssh", sshTarget: "deploy@192.168.1.50" });
-
-  // Confirmed local:true writes the other decision.
-  const localConfigured = await runTarget("local", confirmContext(true));
-  assert.equal(localConfigured.ok, true);
-  assert.deepEqual(localConfigured.configured, { local: true });
-  const writtenLocal = JSON.parse(readFileSync(writePath, "utf8"));
-  assert.deepEqual(writtenLocal, { schema: "agentic-driver.microvm-target.v1", local: true });
-  const loadedLocal = loadMicroVMTarget({ targetPath: writePath });
-  const { __path: localPath, ...localFields } = loadedLocal;
-  assert.deepEqual(localFields, { mode: "local" });
-  void localPath;
+  // Invalid target param denies without confirmation or write.
+  const invalid = await runLinuxMicroVMCutover(context, {
+    ...stub.options,
+    target: "not a host!",
+    targetUserConfigPath: writePath,
+  });
+  assert.equal(invalid.ok, false);
+  assert.equal(invalid.reason.code, "target-argument-invalid");
+  void existsSync; void join; void tmpdir; void rmSync; void mkdtempSync;
 });
 
-test("agentic-isolation-target is registered as a command, never a tool", () => {
-  const tools = [];
-  const commands = [];
-  const pi = {
-    registerTool: (tool) => tools.push(tool.name),
-    registerCommand: (name) => commands.push(name),
-  };
-  registerIsolationSwitchCommands(pi, { isolationSwitch: createIsolationSwitch() });
-  assert.deepEqual(tools, [], "the target-setup command must not be a tool");
-  assert.ok(commands.includes("agentic-isolation-target"));
+test("relayed target declined → nothing written; headless setup refused; saved config reused", async (t) => {
+  const { mkdtempSync, existsSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const tempRoot = mkdtempSync(join(tmpdir(), "microvm-relay2-"));
+  t.after(() => rmSync(tempRoot, { recursive: true, force: true }));
+  const writePath = join(tempRoot, "config", "microvm-target.v1.json");
+  const enabledSwitch = createIsolationSwitch();
+  enabledSwitch.set(true);
+  const stub = stubEnvironment({ isolationSwitch: enabledSwitch, sshTarget: "deploy@192.0.2.10" });
+
+  // Declined setup confirmation: nothing written, run stopped.
+  const declined = await runLinuxMicroVMCutover(
+    { mode: "tui", hasUI: true, ui: { confirm: async () => false } },
+    { ...stub.options, target: "deploy@192.0.2.10", targetUserConfigPath: writePath });
+  assert.equal(declined.ok, false);
+  assert.equal(declined.status, "stopped");
+  assert.equal(declined.reason.code, "not-granted");
+  assert.equal(existsSync(writePath), false, "a declined setup must not write the config");
+
+  // Headless + no config: refused; only pre-configured targets run headless.
+  const headless = await runLinuxMicroVMCutover(HEADLESS, {
+    isolationSwitch: enabledSwitch,
+    target: "deploy@192.0.2.10",
+    targetUserConfigPath: writePath,
+  });
+  assert.equal(headless.ok, false);
+  assert.equal(headless.reason.code, "native-tui-required");
+  assert.match(headless.reason.detail, /pre-configured target/);
+
+  // Saved config is reused without any setup confirmation: the first
+  // confirmation call in a run with no target param is the per-run run
+  // confirmation, not a setup dialog.
+  const confirmCalls = [];
+  const saved = await runLinuxMicroVMCutover(
+    { mode: "tui", hasUI: true, ui: { confirm: async (title, body) => { confirmCalls.push(title); return true; } } },
+    { ...stub.options, target: undefined, targetUserConfigPath: writePath });
+  assert.equal(saved.ok, false, "nothing was saved yet, so this still asks the user for a target");
+  assert.equal(saved.reason.code, "target-not-configured");
+
+  // After the user relays the target once (confirmed), the saved config drives
+  // subsequent runs without a setup dialog.
+  const setup = await runLinuxMicroVMCutover(
+    { mode: "tui", hasUI: true, ui: { confirm: async () => true } },
+    { ...stub.options, target: "deploy@192.0.2.10", targetUserConfigPath: writePath });
+  assert.equal(setup.ok, true);
+  confirmCalls.length = 0;
+  const reused = await runLinuxMicroVMCutover(
+    { mode: "tui", hasUI: true, ui: { confirm: async (title) => { confirmCalls.push(title); return true; } } },
+    { ...stub.options, target: undefined, targetUserConfigPath: writePath });
+  assert.equal(reused.ok, true);
+  assert.equal(reused.status, "VERIFIED");
+  assert.equal(confirmCalls.filter((title) => /Use this microVM host\?/.test(title)).length, 0,
+    "no setup dialog when the target is already saved");
 });

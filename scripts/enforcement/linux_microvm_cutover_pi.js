@@ -15,7 +15,16 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REMOTE_FIXTURE = join(SCRIPT_DIR, "linux_microvm_remote_fixture.sh");
 const TARGET_EXAMPLE = join(SCRIPT_DIR, "..", "..", "config", "microvm-target.v1.example.json");
 const TARGET_PACKAGE_CONFIG = join(SCRIPT_DIR, "..", "..", "config", "microvm-target.v1.json");
-const TARGET_USER_CONFIG = join(homedir(), ".pi", "pi", "config", "microvm-target.v1.json");
+// The saved target config lives in the Pi coding-agent config directory
+// (PI_CODING_AGENT_DIR when set, otherwise ~/.pi/agent), matching how Pi
+// resolves its own config.
+function resolveTargetUserConfigPath(env = process.env) {
+  const agentDir = env.PI_CODING_AGENT_DIR?.trim()
+    ? join(env.PI_CODING_AGENT_DIR.trim(), "config")
+    : join(homedir(), ".pi", "agent", "config");
+  return join(agentDir, "microvm-target.v1.json");
+}
+const TARGET_USER_CONFIG = resolveTargetUserConfigPath();
 const TARGET_SCHEMA = "agentic-driver.microvm-target.v1";
 const REGISTRATIONS = new WeakSet();
 const SWITCH_REGISTRATIONS = new WeakSet();
@@ -94,6 +103,7 @@ export function loadMicroVMTarget(options = {}) {
   }
   const paths = [
     ...(typeof options.targetPath === "string" ? [options.targetPath] : []),
+    ...(typeof options.targetUserConfigPath === "string" ? [options.targetUserConfigPath] : []),
     TARGET_USER_CONFIG,
     TARGET_PACKAGE_CONFIG,
   ];
@@ -124,6 +134,24 @@ function normalizeTarget(parsed) {
   return Object.freeze(hasSshTarget
     ? { mode: "ssh", sshTarget: parsed.sshTarget.trim() }
     : { mode: "local" });
+}
+
+// Shape validation for the user-relayed target parameter (untrusted input).
+// Accepts user@host, an ip (optionally :port), a plain hostname, or "local".
+export function targetArgumentError(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text) {
+    return { code: "target-argument-required", detail: "Provide the target: user@host, an ip, or local." };
+  }
+  if (text.includes("REPLACE-WITH-")) {
+    return { code: "target-argument-placeholder", detail: "Placeholder values are not valid targets." };
+  }
+  if (text === "local") return null;
+  const pattern = /^(?:[a-zA-Z0-9._-]+@)?(?:\d{1,3}(?:\.\d{1,3}){3}|[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?)(?::\d{1,5})?$/;
+  if (/\s/.test(text) || !pattern.test(text)) {
+    return { code: "target-argument-invalid", detail: `${JSON.stringify(text)} is not a plausible ssh target (user@host or ip) or the literal 'local'.` };
+  }
+  return null;
 }
 
 function targetNotConfigured() {
@@ -334,10 +362,50 @@ export async function runLinuxMicroVMCutover(context, options = {}) {
     return denied("blocked", reason("policy", "isolation-not-enabled",
       "Isolation activation is not enabled in this session. Run the agentic-isolation-enable command in the Pi TUI."));
   }
-  // User-configured trusted target, deny-by-default; the model cannot select
-  // or change it.
+  // Target selection: the only way user intent reaches setup is the optional
+  // `target` parameter, relayed by the agent from the user's words. It is
+  // untrusted: nothing is written or run without the user's native
+  // confirmation dialog naming the target explicitly.
+  const targetParam = typeof options.target === "string" ? options.target.trim() : "";
+  if (targetParam) {
+    const shapeError = targetArgumentError(targetParam);
+    if (shapeError) return denied("denied", reason("input", shapeError.code, shapeError.detail));
+    // Headless setups are refused: only pre-configured targets run.
+    if (!isNativeTuiContext(context) || typeof context?.ui?.confirm !== "function") {
+      return denied("blocked", reason("policy", "native-tui-required",
+        "Configuring a new microVM target requires the interactive Pi TUI; headless sessions may only use a pre-configured target."));
+    }
+    const writePath = options.targetUserConfigPath?.trim() || TARGET_USER_CONFIG;
+    let confirmed;
+    try {
+      confirmed = await context.ui.confirm("Use this microVM host?", [
+        `Use ${targetParam === "local" ? "THIS machine (local)" : targetParam} as the microVM host? This saves it to your Pi config.`,
+        `Config file: ${writePath}`,
+        "The model relayed your words; this confirmation is what authorizes the choice.",
+      ].join("\n"));
+    } catch (error) {
+      return denied("blocked", reason("confirmation", "confirmation-failed", `Native confirmation failed: ${error.message}`));
+    }
+    if (confirmed !== true) {
+      return denied("stopped", reason("confirmation", "not-granted", "No target was saved; native confirmation was not granted."));
+    }
+    const saved = targetParam === "local"
+      ? { schema: TARGET_SCHEMA, local: true }
+      : { schema: TARGET_SCHEMA, sshTarget: targetParam };
+    try {
+      mkdirSync(dirname(writePath), { recursive: true });
+      writeFileSync(writePath, `${JSON.stringify(saved, null, 2)}\n`);
+    } catch (error) {
+      return denied("blocked", reason("policy", "target-write-failed", `Could not write ${writePath}: ${error.message}`));
+    }
+  }
+  // Saved config (possibly just written above) drives the run; deny-by-default
+  // when neither a target param nor saved config exists.
   const target = loadMicroVMTarget(options);
-  if (!target) return targetNotConfigured();
+  if (!target) {
+    return denied("blocked", reason("policy", "target-not-configured",
+      "No microVM target is configured. Ask the user which machine the microVM should run on and pass it as the `target` parameter (user@host, ip, or local)."));
+  }
   if (!isNativeTuiContext(context)) {
     return denied("blocked", reason("policy", "native-tui-required",
       "Open the Linux microVM cutover in the interactive Pi TUI; headless runs are denied."));
@@ -426,15 +494,27 @@ export function registerLinuxMicroVMCutoverInterface(pi, options = {}) {
     notify(line, value?.ok === true ? "info" : value?.status === "stopped" ? "warning" : "error");
   };
   const execute = async (_id, params, _signal, _update, context) => {
-    const value = params && Object.keys(params).length
-      ? denied("denied", reason("input", "model-parameters-not-allowed", "Linux microVM cutover accepts no model parameters"))
-      : await runLinuxMicroVMCutover(context, options);
+    const closedParams = params && typeof params === "object" && !Array.isArray(params)
+      ? Object.keys(params).filter((key) => key !== "target")
+      : [];
+    const value = closedParams.length
+      ? denied("denied", reason("input", "model-parameters-not-allowed", "Linux microVM cutover accepts only the optional target parameter"))
+      : await runLinuxMicroVMCutover(context, {
+          ...options,
+          ...(typeof params?.target === "string" ? { target: params.target } : {}),
+        });
     notifyOutcome(context, value);
     return { content: [{ type: "text", text: `${outcomeLine(value)}\n${JSON.stringify(value, null, 2)}` }], details: value };
   };
   pi.registerTool({ name: LINUX_MICROVM_CUTOVER_TOOL, label: "Verify Linux microVM",
-    description: "Run one native-confirmed transient QEMU/KVM microVM proof on the user-configured trusted target. Requires the session isolation switch (agentic-isolation-enable command) and native confirmation.",
-    parameters: { type: "object", additionalProperties: false, properties: {} }, execute });
+    description: "Run one native-confirmed transient QEMU/KVM microVM proof on the trusted target. The optional target parameter (user@host, ip, or local) relays the user's machine choice; saving a new target requires the user's native confirmation. Requires the session isolation switch.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        target: { type: "string", maxLength: 255, description: "Where the microVM runs: user@host, an ip, or the literal local. Relays the user's explicit choice; a new target is saved only after the user's native confirmation." },
+      },
+    }, execute });
   pi.registerCommand?.("agentic-linux-microvm-cutover", { description: "Run the native-confirmed Linux microVM proof",
     handler: async (args, context) => commandArgumentsPresent(args)
       ? denied("denied", reason("input", "command-arguments-not-allowed", "Linux microVM cutover accepts no command arguments"))
@@ -466,69 +546,6 @@ export function registerIsolationSwitchCommands(pi, options = {}) {
   });
   const rejectArguments = () => switchResult(false, "denied", "command-arguments-not-allowed",
     "The isolation switch commands accept no command arguments.");
-  // One-command target setup: /agentic-isolation-target <user@host|ip|local>.
-  // The command is user-runnable only (registered as a command, never a
-  // tool); the model cannot invoke it. It writes the one-decision target
-  // config behind native confirmation and grants no other authority.
-  const TARGET_COMMAND = "agentic-isolation-target";
-  const SSH_TARGET_PATTERN = /^(?:[a-zA-Z0-9._-]+@)?(?:\d{1,3}(?:\.\d{1,3}){3}|[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?)(?::\d{1,5})?$/;
-  const validateTargetArgument = (raw) => {
-    const value = typeof raw === "string" ? raw.trim() : "";
-    if (!value) return { ok: false, code: "target-argument-required", detail: "Provide one argument: a ssh target (user@host or ip) or the literal 'local'." };
-    if (value.includes("REPLACE-WITH-")) return { ok: false, code: "target-argument-placeholder", detail: "Placeholder values are not valid targets." };
-    if (value === "local") return { ok: true, config: { schema: TARGET_SCHEMA, local: true } };
-    if (!SSH_TARGET_PATTERN.test(value) || /\s/.test(value)) {
-      return { ok: false, code: "target-argument-invalid", detail: `${JSON.stringify(value)} is not a plausible ssh target (user@host or ip) or the literal 'local'.` };
-    }
-    return { ok: true, config: { schema: TARGET_SCHEMA, sshTarget: value } };
-  };
-  pi.registerCommand(TARGET_COMMAND, {
-    description: "Configure the microVM target: /agentic-isolation-target user@host (or ip, or local). Native confirmation required.",
-    handler: async (args, context) => {
-      const decision = validateTargetArgument(Array.isArray(args) ? args[0] : args);
-      if (!decision.ok) {
-        return switchResult(false, "denied", decision.code, decision.detail);
-      }
-      if (!isNativeTuiContext(context) || typeof context?.ui?.confirm !== "function") {
-        return switchResult(false, "blocked", "native-tui-required",
-          "Open the interactive Pi TUI to configure the microVM target; headless sessions cannot write the config.");
-      }
-      const writePath = typeof options.targetUserConfigPath === "string" && options.targetUserConfigPath.trim()
-        ? options.targetUserConfigPath : TARGET_USER_CONFIG;
-      const summary = decision.config.local
-        ? "Deploy on THIS machine (local:true); no ssh."
-        : `Deploy via ssh to ${decision.config.sshTarget}.`;
-      let confirmed;
-      try {
-        confirmed = await context.ui.confirm("Configure microVM target", [
-          `Write the microVM target config to ${writePath}?`,
-          summary,
-          "Arch, libvirt URI, and kernel are auto-discovered from the target at probe time.",
-          "This overwrites any existing target config. Isolation-enable is still required per session.",
-        ].join("\n"));
-      } catch (error) {
-        return switchResult(false, "blocked", "confirmation-failed", `Native confirmation failed: ${error.message}`);
-      }
-      if (confirmed !== true) {
-        return switchResult(false, "stopped", "not-granted", "No config was written; native confirmation was not granted.");
-      }
-      try {
-        mkdirSync(dirname(writePath), { recursive: true });
-        writeFileSync(writePath, `${JSON.stringify(decision.config, null, 2)}\n`);
-      } catch (error) {
-        return switchResult(false, "blocked", "target-write-failed", `Could not write ${writePath}: ${error.message}`);
-      }
-      return {
-        schema: LINUX_MICROVM_CUTOVER_SCHEMA, ok: true, status: "CONFIGURED",
-        configured: decision.config.local ? { local: true } : { sshTarget: decision.config.sshTarget },
-        path: writePath,
-        detail: decision.config.local
-          ? "Configured this machine (local:true) as the microVM target. Reminder: isolation-enable is still required per session before running the cutover."
-          : `Configured ${decision.config.sshTarget} as the microVM target. Reminder: isolation-enable is still required per session before running the cutover.`,
-        nonAuthorizing: true,
-      };
-    },
-  });
   pi.registerCommand(ISOLATION_ENABLE_COMMAND, {
     description: "Enable the Linux microVM isolation switch for this session (native confirmation required)",
     handler: async (args, context) => {

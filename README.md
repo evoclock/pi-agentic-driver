@@ -236,15 +236,19 @@ cannot run this command. Each microVM run asks for its own confirmation. To
 turn isolation off, run `/agentic-isolation-disable`. The switch never saves
 to settings. Headless sessions stay blocked.
 
-**Setup and run — three steps.** You choose where the microVM runs. The model
-cannot choose or change it.
+**Setup and run.** You choose where the microVM runs. The model cannot choose
+it silently — it only relays your words, and every target choice requires your
+native confirmation dialog before anything is saved or run.
 
-1. Run `/agentic-isolation-target user@host` in the interactive Pi TUI. Use an
-   IP address, or `local` if this session runs directly on a Linux machine.
-   The command shows what it will write and asks you to confirm. You never
-   edit a config file by hand.
-2. Run `/agentic-isolation-enable`, then confirm.
-3. Invoke the cutover. Each run asks for its own confirmation.
+1. Ask your agent to run the microVM cutover and tell it which machine to use
+   (e.g. "run the microVM proof on deploy@192.168.1.50", or "...on this
+   machine"). The first run asks you to confirm natively: it names the
+   machine and states that your choice is saved to your Pi config. On your
+   Yes, the choice is saved and the run continues in the same invocation.
+2. Run `/agentic-isolation-enable` to enable isolation for this session
+   (native confirmation; not saved to settings).
+3. Each cutover run asks for its own confirmation. Saved targets are reused
+   without asking again where the microVM runs.
 
 The tool discovers the technical details from the machine itself. It reads the
 architecture, kernel, and libvirt URI at probe time. You configure nothing.
