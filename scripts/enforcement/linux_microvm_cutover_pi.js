@@ -319,11 +319,32 @@ function commandArgumentsPresent(args) {
 export function registerLinuxMicroVMCutoverInterface(pi, options = {}) {
   if (typeof pi?.registerTool !== "function" || REGISTRATIONS.has(pi)) return;
   REGISTRATIONS.add(pi);
+  // Prominent outcome presentation. The first line of the tool output is a
+  // concise final status (VERIFIED / DENIED / STOPPED / BLOCKED) with fixture
+  // id and one-line evidence or reason summary; the full JSON receipt follows
+  // unchanged. When the interactive TUI exposes the notify surface, the same
+  // status is raised as a fire-and-forget notification.
+  const outcomeLine = (value) => {
+    if (value?.ok === true && value?.status === "VERIFIED") {
+      return `MICROVM CUTOVER: VERIFIED — fixture ${value.identity?.fixtureId ?? "unknown"} on ${value.identity?.remoteHost ?? "unknown host"}; domain ${value.identity?.domain ?? "?"} transient+gone, teardown proofed, isolation context closed.`;
+    }
+    const status = String(value?.status ?? "DENIED").toUpperCase();
+    const code = value?.reason?.code ?? value?.code ?? "unknown";
+    const detail = value?.reason?.detail ?? value?.error ?? "";
+    return `MICROVM CUTOVER: ${status} — reason ${code}${detail ? `: ${detail}` : ""}`;
+  };
+  const notifyOutcome = (context, value) => {
+    const notify = context?.ui?.notify;
+    if (typeof notify !== "function") return;
+    const line = outcomeLine(value);
+    notify(line, value?.ok === true ? "info" : value?.status === "stopped" ? "warning" : "error");
+  };
   const execute = async (_id, params, _signal, _update, context) => {
     const value = params && Object.keys(params).length
       ? denied("denied", reason("input", "model-parameters-not-allowed", "Linux microVM cutover accepts no model parameters"))
       : await runLinuxMicroVMCutover(context, options);
-    return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+    notifyOutcome(context, value);
+    return { content: [{ type: "text", text: `${outcomeLine(value)}\n${JSON.stringify(value, null, 2)}` }], details: value };
   };
   pi.registerTool({ name: LINUX_MICROVM_CUTOVER_TOOL, label: "Verify Linux microVM",
     description: "Run one native-confirmed transient QEMU/KVM microVM proof on linux-backend. Requires the session isolation switch (agentic-isolation-enable command) and native confirmation.",

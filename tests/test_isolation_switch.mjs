@@ -8,6 +8,7 @@ import {
   registerLinuxMicroVMCutoverInterface,
   registerIsolationSwitchCommands,
   runLinuxMicroVMCutover,
+  LINUX_MICROVM_CUTOVER_TOOL,
   LINUX_MICROVM_CUTOVER_SCHEMA,
   createIsolationSwitch,
 } from "../scripts/enforcement/linux_microvm_cutover_pi.js";
@@ -224,4 +225,73 @@ test("a second registration in the same process starts with a fresh disabled swi
   await first.run("agentic-isolation-disable", tuiContext());
   assert.equal(first.switchState.get(), false);
   assert.equal(second.switchState.get(), true, "first-instance disable must not leak into the second");
+});
+
+test("cutover tool output opens with a prominent VERIFIED status line and keeps the full JSON receipt", async () => {
+  const { run, switchState } = harness();
+  await run("agentic-isolation-enable", tuiContext());
+  const notifications = [];
+  const context = { mode: "tui", hasUI: true, cwd: process.cwd(), ui: { confirm: async () => true, notify: (message, type) => notifications.push({ message, type }) } };
+  const value = await runLinuxMicroVMCutover(context, stubEnvironment({ isolationSwitch: switchState }).options);
+  assert.equal(value.ok, true);
+  assert.equal(value.status, "VERIFIED");
+
+  // The command path returns the receipt details unchanged.
+  const notificationsCommand = [];
+  const commandContext = { ...context, ui: { confirm: context.ui.confirm, notify: (message, type) => notificationsCommand.push({ message, type }) } };
+  const commandValue = await run("agentic-linux-microvm-cutover", commandContext);
+  assert.equal(commandValue.ok, true);
+
+  // Reconstruct the tool output text exactly as registerTool does.
+  const { registerLinuxMicroVMCutoverInterface } = await import("../scripts/enforcement/linux_microvm_cutover_pi.js");
+  const registered = {};
+  const pi = { registerTool: (tool) => { registered[tool.name] = tool; }, registerCommand: () => {} };
+  registerLinuxMicroVMCutoverInterface(pi, { isolationSwitch: switchState });
+  const result = await registered[LINUX_MICROVM_CUTOVER_TOOL].execute("t", {}, undefined, undefined, context);
+  const text = result.content[0].text;
+  const firstLine = text.split("\n")[0];
+  assert.match(firstLine, /^MICROVM CUTOVER: VERIFIED — fixture /);
+  assert.match(firstLine, /domain agentic-driver-microvm-/);
+  assert.match(firstLine, /isolation context closed/);
+  // The full JSON receipt is intact below the status line.
+  const json = JSON.parse(text.slice(text.indexOf("{")));
+  assert.deepEqual(json, result.details);
+  assert.equal(json.status, "VERIFIED");
+  assert.equal(json.ok, true);
+  assert.ok(json.identity.fixtureId);
+  assert.ok(json.marker.sha256);
+  assert.ok(json.teardown.domain.absent);
+  // The notify surface receives the same outcome, fire-and-forget.
+  assert.equal(notifications.length, 1);
+  assert.match(notifications[0].message, /^MICROVM CUTOVER: VERIFIED/);
+  assert.equal(notifications[0].type, "info");
+  void commandValue; void notificationsCommand;
+});
+
+test("denial outcomes produce a prominent status line with the reason code", async () => {
+  const { registerLinuxMicroVMCutoverInterface } = await import("../scripts/enforcement/linux_microvm_cutover_pi.js");
+  const switchState = createIsolationSwitch();
+  const registered = {};
+  const pi = { registerTool: (tool) => { registered[tool.name] = tool; }, registerCommand: () => {} };
+  registerLinuxMicroVMCutoverInterface(pi, { isolationSwitch: switchState });
+
+  // Switch off: blocked with reason code isolation-not-enabled.
+  const blocked = await registered[LINUX_MICROVM_CUTOVER_TOOL].execute("t", {}, undefined, undefined, tuiContext());
+  const blockedText = blocked.content[0].text;
+  assert.match(blockedText.split("\n")[0], /^MICROVM CUTOVER: BLOCKED — reason isolation-not-enabled/);
+  assert.deepEqual(JSON.parse(blockedText.slice(blockedText.indexOf("{"))), blocked.details);
+
+  // Native confirmation declined: stopped with reason not-granted.
+  await (await import("../scripts/enforcement/linux_microvm_cutover_pi.js")).registerIsolationSwitchCommands;
+  const enableCommands = {};
+  const pi2 = { registerTool: () => {}, registerCommand: (name, def) => { enableCommands[name] = def; } };
+  (await import("../scripts/enforcement/linux_microvm_cutover_pi.js")).registerIsolationSwitchCommands(pi2, { isolationSwitch: switchState });
+  await enableCommands["agentic-isolation-enable"].handler("", tuiContext());
+  const declined = await registered[LINUX_MICROVM_CUTOVER_TOOL].execute(
+    "t", {}, undefined, undefined,
+    { mode: "tui", hasUI: true, cwd: process.cwd(), ui: { confirm: async () => false } },
+    );
+  const declinedText = declined.content[0].text;
+  assert.match(declinedText.split("\n")[0], /^MICROVM CUTOVER: STOPPED — reason not-granted/);
+  assert.deepEqual(JSON.parse(declinedText.slice(declinedText.indexOf("{"))), declined.details);
 });
