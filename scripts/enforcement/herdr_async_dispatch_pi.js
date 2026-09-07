@@ -29,7 +29,7 @@ const REGISTRATIONS = new WeakSet();
 // Terminal journey states. Only `cancelled` and `failed` are failures; every
 // other terminal state is an observed outcome, and no state is retried.
 export const WORKER_DISPATCH_TERMINAL_STATES = Object.freeze([
-  "completed", "exhausted", "role-blocked", "cancelled", "failed", "waiting-approval", "worker-hung",
+  "completed", "exhausted", "role-blocked", "cancelled", "failed", "waiting-approval", "worker-unresponsive",
 ]);
 
 export const WORKER_DISPATCH_PARAMETERS = Object.freeze({
@@ -163,8 +163,8 @@ function journeyReceipt(journey) {
 // One continuous journey. Each step: pulse (liveness + eligibility), observe
 // the next dispatchable item, one prompt exchange (no retry on any failure),
 // read the marked report, collate. Bounded by maxSteps, never wall-clock.
-// A worker that is not idle within an observed exchange cycle is hung for
-// dispatch purposes and ends the journey explicitly as worker-hung.
+// A worker that is not idle within an observed exchange cycle is unresponsive for
+// dispatch purposes and ends the journey explicitly as worker-unresponsive.
 export async function runWorkerJourney(params, context, options = {}, signal) {
   const mode = params.mode ?? DEFAULT_MODE;
   const maxSteps = params.maxSteps ?? DEFAULT_JOURNEY_STEPS;
@@ -202,38 +202,38 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   // herdr-lifecycle spawn boundary (fixed argv, shell:false) and resume the
   // pending task sequence. Reuses the same task cards; never duplicates them.
   const handoffToReplacement = async (reason, taskId = null) => {
-    journey.status = "worker-hung";
-    journey.code = "worker-hung";
-    journey.steps.push({ step: journey.steps.length + 1, taskId, status: "worker-hung", error: reason });
+    journey.status = "worker-unresponsive";
+    journey.code = "worker-unresponsive";
+    journey.steps.push({ step: journey.steps.length + 1, taskId, status: "worker-unresponsive", error: reason });
     if (!spawnReplacement) {
       journey.handoff = { attempted: false, reason: "replacement spawn is not available in this context" };
-      return finish("worker-hung");
+      return finish("worker-unresponsive");
     }
     if (!isNativeTuiContext(context) || typeof context?.ui?.confirm !== "function") {
       journey.handoff = { attempted: false, reason: "native TUI confirmation unavailable for replacement spawn" };
-      return finish("worker-hung");
+      return finish("worker-unresponsive");
     }
     let confirmed;
     try {
       confirmed = await context.ui.confirm("Spin up replacement worker", [
-        `Worker role ${role} appears hung (${reason}).`,
+        `Agent session for role ${role} became unresponsive (${reason}).`,
         "Spin up one replacement worker through the guarded herdr-lifecycle spawn boundary?",
         "The replacement resumes the same pending task sequence; existing task cards are reused, never duplicated.",
       ].join("\n"));
     } catch (error) {
       journey.handoff = { attempted: false, reason: `confirmation failed: ${error.message}` };
-      return finish("worker-hung");
+      return finish("worker-unresponsive");
     }
     if (confirmed !== true) {
       journey.handoff = { attempted: false, reason: "native confirmation was not granted for the replacement spawn" };
-      return finish("worker-hung");
+      return finish("worker-unresponsive");
     }
     let spawned;
     try {
       spawned = await spawnReplacement({ role, repository: options.repository, model: options.model, context, signal });
     } catch (error) {
       journey.handoff = { attempted: true, ok: false, error: String(error?.message || error).slice(0, 256) };
-      return finish("worker-hung");
+      return finish("worker-unresponsive");
     }
     journey.handoff = {
       attempted: true,
@@ -243,7 +243,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       modelArgv: spawned?.modelArgv,
       nonAuthorizing: true,
     };
-    return finish("worker-hung");
+    return finish("worker-unresponsive");
   };
 
   if (!HERDR_COMMUNICATION_ACTIONS.includes) { /* unreachable guard */ }
@@ -278,7 +278,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
         journey.steps.push({ step: stepIndex, taskId: null, status: "role-blocked", workerStatus: pulse.status });
         return finish("role-blocked");
       }
-      // Not idle within an observed exchange cycle: hung for dispatch.
+      // Not idle within an observed exchange cycle: unresponsive for dispatch.
       return handoffToReplacement(`worker not idle in the observed exchange cycle (status: ${pulse.status})`);
     }
 
@@ -338,8 +338,8 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       signal,
     );
     if (exchange.ok !== true) {
-      const hung = exchange.code === "prompt_stalled" || exchange.code === "process_timeout";
-      if (hung) {
+      const unresponsive = exchange.code === "prompt_stalled" || exchange.code === "process_timeout";
+      if (unresponsive) {
         return handoffToReplacement(`exchange ended with ${exchange.code}`, task.id);
       }
       journey.status = exchange.code === "role_blocked" ? "role-blocked" : "failed";

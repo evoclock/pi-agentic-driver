@@ -5,7 +5,7 @@ export default async function herdrDispatchPi(pi) {
   const dispatch = await import(new URL("../scripts/enforcement/herdr_async_dispatch_pi.js", import.meta.url).href);
   const lifecycle = await import(new URL("../scripts/enforcement/herdr_lifecycle_pi.js", import.meta.url).href);
 
-  // Production replacement seam: a hung-worker handoff spawns through the
+  // Production replacement seam: an unresponsive-session handoff spawns through the
   // existing guarded herdr-lifecycle boundary only — executeHerdrSpawnWorker
   // performs native confirmation, trusted-repository resolution, installed
   // model-roll resolution, fixed argv, and shell:false. No raw pane/agent
