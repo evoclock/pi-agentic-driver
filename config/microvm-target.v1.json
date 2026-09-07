@@ -1,0 +1,5 @@
+{
+  "_comment": "One decision: where the microVM runs. Set EITHER sshTarget (user@host or ip of a remote Linux machine) OR local:true (this session runs directly on a Linux machine). Copy this file to ~/.pi/pi/config/microvm-target.v1.json and fill in your choice. Arch, libvirt URI, and kernel are auto-discovered from the target at probe time; only honest safety checks are enforced (/dev/kvm accessible, system-level libvirt driver, qemu-system binary matching the discovered arch). Note: the shipped fixture guest is built for x86_64, so the full proof currently requires an x86_64 KVM host.",
+  "schema": "agentic-driver.microvm-target.v1",
+  "sshTarget": "REPLACE-WITH-user@host-or-ip"
+}

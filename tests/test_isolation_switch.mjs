@@ -8,6 +8,7 @@ import {
   registerLinuxMicroVMCutoverInterface,
   registerIsolationSwitchCommands,
   runLinuxMicroVMCutover,
+  LINUX_MICROVM_CUTOVER_TOOL,
   LINUX_MICROVM_CUTOVER_SCHEMA,
   createIsolationSwitch,
 } from "../scripts/enforcement/linux_microvm_cutover_pi.js";
@@ -15,22 +16,24 @@ import registerLinuxMicroVMCutover from "../extensions/linux-microvm.ts";
 
 const INITRAMFS = "a".repeat(64);
 
-function stubFacts(fixtureId) {
+function stubFacts(fixtureId, host = "test-microvm-host") {
   return {
-    host: "ubuntu-backend", arch: "x86_64", kernel: "6.8.0-generic",
-    libvirt: "qemu:///system", qemu: "QEMU stub 8.0",
+    host, arch: "x86_64", kernel: "6.8.0-generic",
+    libvirt: "qemu:///system", qemu: "QEMU emulator version 10.2.1 (Debian 1:10.2.1+ds-1ubuntu3.1)",
+    qemuBinaryPath: "/usr/bin/qemu-system-x86_64",
+    kvmAccessible: true,
     fixtureDomain: `agentic-driver-${fixtureId}`, fixtureDomainState: "absent",
   };
 }
 
-function stubReceipt(fixtureId, scriptHash) {
+function stubReceipt(fixtureId, scriptHash, host = "test-microvm-host") {
   const domain = `agentic-driver-${fixtureId}`;
   const marker = `AGENTIC_MICROVM_PROBE:${fixtureId}`;
   const digest = (value) => createHash("sha256").update(value).digest("hex");
   return {
     schema: LINUX_MICROVM_CUTOVER_SCHEMA, ok: true, status: "VERIFIED",
     authorityCreated: false, runtimeActivated: false, persisted: false,
-    identity: { remoteHost: "ubuntu-backend", fixtureId, domain },
+    identity: { remoteHost: host, fixtureId, domain },
     marker: { value: marker, sha256: digest(marker) },
     scriptHash, initramfsSha256: INITRAMFS,
     teardown: {
@@ -50,25 +53,34 @@ function stubReceipt(fixtureId, scriptHash) {
 // Runs the cutover with injected facts observation and a structured receipt
 // stub derived from the real invocation arguments; no ssh, no network, no
 // real remote execution.
-function stubEnvironment({ confirm = async () => true, factsSequence, isolationSwitch } = {}) {
+function stubEnvironment({ confirm = async () => true, factsSequence, isolationSwitch, host = "test-microvm-host", mode = "ssh", sshTarget = "user@test-microvm-host" } = {}) {
   let observed = 0;
   let lastFixtureId;
+  const target = Object.freeze(mode === "local"
+    ? { mode: "local" }
+    : { mode: "ssh", sshTarget });
+  const remoteTarget = mode === "local" ? host : sshTarget;
   const observe = (_execute, fixtureId) => {
     lastFixtureId = fixtureId;
-    const value = Array.isArray(factsSequence) ? factsSequence[Math.min(observed, factsSequence.length - 1)](fixtureId) : stubFacts(fixtureId);
+    const value = Array.isArray(factsSequence) ? factsSequence[Math.min(observed, factsSequence.length - 1)](fixtureId) : stubFacts(fixtureId, host);
     observed += 1;
     return structuredClone(value);
   };
   const execute = (executable, args) => {
-    if (executable === "ssh" && args[0] === "linux-backend" && args[1] === "bash"
-        && args[2] === "-s" && args[3] === "--") {
-      const [, , , , fixtureId, scriptHash] = args;
-      return { code: 0, stdout: `AGENTIC_MICROVM_RECEIPT: ${JSON.stringify(stubReceipt(fixtureId, scriptHash))}\n`, stderr: "", error: undefined };
+    const isExec = mode === "local"
+      ? executable === "bash" && args[0] === "-c"
+      : executable === "ssh" && args[0] === sshTarget && args[1] === "bash" && args[2] === "-s" && args[3] === "--";
+    if (isExec) {
+      const fixtureId = mode === "local"
+        ? /microvm-[0-9a-f]{24}/.exec(args[1])?.[0]
+        : args[4];
+      const scriptHash = mode === "local" ? "x" : args[5];
+      return { code: 0, stdout: `AGENTIC_MICROVM_RECEIPT: ${JSON.stringify(stubReceipt(fixtureId, scriptHash, host))}\n`, stderr: "", error: undefined };
     }
     return { code: 0, stdout: "", stderr: "", error: undefined };
   };
   const context = { mode: "tui", hasUI: true, ui: { confirm } };
-  return { context, options: { execute, observeFacts: observe, isolationSwitch }, lastFixtureId: () => lastFixtureId };
+  return { context, options: { execute, observeFacts: observe, isolationSwitch, target }, lastFixtureId: () => lastFixtureId, target, remoteTarget };
 }
 
 function harness() {
@@ -78,8 +90,14 @@ function harness() {
     registerCommand: (name, def) => { commands[name] = def; },
   };
   const switchState = createIsolationSwitch();
+  const stub = stubEnvironment({ isolationSwitch: switchState });
   registerIsolationSwitchCommands(pi, { isolationSwitch: switchState });
-  registerLinuxMicroVMCutoverInterface(pi, { isolationSwitch: switchState });
+  registerLinuxMicroVMCutoverInterface(pi, {
+    isolationSwitch: switchState,
+    target: stub.target,
+    execute: stub.options.execute,
+    observeFacts: stub.options.observeFacts,
+  });
   const run = async (name, context, args = "") => commands[name].handler(args, context);
   return { commands, run, switchState };
 }
@@ -224,4 +242,420 @@ test("a second registration in the same process starts with a fresh disabled swi
   await first.run("agentic-isolation-disable", tuiContext());
   assert.equal(first.switchState.get(), false);
   assert.equal(second.switchState.get(), true, "first-instance disable must not leak into the second");
+});
+
+test("cutover tool output opens with a prominent VERIFIED status line and keeps the full JSON receipt", async () => {
+  const { run, switchState } = harness();
+  await run("agentic-isolation-enable", tuiContext());
+  const notifications = [];
+  const stub = stubEnvironment({ isolationSwitch: switchState });
+  const context = { mode: "tui", hasUI: true, cwd: process.cwd(), ui: { confirm: async () => true, notify: (message, type) => notifications.push({ message, type }) } };
+  const value = await runLinuxMicroVMCutover(context, stub.options);
+  assert.equal(value.ok, true);
+  assert.equal(value.status, "VERIFIED");
+
+  // The command path returns the receipt details unchanged.
+  const notificationsCommand = [];
+  const commandContext = { ...context, ui: { confirm: context.ui.confirm, notify: (message, type) => notificationsCommand.push({ message, type }) } };
+  const commandValue = await run("agentic-linux-microvm-cutover", commandContext);
+  assert.equal(commandValue.ok, true);
+
+  // Reconstruct the tool output text exactly as registerTool does.
+  const registered = {};
+  const pi = { registerTool: (tool) => { registered[tool.name] = tool; }, registerCommand: () => {} };
+  registerLinuxMicroVMCutoverInterface(pi, {
+    isolationSwitch: switchState,
+    target: stub.target,
+    execute: stub.options.execute,
+    observeFacts: stub.options.observeFacts,
+  });
+  const result = await registered[LINUX_MICROVM_CUTOVER_TOOL].execute("t", {}, undefined, undefined, context);
+  const text = result.content[0].text;
+  const firstLine = text.split("\n")[0];
+  assert.match(firstLine, /^MICROVM CUTOVER: VERIFIED — fixture /);
+  assert.match(firstLine, /domain agentic-driver-microvm-/);
+  assert.match(firstLine, /isolation context closed/);
+  // The full JSON receipt is intact below the status line.
+  const json = JSON.parse(text.slice(text.indexOf("{")));
+  assert.deepEqual(json, result.details);
+  assert.equal(json.status, "VERIFIED");
+  assert.equal(json.ok, true);
+  assert.ok(json.identity.fixtureId);
+  assert.ok(json.marker.sha256);
+  assert.ok(json.teardown.domain.absent);
+  // The notify surface receives the same outcome, fire-and-forget.
+  assert.equal(notifications.length, 1);
+  assert.match(notifications[0].message, /^MICROVM CUTOVER: VERIFIED/);
+  assert.equal(notifications[0].type, "info");
+  void commandValue; void notificationsCommand;
+});
+
+test("denial outcomes produce a prominent status line with the reason code", async () => {
+  const { registerLinuxMicroVMCutoverInterface } = await import("../scripts/enforcement/linux_microvm_cutover_pi.js");
+  const switchState = createIsolationSwitch();
+  const registered = {};
+  const pi = { registerTool: (tool) => { registered[tool.name] = tool; }, registerCommand: () => {} };
+  const stub = stubEnvironment({ isolationSwitch: switchState });
+  registerLinuxMicroVMCutoverInterface(pi, { isolationSwitch: switchState, target: stub.target, execute: stub.options.execute, observeFacts: stub.options.observeFacts });
+
+  // Switch off: blocked with reason code isolation-not-enabled.
+  const blocked = await registered[LINUX_MICROVM_CUTOVER_TOOL].execute("t", {}, undefined, undefined, tuiContext());
+  const blockedText = blocked.content[0].text;
+  assert.match(blockedText.split("\n")[0], /^MICROVM CUTOVER: BLOCKED — reason isolation-not-enabled/);
+  assert.deepEqual(JSON.parse(blockedText.slice(blockedText.indexOf("{"))), blocked.details);
+
+  // Native confirmation declined: stopped with reason not-granted.
+  await (await import("../scripts/enforcement/linux_microvm_cutover_pi.js")).registerIsolationSwitchCommands;
+  const enableCommands = {};
+  const pi2 = { registerTool: () => {}, registerCommand: (name, def) => { enableCommands[name] = def; } };
+  (await import("../scripts/enforcement/linux_microvm_cutover_pi.js")).registerIsolationSwitchCommands(pi2, { isolationSwitch: switchState });
+  await enableCommands["agentic-isolation-enable"].handler("", tuiContext());
+  const declined = await registered[LINUX_MICROVM_CUTOVER_TOOL].execute(
+    "t", {}, undefined, undefined,
+    { mode: "tui", hasUI: true, cwd: process.cwd(), ui: { confirm: async () => false } },
+    );
+  const declinedText = declined.content[0].text;
+  assert.match(declinedText.split("\n")[0], /^MICROVM CUTOVER: STOPPED — reason not-granted/);
+  assert.deepEqual(JSON.parse(declinedText.slice(declinedText.indexOf("{"))), declined.details);
+});
+
+test("microVM target: one user decision (sshTarget XOR local); absent config denies with ask-the-user guidance", async () => {
+  const { loadMicroVMTarget } = await import("../scripts/enforcement/linux_microvm_cutover_pi.js");
+  const sshTarget = loadMicroVMTarget({ target: stubEnvironment().target });
+  assert.deepEqual({ ...sshTarget }, { mode: "ssh", sshTarget: "user@test-microvm-host" });
+  const local = loadMicroVMTarget({ target: { local: true } });
+  assert.deepEqual({ ...local }, { mode: "local" });
+  // Exactly one decision: both or neither is unconfigured.
+  assert.equal(loadMicroVMTarget({ target: { mode: "ssh", sshTarget: "user@host", local: true } }), null);
+  assert.equal(loadMicroVMTarget({ targetPath: "/nonexistent/path.json", userConfigPath: "/nonexistent/user.json" }), null,
+    "no config file and no override must deny by default");
+
+  // Config absent and no target param: denied with ask-the-user guidance
+  // before any probe, even with the switch enabled and a TUI present.
+  const enabledSwitch = createIsolationSwitch();
+  enabledSwitch.set(true);
+  const probed = [];
+  const unconfigured = await runLinuxMicroVMCutover(tuiContext(), {
+    isolationSwitch: enabledSwitch,
+    userConfigPath: "/nonexistent/user-config.json",
+    execute: (...args) => { probed.push(args); return { code: 0, stdout: "", stderr: "" }; },
+  });
+  assert.equal(unconfigured.ok, false);
+  assert.equal(unconfigured.status, "blocked");
+  assert.equal(unconfigured.reason.code, "target-not-configured");
+  assert.match(unconfigured.reason.detail, /Ask the user which machine/);
+  assert.match(unconfigured.reason.detail, /`target` parameter/);
+  assert.equal(probed.length, 0, "no probe runs without a configured target");
+});
+
+test("sshTarget flows verbatim into argv; discovered facts are validated; the model cannot supply a target", async () => {
+  const { run, switchState } = harness();
+  await run("agentic-isolation-enable", tuiContext());
+  const hostsSeen = [];
+  const stub = stubEnvironment({
+    isolationSwitch: switchState,
+    sshTarget: "deploy@192.168.1.50",
+  });
+  const observingExecute = (executable, args) => {
+    if (executable === "ssh") hostsSeen.push(args[0]);
+    return stub.options.execute(executable, args);
+  };
+  const journey = await runLinuxMicroVMCutover(tuiContext(), {
+    ...stub.options,
+    userConfigPath: "/nonexistent/user-config.json",
+    execute: observingExecute,
+  });
+  assert.equal(journey.ok, true);
+  assert.equal(journey.status, "VERIFIED");
+  assert.ok(hostsSeen.length >= 1, "execution uses the configured sshTarget");
+  assert.ok(hostsSeen.every((host) => host === "deploy@192.168.1.50"),
+    "ssh argv uses the configured sshTarget verbatim, never a hardcoded or model-supplied one");
+
+  // Honest safety checks over discovered facts (no user-predicted values):
+  // KVM unavailable denies with a clear code.
+  const noKvm = await runLinuxMicroVMCutover(tuiContext(), {
+    ...stub.options,
+    userConfigPath: "/nonexistent/user-config.json",
+    observeFacts: (_execute, fixtureId) => ({ ...stubFacts(fixtureId), kvmAccessible: false }),
+  });
+  assert.equal(noKvm.ok, false);
+  assert.equal(noKvm.reason.code, "kvm-unavailable");
+
+  // User-level libvirt driver denies with a clear code.
+  const userLibvirt = await runLinuxMicroVMCutover(tuiContext(), {
+    ...stub.options,
+    userConfigPath: "/nonexistent/user-config.json",
+    observeFacts: (_execute, fixtureId) => ({ ...stubFacts(fixtureId), libvirt: "qemu:///session" }),
+  });
+  assert.equal(userLibvirt.ok, false);
+  assert.equal(userLibvirt.reason.code, "libvirt-user-level");
+  assert.match(userLibvirt.reason.detail, /system-level libvirt driver/);
+
+  // A broken qemu target denies: arch changed without a matching binary and
+  // a version line missing the QEMU prefix.
+  const archMismatch = await runLinuxMicroVMCutover(tuiContext(), {
+    ...stub.options,
+    userConfigPath: "/nonexistent/user-config.json",
+    observeFacts: (_execute, fixtureId) => ({ ...stubFacts(fixtureId), arch: "aarch64", qemu: "qemu-system-x86_64 version 8.0 stub", qemuBinaryPath: "/usr/bin/qemu-system-x86_64" }),
+  });
+  assert.equal(archMismatch.ok, false);
+  assert.equal(archMismatch.reason.code, "qemu-binary-missing");
+
+  // Model-supplied target parameters are rejected by the closed schema.
+  const { registerLinuxMicroVMCutoverInterface } = await import("../scripts/enforcement/linux_microvm_cutover_pi.js");
+  const registered = {};
+  const pi = { registerTool: (tool) => { registered[tool.name] = tool; }, registerCommand: () => {} };
+  registerLinuxMicroVMCutoverInterface(pi, {
+    isolationSwitch: switchState, target: stub.target,
+    execute: stub.options.execute, observeFacts: stub.options.observeFacts,
+  });
+  const withTargetParam = await registered[LINUX_MICROVM_CUTOVER_TOOL].execute(
+    "t", { host: "model-chosen-host" }, undefined, undefined, tuiContext());
+  assert.equal(withTargetParam.details.ok, false);
+  assert.equal(withTargetParam.details.reason.code, "model-parameters-not-allowed");
+});
+
+test("the shipped REPLACE-WITH template config is rejected target-not-configured before any probe", async () => {
+  const { loadMicroVMTarget } = await import("../scripts/enforcement/linux_microvm_cutover_pi.js");
+  const target = loadMicroVMTarget({
+    targetPath: new URL("../config/microvm-target.v1.json", import.meta.url).pathname,
+    userConfigPath: "/nonexistent/user-config.json",
+  });
+  assert.equal(target, null, "the shipped REPLACE-WITH template must not load as a configured target");
+  const enabledSwitch = createIsolationSwitch();
+  enabledSwitch.set(true);
+  const probed = [];
+  const denied = await runLinuxMicroVMCutover(tuiContext(), {
+    isolationSwitch: enabledSwitch,
+    targetPath: new URL("../config/microvm-target.v1.json", import.meta.url).pathname,
+    userConfigPath: "/nonexistent/user-config.json",
+    execute: (...args) => { probed.push(args); return { code: 0, stdout: "", stderr: "" }; },
+  });
+  assert.equal(denied.ok, false);
+  assert.equal(denied.status, "blocked");
+  assert.equal(denied.reason.code, "target-not-configured");
+  assert.equal(probed.length, 0, "no probe runs against the unconfigured template");
+});
+
+test("local:true deploys without ssh; probe discovers arch/kernel/libvirt from the target", async () => {
+  const { run, switchState } = harness();
+  await run("agentic-isolation-enable", tuiContext());
+  const calls = [];
+  const journey = await runLinuxMicroVMCutover(tuiContext(), {
+    isolationSwitch: switchState,
+    userConfigPath: "/nonexistent/user-config.json",
+    target: { local: true },
+    // No observeFacts: the default probe path runs the discovery command
+    // locally (bash -c, not ssh) and validation uses the discovered facts.
+    execute: (executable, args) => {
+      calls.push([executable, ...args]);
+      const digest = (value) => createHash("sha256").update(value).digest("hex");
+      const commandText = executable === "bash" ? args[1] : "";
+      const id = /microvm-[0-9a-f]{24}/.exec(commandText)?.[0];
+      if (id && commandText.includes("fixture_domain_name")) {
+        return { code: 0, stdout: `host=this-linux-machine\narch=x86_64\nkernel=6.8.0-generic\nlibvirt=qemu:///system\nqemu_binary_path=/usr/bin/qemu-system-x86_64\nqemu=QEMU emulator version 10.2.1 (Debian 1:10.2.1+ds-1ubuntu3.1)\nkvm_accessible=yes\nfixture_domain_name=agentic-driver-${id}\nfixture_domain_state=absent`, stderr: "" };
+      }
+      const fixtureId = /microvm-[0-9a-f]{24}/.exec(commandText)?.[0];
+      const scriptHash = /['"]([0-9a-f]{64})['"]/.exec(commandText)?.[1];
+      const domain = `agentic-driver-${fixtureId}`;
+      const marker = `AGENTIC_MICROVM_PROBE:${fixtureId}`;
+      const receipt = { schema: LINUX_MICROVM_CUTOVER_SCHEMA, ok: true, status: "VERIFIED",
+        authorityCreated: false, runtimeActivated: false, persisted: false,
+        identity: { remoteHost: "this-linux-machine", fixtureId, domain },
+        marker: { value: marker, sha256: digest(marker) },
+        scriptHash, initramfsSha256: INITRAMFS,
+        teardown: { domain: { name: domain, transient: true, destroyOnExit: true, destroyRequested: true, absent: true, checked: true, check: "virsh dominfo/list" },
+          acl: { beforeSha256: "b".repeat(64), afterSha256: "b".repeat(64), equal: true, checked: true, initramfsEntryRemoved: true } },
+        context: { filesystem: { summary: "disk=absent host-share=absent credentials=absent gpu=absent", disk: false, hostShare: false, credentials: false, gpu: false,
+          sha256: digest(JSON.stringify({ disk: false, hostShare: false, credentials: false, gpu: false, initramfsSha256: INITRAMFS })) },
+          network: { summary: "network=absent", guest: false, sha256: digest(JSON.stringify({ network: false })) }, guestMounts: ["proc", "sysfs", "devtmpfs"] } };
+      return { code: 0, stdout: `AGENTIC_MICROVM_RECEIPT: ${JSON.stringify(receipt)}\n`, stderr: "" };
+    },
+  });
+  assert.equal(journey.ok, true);
+  assert.equal(journey.status, "VERIFIED");
+  // Local mode never invokes ssh: both probe and execution run through bash.
+  assert.ok(calls.length >= 2, "probe and execution both run locally");
+  assert.ok(calls.every(([executable]) => executable === "bash"),
+    "local:true must not spawn ssh");
+  // The discovery command carries no configured expectations: facts are read,
+  // not predicted.
+  assert.match(calls[0][2], /printf 'arch=%s\\n' \"\$\(uname -m\)\"/);
+  assert.match(calls[0][2], /printf 'kernel=%s\\n' \"\$\(uname -r\)\"/);
+  assert.match(calls[0][2], /printf 'libvirt=%s\\n' \"\$\(virsh uri\)\"/);
+  assert.match(calls[0][2], /kvm_accessible/);
+});
+
+
+test("relayed target param: confirmed → config written → run continues in the same invocation", async (t) => {
+  const { mkdtempSync, existsSync, readFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const tempRoot = mkdtempSync(join(tmpdir(), "microvm-relay-"));
+  t.after(() => rmSync(tempRoot, { recursive: true, force: true }));
+  const writePath = join(tempRoot, "config", "microvm-target.v1.json");
+  const { targetArgumentError } = await import("../scripts/enforcement/linux_microvm_cutover_pi.js");
+  const enabledSwitch = createIsolationSwitch();
+  enabledSwitch.set(true);
+
+  const confirmBodies = [];
+  const stub = stubEnvironment({ isolationSwitch: enabledSwitch, sshTarget: "deploy@192.0.2.10" });
+  const confirmCalls = [];
+  const context = {
+    mode: "tui", hasUI: true, cwd: process.cwd(),
+    ui: { confirm: async (title, body) => { confirmCalls.push({ title, body }); return true; } },
+  };
+  const journey = await runLinuxMicroVMCutover(context, {
+    ...stub.options,
+    target: "deploy@192.0.2.10",
+    targetUserConfigPath: writePath,
+    userConfigPath: "/nonexistent/user-config.json",
+  });
+  assert.equal(journey.ok, true);
+  assert.equal(journey.status, "VERIFIED");
+
+  // The confirmation dialog named the target explicitly.
+  assert.equal(confirmCalls.length, 2, "one setup confirmation + one per-run confirmation");
+  assert.match(confirmCalls[0].body, /deploy@192\.0\.2\.10/);
+  assert.match(confirmCalls[0].body, /saves it to your Pi config/);
+
+  // The one-decision config was written and the run continued in the same
+  // invocation using it.
+  assert.equal(existsSync(writePath), true);
+  assert.deepEqual(JSON.parse(readFileSync(writePath, "utf8")),
+    { schema: "agentic-driver.microvm-target.v1", sshTarget: "deploy@192.0.2.10" });
+
+  // Argument shape validation is exported and shared.
+  assert.equal(targetArgumentError("user@host"), null);
+  assert.equal(targetArgumentError("192.168.1.1"), null);
+  assert.equal(targetArgumentError("local"), null);
+  assert.equal(targetArgumentError("REPLACE-WITH-host")?.code, "target-argument-placeholder");
+  assert.equal(targetArgumentError("two words")?.code, "target-argument-invalid");
+  assert.equal(targetArgumentError("")?.code, "target-argument-required");
+
+  // Invalid target param denies without confirmation or write.
+  const invalid = await runLinuxMicroVMCutover(context, {
+    ...stub.options,
+    target: "not a host!",
+    targetUserConfigPath: writePath,
+    userConfigPath: "/nonexistent/user-config.json",
+  });
+  assert.equal(invalid.ok, false);
+  assert.equal(invalid.reason.code, "target-argument-invalid");
+  void existsSync; void join; void tmpdir; void rmSync; void mkdtempSync;
+});
+
+test("relayed target declined → nothing written; headless setup refused; saved config reused", async (t) => {
+  const { mkdtempSync, existsSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const tempRoot = mkdtempSync(join(tmpdir(), "microvm-relay2-"));
+  t.after(() => rmSync(tempRoot, { recursive: true, force: true }));
+  const writePath = join(tempRoot, "config", "microvm-target.v1.json");
+  const enabledSwitch = createIsolationSwitch();
+  enabledSwitch.set(true);
+  const stub = stubEnvironment({ isolationSwitch: enabledSwitch, sshTarget: "deploy@192.0.2.10" });
+
+  // Declined setup confirmation: nothing written, run stopped.
+  const declined = await runLinuxMicroVMCutover(
+    { mode: "tui", hasUI: true, ui: { confirm: async () => false } },
+    { ...stub.options, target: "deploy@192.0.2.10", targetUserConfigPath: writePath, userConfigPath: "/nonexistent/user-config.json" });
+  assert.equal(declined.ok, false);
+  assert.equal(declined.status, "stopped");
+  assert.equal(declined.reason.code, "not-granted");
+  assert.equal(existsSync(writePath), false, "a declined setup must not write the config");
+
+  // Headless + no config: refused; only pre-configured targets run headless.
+  const headless = await runLinuxMicroVMCutover(HEADLESS, {
+    isolationSwitch: enabledSwitch,
+    target: "deploy@192.0.2.10",
+    targetUserConfigPath: writePath,
+    userConfigPath: "/nonexistent/user-config.json",
+  });
+  assert.equal(headless.ok, false);
+  assert.equal(headless.reason.code, "native-tui-required");
+  assert.match(headless.reason.detail, /pre-configured target/);
+
+  // Saved config is reused without any setup confirmation: the first
+  // confirmation call in a run with no target param is the per-run run
+  // confirmation, not a setup dialog.
+  const confirmCalls = [];
+  const saved = await runLinuxMicroVMCutover(
+    { mode: "tui", hasUI: true, ui: { confirm: async (title, body) => { confirmCalls.push(title); return true; } } },
+    { ...stub.options, target: undefined, targetUserConfigPath: writePath, userConfigPath: "/nonexistent/user-config.json" });
+  assert.equal(saved.ok, false, "nothing was saved yet, so this still asks the user for a target");
+  assert.equal(saved.reason.code, "target-not-configured");
+
+  // After the user relays the target once (confirmed), the saved config drives
+  // subsequent runs without a setup dialog.
+  const setup = await runLinuxMicroVMCutover(
+    { mode: "tui", hasUI: true, ui: { confirm: async () => true } },
+    { ...stub.options, target: "deploy@192.0.2.10", targetUserConfigPath: writePath, userConfigPath: "/nonexistent/user-config.json" });
+  assert.equal(setup.ok, true);
+  confirmCalls.length = 0;
+  const reused = await runLinuxMicroVMCutover(
+    { mode: "tui", hasUI: true, ui: { confirm: async (title) => { confirmCalls.push(title); return true; } } },
+    { ...stub.options, target: undefined, targetUserConfigPath: writePath, userConfigPath: "/nonexistent/user-config.json" });
+  assert.equal(reused.ok, true);
+  assert.equal(reused.status, "VERIFIED");
+  assert.equal(confirmCalls.filter((title) => /Use this microVM host\?/.test(title)).length, 0,
+    "no setup dialog when the target is already saved");
+});
+
+test("qemu validation: Debian version line passes; missing binary and garbage output deny", async () => {
+  const { run, switchState } = harness();
+  await run("agentic-isolation-enable", tuiContext());
+  const stub = stubEnvironment({ isolationSwitch: switchState, sshTarget: "alias-backend" });
+
+  // A Debian-style version line with no arch token passes when the resolved
+  // binary path ends with qemu-system-<discovered-arch>.
+  const debian = await runLinuxMicroVMCutover(tuiContext(), {
+    ...stub.options,
+    userConfigPath: "/nonexistent/user-config.json",
+    observeFacts: (_execute, fixtureId) => ({
+      ...stubFacts(fixtureId),
+      qemu: "QEMU emulator version 10.2.1 (Debian 1:10.2.1+ds-1ubuntu3.1)",
+      qemuBinaryPath: "/usr/bin/qemu-system-x86_64",
+    }),
+  });
+  assert.equal(debian.ok, true);
+  assert.equal(debian.status, "VERIFIED");
+
+  // A missing resolved binary denies.
+  const noBinary = await runLinuxMicroVMCutover(tuiContext(), {
+    ...stub.options,
+    userConfigPath: "/nonexistent/user-config.json",
+    observeFacts: (_execute, fixtureId) => ({ ...stubFacts(fixtureId), qemuBinaryPath: "" }),
+  });
+  assert.equal(noBinary.ok, false);
+  assert.equal(noBinary.reason.code, "qemu-binary-missing");
+
+  // Garbage version output denies.
+  const garbage = await runLinuxMicroVMCutover(tuiContext(), {
+    ...stub.options,
+    userConfigPath: "/nonexistent/user-config.json",
+    observeFacts: (_execute, fixtureId) => ({ ...stubFacts(fixtureId), qemu: "total garbage output" }),
+  });
+  assert.equal(garbage.ok, false);
+  assert.equal(garbage.reason.code, "qemu-binary-missing");
+});
+
+test("ssh config alias targets are accepted verbatim into argv", async () => {
+  const { run, switchState } = harness();
+  await run("agentic-isolation-enable", tuiContext());
+  const destinations = [];
+  const stub = stubEnvironment({ isolationSwitch: switchState, sshTarget: "linux-backend" });
+  const journey = await runLinuxMicroVMCutover(tuiContext(), {
+    ...stub.options,
+    userConfigPath: "/nonexistent/user-config.json",
+    execute: (executable, args) => {
+      if (executable === "ssh") destinations.push(args[0]);
+      return stub.options.execute(executable, args);
+    },
+  });
+  assert.equal(journey.ok, true);
+  assert.equal(journey.status, "VERIFIED");
+  assert.ok(destinations.length >= 1);
+  assert.ok(destinations.every((destination) => destination === "linux-backend"),
+    "the alias flows verbatim as the ssh destination; ssh config resolves it");
 });
