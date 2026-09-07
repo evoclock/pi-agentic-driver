@@ -237,15 +237,17 @@ requires a separate native confirmation. Run `/agentic-isolation-disable` to
 turn it off; the switch is not saved to settings. Headless sessions remain
 blocked.
 
-**One-time setup — trusted target.** The cutover target is user-configured and
-deny-by-default; the model cannot choose or change it. You make one decision:
-where the microVM runs. Copy `config/microvm-target.v1.example.json` to
-`~/.pi/pi/config/microvm-target.v1.json` and set either:
+**Setup and run — three steps.** The cutover target is user-configured and
+deny-by-default; the model cannot choose or change it.
 
-- `"sshTarget": "user@host-or-ip"` — a remote Linux machine (used verbatim in
-  fixed `ssh user@host ...` arguments); or
-- `"local": true` — this session already runs directly on a Linux machine
-  (commands run locally, never through ssh).
+1. In the interactive Pi TUI, run
+   `/agentic-isolation-target user@host` (or an ip, or `local` if this session
+   already runs directly on a Linux machine). The command shows exactly what
+   will be written and where, and asks for native confirmation. You never edit
+   a config file by hand.
+2. Run `/agentic-isolation-enable` to enable isolation for this session
+   (native confirmation; not saved to settings).
+3. Invoke the cutover. Each run asks for native confirmation again.
 
 Everything technical is auto-discovered from the target at probe time — you do
 not configure it: architecture from `uname -m`, kernel from `uname -r`, and the

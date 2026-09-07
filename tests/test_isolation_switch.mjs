@@ -473,3 +473,84 @@ test("local:true deploys without ssh; probe discovers arch/kernel/libvirt from t
   assert.match(calls[0][2], /printf 'libvirt=%s\\n' \"\$\(virsh uri\)\"/);
   assert.match(calls[0][2], /kvm_accessible/);
 });
+
+test("agentic-isolation-target: writes the one-decision config behind confirmation; loader accepts it end-to-end", async (t) => {
+  const { mkdtempSync, existsSync, readFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const tempRoot = mkdtempSync(join(tmpdir(), "microvm-target-"));
+  t.after(() => rmSync(tempRoot, { recursive: true, force: true }));
+  const writePath = join(tempRoot, "nested", "dir", "microvm-target.v1.json");
+
+  const commands = {};
+  const pi = { registerTool: () => {}, registerCommand: (name, def) => { commands[name] = def; } };
+  const { registerIsolationSwitchCommands, loadMicroVMTarget } = await import("../scripts/enforcement/linux_microvm_cutover_pi.js");
+  registerIsolationSwitchCommands(pi, { isolationSwitch: createIsolationSwitch(), targetUserConfigPath: writePath });
+  const runTarget = (args, context) => commands["agentic-isolation-target"].handler(args, context);
+  const confirmContext = (confirmValue) => ({ mode: "tui", hasUI: true, ui: { confirm: async () => confirmValue } });
+
+  // Missing argument and bad shapes deny with clear codes; nothing is written.
+  for (const [args, code] of [
+    ["", "target-argument-required"],
+    [["   "], "target-argument-required"],
+    ["REPLACE-WITH-user@host", "target-argument-placeholder"],
+    ["not a host!", "target-argument-invalid"],
+    [["user@host extra"], "target-argument-invalid"],
+    [["local true"], "target-argument-invalid"],
+  ]) {
+    const denied = await runTarget(args, confirmContext(true));
+    assert.equal(denied.ok, false, `${JSON.stringify(args)}`);
+    assert.equal(denied.reason.code, code);
+  }
+  assert.equal(existsSync(writePath), false, "denials must not write anything");
+
+  // Headless is denied before any write.
+  const headless = await runTarget("user@host", { mode: "print" });
+  assert.equal(headless.reason.code, "native-tui-required");
+  assert.equal(existsSync(writePath), false);
+
+  // Declined confirmation writes nothing.
+  const declined = await runTarget("deploy@192.168.1.50", confirmContext(false));
+  assert.equal(declined.status, "stopped");
+  assert.equal(declined.reason.code, "not-granted");
+  assert.equal(existsSync(writePath), false);
+
+  // Confirmed ssh target: creates the directory, writes the closed schema,
+  // returns a clear status line with the isolation-enable reminder.
+  const configured = await runTarget("deploy@192.168.1.50", confirmContext(true));
+  assert.equal(configured.ok, true);
+  assert.equal(configured.status, "CONFIGURED");
+  assert.deepEqual(configured.configured, { sshTarget: "deploy@192.168.1.50" });
+  assert.match(configured.detail, /isolation-enable is still required per session/);
+  assert.equal(existsSync(writePath), true, "the command must create the directory");
+  const written = JSON.parse(readFileSync(writePath, "utf8"));
+  assert.deepEqual(written, { schema: "agentic-driver.microvm-target.v1", sshTarget: "deploy@192.168.1.50" });
+
+  // The loader accepts the written file end-to-end (targetPath override).
+  const loaded = loadMicroVMTarget({ targetPath: writePath });
+  const { __path, ...loadedFields } = loaded;
+  assert.deepEqual(loadedFields, { mode: "ssh", sshTarget: "deploy@192.168.1.50" });
+
+  // Confirmed local:true writes the other decision.
+  const localConfigured = await runTarget("local", confirmContext(true));
+  assert.equal(localConfigured.ok, true);
+  assert.deepEqual(localConfigured.configured, { local: true });
+  const writtenLocal = JSON.parse(readFileSync(writePath, "utf8"));
+  assert.deepEqual(writtenLocal, { schema: "agentic-driver.microvm-target.v1", local: true });
+  const loadedLocal = loadMicroVMTarget({ targetPath: writePath });
+  const { __path: localPath, ...localFields } = loadedLocal;
+  assert.deepEqual(localFields, { mode: "local" });
+  void localPath;
+});
+
+test("agentic-isolation-target is registered as a command, never a tool", () => {
+  const tools = [];
+  const commands = [];
+  const pi = {
+    registerTool: (tool) => tools.push(tool.name),
+    registerCommand: (name) => commands.push(name),
+  };
+  registerIsolationSwitchCommands(pi, { isolationSwitch: createIsolationSwitch() });
+  assert.deepEqual(tools, [], "the target-setup command must not be a tool");
+  assert.ok(commands.includes("agentic-isolation-target"));
+});
