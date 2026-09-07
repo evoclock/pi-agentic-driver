@@ -36,6 +36,7 @@
   "files": [
     "extensions/code-phage.js",
     "extensions/herdr-communication.ts",
+    "extensions/herdr-dispatch.ts",
     "lib/adapters/diff-scope.mjs",
     "lib/adapters/evidence.mjs",
     "lib/adapters/narrative.mjs",
@@ -45,6 +46,7 @@
     "lib/python_ast_metrics.py",
     "lib/typescript_ast_metrics.mjs",
     "scripts/enforcement/herdr_communication_pi.js",
+    "scripts/enforcement/herdr_async_dispatch_pi.js",
     "README.md",
     "LICENSE",
     "extensions/herdr-lifecycle.ts",
