@@ -432,16 +432,52 @@ if [ "${1:-}" = "--gc-taxonomy-sha" ]; then
   exit 0
 fi
 
+# Containment job payload helpers (design sections 1.3, 3): transport is
+# base64 on the argv (shell-safe for the ssh remote-shell command string; see
+# the tool side); decode here, then validate the text: printable ASCII,
+# newline, tab only, at most 8192 bytes. Never model-set. Absent payload =
+# plain proof mode.
+gc_payload_decode() { # b64 -> decoded payload text on stdout
+  local b64=$1 text
+  case "$b64" in
+    ""|*[!A-Za-z0-9+/=]*) return 2 ;;
+  esac
+  text=$(printf '%s' "$b64" | base64 -d 2>/dev/null) \
+    || text=$(printf '%s' "$b64" | base64 -D 2>/dev/null) \
+    || return 2
+  printf '%s' "$text"
+}
+gc_payload_text_ok() { # payload text -> 0 ok, 2 invalid
+  local bad_pattern
+  [ "${#1}" -ge 1 ] || return 2
+  [ "${#1}" -le 8192 ] || return 2
+  # Allowed: printable ASCII (space..~), tab, newline. The forbidden-class
+  # pattern is built with printf because a literal tab cannot be written in
+  # a case/glob bracket via \t (that is an escaped letter, not a tab).
+  bad_pattern=$(printf '[^ -~\t]')
+  if printf '%s' "$1" | LC_ALL=C grep -q -- "$bad_pattern"; then return 2; fi
+}
+if [ "${1:-}" = "--gc-payload-validate" ]; then
+  shift
+  text=$(gc_payload_decode "${1:-}") || { printf 'microvm failure phase=setup code=2 detail=invalid containment job payload (base64 transport)\n' >&2; exit 2; }
+  gc_payload_text_ok "$text" || { printf 'microvm failure phase=setup code=2 detail=invalid containment job payload (printable ASCII, newline, tab, at most 8192 bytes)\n' >&2; exit 2; }
+  printf '%s\n' "$text"
+  exit 0
+fi
+
 phase=setup
-if [ "$#" -ne 2 ]; then
-  printf 'microvm failure phase=identity code=2 detail=fixture id and script hash are required\n' >&2
+# Exactly: fixture id + script hash, plus the optional allocation pair and
+# optional base64 job payload (2..5 args). The tool always passes 4 (plain
+# proof) or 5 (containment); fewer or more is an invocation error.
+if [ "$#" -lt 2 ] || [ "$#" -gt 5 ]; then
+  printf 'microvm failure phase=identity code=2 detail=fixture id and script hash are required (optional vcpu, memoryMiB, base64 job payload)\n' >&2
   exit 2
 fi
 fixture_id=$1
 script_hash=$2
 vcpu_arg=${3:-}
 memory_arg=${4:-}
-containment_payload=${5:-}
+containment_payload_b64=${5:-}
 fixture_fail() {
   local code=$1
   shift
@@ -455,14 +491,14 @@ if [ "${#script_hash}" -ne 64 ]; then fixture_fail 2 'invalid fixture script has
 case "$script_hash" in
   ""|*[!0-9a-f]*) fixture_fail 2 'invalid fixture script hash' ;;
 esac
-# Containment job payload (design sections 1.3, 3): the user-configured job
-# command/script the guest executes under the shim PATH. Supplied as fixture
-# argv text (bounded); never model-set. Absent = plain proof mode.
-if [ -n "$containment_payload" ]; then
-  case "$containment_payload" in
-    *[![:print:]\t\n]*) fixture_fail 2 'invalid containment job payload (printable ASCII, newline, tab only)' ;;
-  esac
-  if [ "${#containment_payload}" -gt 8192 ]; then fixture_fail 2 'containment job payload exceeds 8192 bytes'; fi
+# Containment job payload (main path): decode the base64 argv and validate
+# the text; the helpers above are shared with the --gc-payload-validate hook.
+if [ -n "$containment_payload_b64" ]; then
+  if ! containment_payload=$(gc_payload_decode "$containment_payload_b64"); then
+    fixture_fail 2 'invalid containment job payload (base64 transport)'
+  fi
+  gc_payload_text_ok "$containment_payload" \
+    || fixture_fail 2 'invalid containment job payload (printable ASCII, newline, tab, at most 8192 bytes)'
 fi
 # Elastic resource allocation (design section 6.1): user-configured via the
 # target config, validated here; defaults are the proof values. Never

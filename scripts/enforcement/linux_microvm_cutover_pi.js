@@ -587,7 +587,13 @@ export async function runLinuxMicroVMCutover(context, options = {}) {
   try {
     const allocation = resourceAllocation(target);
     const fixtureArgs = [fixtureId, scriptHash, String(allocation.vcpu), String(allocation.memoryMiB)];
-    if (containmentRun) fixtureArgs.push(target.jobPayload);
+    // The payload travels base64-encoded: ssh concatenates argv into one
+    // command string parsed by the remote login shell, so a raw payload
+    // (newlines, quotes, semicolons are allowed by design) would be word-
+    // split, reinterpreted, or injected as remote commands. Base64 is
+    // shell-safe (no whitespace/metacharacters) and round-trips exactly;
+    // the fixture decodes and validates it. Local mode benefits identically.
+    if (containmentRun) fixtureArgs.push(Buffer.from(target.jobPayload, "utf8").toString("base64"));
     const result = target.mode === "local"
       ? execute("bash", ["-c", "bash -s -- " + fixtureArgs.map(shellQuote).join(" ")], { input: script, timeout: 180000 })
       : execute("ssh", [target.sshTarget, "bash", "-s", "--", ...fixtureArgs], { input: script, timeout: 180000 });

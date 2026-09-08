@@ -921,7 +921,11 @@ test("M6: jobPayload config activates containment mode with the payload as the 5
     assert.equal(value.schema, LINUX_MICROVM_CUTOVER_SCHEMA_V2);
     assert.equal(value.containment.killswitch.tripped, true);
     const fixtureExec = executed.find(([exe, ...args]) => exe === "ssh" && args[1] === "bash");
-    assert.equal(fixtureExec.at(-1), JOB_PAYLOAD, "payload travels as the 5th fixture argv");
+    // The payload travels base64-encoded on the argv (ssh joins argv into one
+    // remote-shell command string; raw text would be word-split or injected).
+    const payloadArg = fixtureExec.at(-1);
+    assert.match(payloadArg, /^[A-Za-z0-9+/=]+$/, "payload argv must be shell-safe base64");
+    assert.equal(Buffer.from(payloadArg, "base64").toString("utf8"), JOB_PAYLOAD, "payload must round-trip exactly");
     assert.match(confirmBodies[0], /deny-by-default containment monitor/);
     assert.match(confirmBodies[0], /Guest job payload \(user-configured\):/);
   } finally {
@@ -1029,5 +1033,59 @@ test("M6: end-to-end containment flow through the fixture (trip → envelope →
     assert.equal(validated.containment.histogram["GC-NET"], 1);
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// --- M6 security repairs: shell-safe payload transport, argv-count guard ---
+
+test("M6/sec: a hostile multi-line payload travels shell-safe (base64, no whitespace or metacharacters)", async () => {
+  const dir = await tempState();
+  try {
+    const hostile = "/bin/busybox sh -c 'echo ok'\nrm -rf /tmp/x; `id` $(id) \"quoted\" 'single' | pipe &\ttab";
+    const targetPath = targetConfigFile(dir, { jobPayload: hostile });
+    const confirmBodies = [];
+    const executed = [];
+    const harness = runHarness(targetPath, (id, sh) => stubV2Receipt(id, sh, "2".repeat(64)), confirmBodies, executed);
+    const value = await runLinuxMicroVMCutover(harness.context, harness.options);
+    assert.equal(value.ok, true, JSON.stringify(value.reason ?? {}));
+    const fixtureExec = executed.find(([exe, ...args]) => exe === "ssh" && args[1] === "bash");
+    const payloadArg = fixtureExec.at(-1);
+    assert.match(payloadArg, /^[A-Za-z0-9+/=]+$/, "the remote shell must see no whitespace, quote, or metacharacter");
+    assert.equal(Buffer.from(payloadArg, "base64").toString("utf8"), hostile, "hostile payload round-trips exactly");
+    assert.match(confirmBodies[0], /Guest job payload \(user-configured\):/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("M6/sec: the fixture accepts 2..5 argv and rejects fewer or more before any side effect", async () => {
+  const id = "microvm-" + "b".repeat(24);
+  const hash = "1".repeat(64);
+  for (const args of [[id], [id, hash, "1", "128", "aGk=", "extra"], ["only-one"]]) {
+    const r = spawnSync("bash", [FIXTURE, ...args], { encoding: "utf8" });
+    assert.notEqual(r.status, 0, `argv count ${args.length} must be rejected: ${JSON.stringify(args.slice(0, 2))}`);
+    assert.match(r.stderr, /phase=identity/, "rejection happens at the argv guard, before setup work");
+  }
+  // The historical guard bug: the tool always passes 4 (plain) or 5 (containment) args.
+  const source = await readFile(FIXTURE, "utf8");
+  assert.ok(source.includes('if [ "$#" -lt 2 ] || [ "$#" -gt 5 ]'), "guard must accept the tool's real arities");
+});
+
+test("M6/sec: the fixture decodes and validates the base64 payload (accept and reject cases)", async () => {
+  const b64 = (text) => Buffer.from(text, "utf8").toString("base64");
+  const good = "/bin/busybox sh -c 'echo session-work'\n# comment line\nsleep 1";
+  const ok = spawnSync("bash", [FIXTURE, "--gc-payload-validate", b64(good)], { encoding: "utf8" });
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(ok.stdout.trimEnd(), good, "decoded payload must round-trip exactly");
+  const rejects = {
+    "not base64 charset": "!!!not-base64!!!",
+    "decodes over the 8192-byte bound": b64("x".repeat(8193)),
+    "decodes to a non-printable byte": b64("bad\x01payload"),
+    "decodes to empty": b64(""),
+  };
+  for (const [label, arg] of Object.entries(rejects)) {
+    const r = spawnSync("bash", [FIXTURE, "--gc-payload-validate", arg], { encoding: "utf8" });
+    assert.notEqual(r.status, 0, `${label} must be rejected`);
+    assert.match(r.stderr, /invalid containment job payload/);
   }
 });
