@@ -21,6 +21,7 @@ const RECEIPT_SCHEMAS = new Set([LINUX_MICROVM_CUTOVER_SCHEMA, LINUX_MICROVM_CUT
 // lines are parsed separately and never count as unbound output. Everything
 // else remains "unbound output = failure".
 const CONTAINMENT_MARKER_LINE = /^AGENTIC_CONTAINMENT_(BEGIN|END):[A-Za-z0-9._-]+$/;
+export const GUEST_CONTAINMENT_LOG_SCHEMA = "agentic-driver.guest-containment.log.v1";
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REMOTE_FIXTURE = join(SCRIPT_DIR, "linux_microvm_remote_fixture.sh");
 const TARGET_EXAMPLE = join(SCRIPT_DIR, "..", "..", "config", "microvm-target.v1.example.json");
@@ -335,22 +336,32 @@ function requireCount(value, label) {
 // containment proof: the proof is that the killswitch worked.
 function validateContainmentBlock(receipt) {
   const block = receipt.containment;
-  exactKeys(block, ["taxonomySha256", "logSha256", "events", "denials", "killswitch"], "containment block");
+  exactKeys(block, ["schema", "taxonomySha256", "logSha256", "events", "denials", "histogram", "killswitch"], "containment block");
+  if (block.schema !== GUEST_CONTAINMENT_LOG_SCHEMA) {
+    throw phaseError("evidence", "receipt-invalid", "containment log schema is unexpected");
+  }
   requireHash(block.taxonomySha256, "containment taxonomy digest");
   requireHash(block.logSha256, "containment log digest");
   requireCount(block.events, "containment event count");
   requireCount(block.denials, "containment denial count");
-  exactKeys(block.killswitch, ["tripped", "rule", "guestPoweroff", "final"], "containment killswitch");
+  // Compact class histogram (design section 4): class -> non-negative count.
+  if (!block.histogram || typeof block.histogram !== "object" || Array.isArray(block.histogram)
+      || Object.values(block.histogram).some((count) => !Number.isInteger(count) || count < 0)) {
+    throw phaseError("evidence", "receipt-invalid", "containment histogram is not a class-count map");
+  }
+  exactKeys(block.killswitch, ["tripped", "rule", "class", "tier", "guestPoweroff", "final"], "containment killswitch");
   requireBoolean(block.killswitch.tripped, "killswitch tripped");
   if (block.killswitch.guestPoweroff !== true || block.killswitch.final !== true) {
     throw phaseError("evidence", "receipt-invalid", "killswitch guest poweroff or final flag is unexpected");
   }
   if (block.killswitch.tripped) {
-    if (typeof block.killswitch.rule !== "string" || !block.killswitch.rule) {
-      throw phaseError("evidence", "receipt-invalid", "killswitch tripped without a rule");
+    if (typeof block.killswitch.rule !== "string" || !block.killswitch.rule
+        || typeof block.killswitch.class !== "string" || !block.killswitch.class
+        || typeof block.killswitch.tier !== "string" || !block.killswitch.tier) {
+      throw phaseError("evidence", "receipt-invalid", "killswitch tripped without rule, class, or tier");
     }
-  } else if (block.killswitch.rule !== null) {
-    throw phaseError("evidence", "receipt-invalid", "killswitch rule must be null when not tripped");
+  } else if (block.killswitch.rule !== null || block.killswitch.class !== null || block.killswitch.tier !== null) {
+    throw phaseError("evidence", "receipt-invalid", "killswitch rule, class, and tier must be null when not tripped");
   }
   return block;
 }
@@ -447,6 +458,12 @@ function normalizedForwardedStderr(result, fallbackPhase, fallbackCode, fallback
     primary?.[2] || (cleanup.length ? "cleanup-failed" : fallbackCode), details.join("; "));
 }
 
+// Containment run mode (design sections 5, 6): `options.containment` is a
+// registration-time option, never a model parameter. NOTE (M6, explicit
+// scope): the guest job payload is not yet wired through the tool argv —
+// the containment path is exercised end-to-end at the fixture/evidence level
+// and by tests; passing the payload argv through the tool surface is the
+// explicitly recorded next step.
 export async function runLinuxMicroVMCutover(context, options = {}) {
   // Session-scoped user switch: only the explicit enable command can set this
   // flag in memory; it never persists to settings and the model cannot set it.
@@ -603,6 +620,15 @@ export function registerLinuxMicroVMCutoverInterface(pi, options = {}) {
           ...options,
           ...(typeof params?.target === "string" ? { target: params.target } : {}),
         });
+    // M2 (design section 5): a killswitch trip raises an error-severity
+    // notification naming the rule, class, and severity tier.
+    const killswitch = value?.containment?.killswitch;
+    if (value?.ok === true && killswitch?.tripped === true && typeof context?.ui?.notify === "function") {
+      context.ui.notify(
+        `MICROVM CONTAINMENT: KILLSWITCH TRIPPED — rule ${killswitch.rule}, class ${killswitch.class}, tier ${killswitch.tier}; guest session killed and VM torn down.`,
+        "error",
+      );
+    }
     notifyOutcome(context, value);
     return { content: [{ type: "text", text: `${outcomeLine(value)}\n${JSON.stringify(value, null, 2)}` }], details: value };
   };

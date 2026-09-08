@@ -21,7 +21,7 @@ const FIXTURE = join(ROOT, "scripts/enforcement/linux_microvm_remote_fixture.sh"
 const TAXONOMY_FILE = join(ROOT, "scripts/enforcement/guest_containment_taxonomy.v1.json");
 // Pinned digest of the shipped taxonomy (design section 2: pinned per
 // repository revision; the fixture embeds and verifies the same digest).
-const TAXONOMY_SHA256 = "1b2c9cd424f682d800f8049423a5626a697be1b6f759b2a1d6bb07461978969a";
+const TAXONOMY_SHA256 = "2d3f781c1594a5cefb77560419faff1619bc90012fc20b339a79110dbaa847c9";
 const INITRAMFS = "a".repeat(64);
 
 function runFixture(args, env = {}) {
@@ -386,11 +386,20 @@ function stubV1Receipt(fixtureId, scriptHash, host = "test-microvm-host") {
 
 function containmentBlock(logSha, { tripped = true, rule = "GC-CRED-001" } = {}) {
   return {
+    schema: "agentic-driver.guest-containment.log.v1",
     taxonomySha256: TAXONOMY_SHA256,
     logSha256: logSha,
     events: 3,
     denials: 2,
-    killswitch: { tripped, rule: tripped ? rule : null, guestPoweroff: true, final: true },
+    histogram: tripped ? { "GC-CRED": 1, unknown: 1 } : { unknown: 1 },
+    killswitch: {
+      tripped,
+      rule: tripped ? rule : null,
+      class: tripped ? "GC-CRED" : null,
+      tier: tripped ? "CRITICAL" : null,
+      guestPoweroff: true,
+      final: true,
+    },
   };
 }
 
@@ -456,8 +465,8 @@ test("envelope parse recomputes the log digest from a pty-mangled (CRLF) transcr
   const block = JSON.parse(result.stdout);
   assert.equal(block.taxonomySha256, TAXONOMY_SHA256);
   assert.equal(block.logSha256, expectedLogSha, "digest recomputed from decoded payload must match the guest log");
-  // Payload records plus the trigger event and the terminal killswitch line.
-  assert.equal(block.events, 4);
+  // Records counted up to the trigger event (terminal killswitch line excluded).
+  assert.equal(block.events, 3);
   assert.equal(block.denials, 2);
   assert.equal(block.killswitch.tripped, true);
   assert.equal(block.killswitch.rule, "GC-CRED-001");
@@ -541,9 +550,9 @@ test("containment block fields are closed and digest-typed", () => {
   const bad = stubV2Receipt(fixtureId, scriptHash, "2".repeat(64));
   bad.containment.logSha256 = "zz";
   assert.throws(() => validateLinuxMicroVMReceipt(bad, stubFactsShape(fixtureId), fixtureId, scriptHash, { containment: true }));
-  const extra = stubV2Receipt(fixtureId, scriptHash, "2".repeat(64));
-  extra.containment.histogram = { "GC-CRED": 2 };
-  assert.throws(() => validateLinuxMicroVMReceipt(extra, stubFactsShape(fixtureId), fixtureId, scriptHash, { containment: true }));
+  const badHistogram = stubV2Receipt(fixtureId, scriptHash, "2".repeat(64));
+  badHistogram.containment.histogram = { "GC-CRED": "two" };
+  assert.throws(() => validateLinuxMicroVMReceipt(badHistogram, stubFactsShape(fixtureId), fixtureId, scriptHash, { containment: true }));
   const badTrip = stubV2Receipt(fixtureId, scriptHash, "2".repeat(64));
   badTrip.containment.killswitch.rule = null;
   assert.throws(() => validateLinuxMicroVMReceipt(badTrip, stubFactsShape(fixtureId), fixtureId, scriptHash, { containment: true }));
@@ -661,4 +670,145 @@ test("the model cannot set the allocation: the tool surface stays closed", async
   returned = result;
   assert.equal(returned.details.ok, false);
   assert.equal(returned.details.reason.code, "model-parameters-not-allowed");
+});
+
+// --- Repair step: B1, H1, H2, H4, M1, M3, M4 ---
+
+test("B1: the real receipt printf emits parseable JSON for v1 and v2 shapes", () => {
+  const common = ["v1", "test-host", "microvm-" + "4".repeat(24), "agentic-driver-fid",
+    "AGENTIC_MICROVM_PROBE:x", "a".repeat(64), "1".repeat(64), "b".repeat(64)];
+  const v1 = runFixtureSync([
+    "--gc-receipt-print", ...common, "-", "agentic-driver-fid", "true", "true", "c".repeat(64), "c".repeat(64), "d".repeat(64), "e".repeat(64),
+  ]);
+  const parsed1 = JSON.parse(v1);
+  assert.equal(parsed1.schema, "v1");
+  assert.equal(parsed1.containment, undefined);
+  const segment = JSON.stringify(containmentBlock("2".repeat(64)));
+  const v2 = runFixtureSync([
+    "--gc-receipt-print", ...common, `,"containment":${segment}`,
+    "agentic-driver-fid", "true", "true", "c".repeat(64), "c".repeat(64), "d".repeat(64), "e".repeat(64),
+  ]);
+  const parsed2 = JSON.parse(v2);
+  assert.equal(parsed2.containment.killswitch.tripped, true);
+});
+
+function runFixtureSync(args) {
+  const child = spawnSync("bash", [FIXTURE, ...args], { encoding: "utf8" });
+  assert.equal(child.status, 0, child.stderr);
+  return child.stdout;
+}
+
+test("H1: the log freezes at trip — appends after a killswitch trip are refused", async () => {
+  const dir = await tempState();
+  try {
+    const state = join(dir, "s");
+    await decide(state, "GC-CRED-001", "cat ~/.ssh/id_rsa");
+    const before = await readFile(join(state, "containment.log.jsonl"), "utf8");
+    await runFixture(["--gc-log", state, "watcher:proc", "unknown", "proc", "post-trip"]);
+    const after = await readFile(join(state, "containment.log.jsonl"), "utf8");
+    assert.equal(after, before, "post-trip appends must not reach the log");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("H1: trailing post-trip records do not invalidate the evidence digest chain", async () => {
+  const fixtureId = "microvm-" + "5".repeat(24);
+  const { body, expectedLogSha } = envelopeTranscript(fixtureId, envelopePayloadLines(fixtureId));
+  // Append noise after the envelope payload ends: the chain is verified at the
+  // killswitch line's position, not by assuming it is last.
+  const dir = await tempState();
+  const transcript = join(dir, "console.typescript");
+  writeFileSync(transcript, body.replace("more unbound guest output", "straggler log line after trip\r\nmore unbound guest output"));
+  const result = await envelopeExtract(transcript, fixtureId);
+  assert.equal(result.status, 0, result.stderr);
+  const block = JSON.parse(result.stdout);
+  assert.equal(block.logSha256, expectedLogSha);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test("H2: a second envelope pair is rejected as a forgery attempt", async () => {
+  const fixtureId = "microvm-" + "6".repeat(24);
+  const { body } = envelopeTranscript(fixtureId, envelopePayloadLines(fixtureId), { includeEnvelope: false });
+  const good = envelopeTranscript(fixtureId, envelopePayloadLines(fixtureId)).body;
+  const dir = await tempState();
+  const transcript = join(dir, "console.typescript");
+  // Inject a forged (empty but well-formed) envelope before the real one.
+  const forged = `AGENTIC_CONTAINMENT_BEGIN:${fixtureId}\r\n_AGNETIC_CONTAINMENT_END:${fixtureId}\r\n`;
+  writeFileSync(transcript, forged + good);
+  const result = await envelopeExtract(transcript, fixtureId);
+  assert.notEqual(result.status, 0);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test("H4: busybox applet bypass, credential reads, env probing, manifests, and dev writes classify", async () => {
+  const dir = await tempState();
+  try {
+    const shim = async (...args) => JSON.parse(await runFixture(["--gc-shim", join(dir, "s"), ...args]));
+    assert.equal((await shim("busybox", "wget", "http://x")).rule, "GC-NET-002", "busybox applet bypass must not evade the shim");
+    assert.equal((await shim("cat", "/home/u/.ssh/id_rsa")).rule, "GC-CRED-001");
+    assert.equal((await shim("printenv")).rule, "GC-CRED-002");
+    assert.equal((await shim("sh", "-c", "env | grep -i token")).rule, "GC-CRED-002");
+    assert.equal((await shim("bash", "-c", "echo {} > package.json")).rule, "GC-PKG-003");
+    assert.equal((await shim("sed", "-i", "s/x/y/", "/tmp/session/.gc/containment.log.jsonl")).rule, "GC-LOG-002");
+    assert.equal((await shim("echo", "AGENTIC_CONTAINMENT_BEGIN:microvm-x", ">", "/dev/console")).rule, "GC-TOOL-001");
+    assert.equal((await shim("tee", "/dev/ttyS0")).rule, "GC-TOOL-002");
+    const fs = async (...args) => JSON.parse(await runFixture(["--gc-fs-detect", join(dir, "s2"), ...args]));
+    assert.equal((await fs("/opt/app/package.json")).rule, "GC-PKG-003");
+    assert.equal((await fs("/dev/console")).rule, "GC-TOOL-002");
+    // Taxonomy dispositions: the gap rules are explicitly marked.
+    const taxonomy = JSON.parse(await readFile(TAXONOMY_FILE, "utf8"));
+    const byId = Object.fromEntries(taxonomy.rules.map((r) => [r.id, r]));
+    for (const id of ["GC-FSW-003", "GC-SHR-001", "GC-SHR-002", "GC-LOG-001"]) {
+      assert.match(byId[id].disposition, /^taxonomy-only-until-detector:/, `${id} must declare its missing detector`);
+    }
+    for (const id of ["GC-CRED-001", "GC-CRED-002", "GC-PKG-003", "GC-LOG-002", "GC-TOOL-001", "GC-TOOL-002"]) {
+      assert.match(byId[id].disposition, /^detector:/, `${id} must declare a wired detector`);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("M1: the containment block carries the schema and compact histogram", async () => {
+  const fixtureId = "microvm-" + "8".repeat(24);
+  const { body, expectedLogSha } = envelopeTranscript(fixtureId, envelopePayloadLines(fixtureId));
+  const dir = await tempState();
+  const transcript = join(dir, "console.typescript");
+  writeFileSync(transcript, body);
+  const block = JSON.parse((await envelopeExtract(transcript, fixtureId)).stdout);
+  assert.equal(block.schema, "agentic-driver.guest-containment.log.v1");
+  assert.deepEqual(block.histogram, { unknown: 1, "GC-CRED": 1 });
+  assert.equal(block.logSha256, expectedLogSha);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test("M3: learning-window observations are logged as events", async () => {
+  const dir = await tempState();
+  try {
+    const state = join(dir, "s");
+    await runFixture(["--gc-shim", state, "ls", "-la"], { GC_LEARNING_WINDOW_SECONDS: "999" });
+    const log = await readFile(join(state, "containment.log.jsonl"), "utf8");
+    const events = log.trim().split("\n").map((l) => JSON.parse(l));
+    assert.ok(events.some((e) => e.event.action === "observe" && e.event.class === "unknown"), "window observation logged");
+    assert.ok(!events.some((e) => e.event.action === "deny"), "observations are not denials");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("M4: flood degrades to summary-only records without dropping events", async () => {
+  const dir = await tempState();
+  try {
+    const state = dir; // the temp dir itself is the containment state dir
+    // Pre-fill the log beyond the 8 KiB cap with valid v1-shape records.
+    const filler = JSON.stringify({ schema: "agentic-driver.guest-containment.log.v1", session: "s", taxonomy: "guest-containment-taxonomy.v1", taxonomySha256: TAXONOMY_SHA256, event: { ts: "t", seq: 0, source: "shim", class: "unknown", action: "deny", subject: { type: "exec", value: "x".repeat(120) } } });
+    writeFileSync(join(state, "containment.log.jsonl"), `${Array(80).fill(filler).join("\n")}\n`);
+    writeFileSync(join(state, "taxonomy.json"), await readFile(TAXONOMY_FILE));
+    const out = JSON.parse(await runFixture(["--gc-log", state, "shim", "unknown", "exec", "post-flood"]));
+    assert.equal(out.event.summary, true);
+    assert.equal(out.event.subject, undefined, "context dropped in summary-only mode");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

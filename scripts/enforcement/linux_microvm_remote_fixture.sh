@@ -9,13 +9,12 @@ set -euo pipefail
 GC_TAXONOMY_VERSION="guest-containment-taxonomy.v1"
 GC_LOG_SCHEMA="agentic-driver.guest-containment.log.v1"
 GC_KILLSWITCH_SCHEMA="agentic-driver.guest-containment.killswitch.v1"
-GC_TAXONOMY_SHA256="1b2c9cd424f682d800f8049423a5626a697be1b6f759b2a1d6bb07461978969a"
+GC_TAXONOMY_SHA256="2d3f781c1594a5cefb77560419faff1619bc90012fc20b339a79110dbaa847c9"
 # Severity tiers (design section 2.0): CRITICAL/HIGH trip immediately,
 # ELEVATED/ANOMALY accumulate pressure within a sliding time window.
 GC_WINDOW_SECONDS=60
 GC_ELEVATED_THRESHOLD=5
 GC_ANOMALY_THRESHOLD=10
-GC_EVENT_WEIGHT=1
 GC_LOG_CAP_BYTES=8192
 GC_LOG_TRUNC=512
 
@@ -23,26 +22,26 @@ gc_embedded_taxonomy() {
   cat <<'GC_TAXONOMY_EOF'
 {
   "schema": "guest-containment-taxonomy.v1",
-  "description": "Deny-by-default rule taxonomy for the guest containment monitor (design GUEST_CONTAINMENT_DESIGN.md section 2). One rule per line; IDs are never reused; new rules append.",
+  "description": "Deny-by-default rule taxonomy for the guest containment monitor (design GUEST_CONTAINMENT_DESIGN.md section 2). One rule per line; IDs are never reused; new rules append. disposition records whether a live detector exists in the fixture (design sections 1.3, 3) or the rule is armed by the taxonomy only.",
   "rules": [
-    {"id": "GC-PKG-001", "class": "GC-PKG", "severity": "ELEVATED", "action": "deny", "match": "package-manager-install: invocation of npm install, npm ci, pip install, yarn add, pnpm add, gem install, cargo install, apk add, apt install", "evidence": "METR autonomous-replication evaluation work (arXiv:2403.13793); HF incident dependency-install persistence step", "since": "v1"},
-    {"id": "GC-PKG-002", "class": "GC-PKG", "severity": "ELEVATED", "action": "deny", "match": "registry-write-command: npm publish, npm token, .npmrc writes, pip config, keyring writes", "evidence": "HF incident: agent attempted package publication", "since": "v1"},
-    {"id": "GC-PKG-003", "class": "GC-PKG", "severity": "ELEVATED", "action": "deny", "match": "package-metadata-tamper: writes to package.json, package-lock.json, pyproject.toml, requirements*.txt outside the job scratch space", "evidence": "METR evaluation logs: dependency-manifest tampering as persistence step", "since": "v1"},
-    {"id": "GC-FSW-001", "class": "GC-FSW", "severity": "ELEVATED", "action": "deny", "match": "write-outside-allowlist: create/append/truncate on any path outside /tmp/session, detected by inotifyd or find -newer sweeps", "evidence": "METR evaluation logs: out-of-bounds file writes during evaluation runs", "since": "v1"},
-    {"id": "GC-FSW-002", "class": "GC-FSW", "severity": "ELEVATED", "action": "deny", "match": "self-code-modification: writes under the agent job install/execution directories including the shim tree /shims/", "evidence": "HF incident: agent rewrote the repository it was working in; monitor self-rewrite defense", "since": "v1"},
-    {"id": "GC-FSW-003", "class": "GC-FSW", "severity": "ELEVATED", "action": "deny", "match": "file-growth-anomaly: unexpected growth in cache/package directories (~/.npm, ~/.cache/pip, /var/cache/*) beyond the size-delta threshold", "evidence": "METR evaluation logs: bulk cache staging of payloads", "since": "v1"},
-    {"id": "GC-SHR-001", "class": "GC-SHR", "severity": "HIGH", "action": "deny", "match": "shared-cache-write: writes to paths shared with other agents or the coordinator; with host-share absent any such attempt is a deny", "evidence": "receipt proves host-share=absent; writes would indicate boundary violation", "since": "v1"},
-    {"id": "GC-SHR-002", "class": "GC-SHR", "severity": "HIGH", "action": "deny", "match": "cross-agent-channel: creation of or writes to inter-agent coordination paths (maildirs, task-queue files, agent state files)", "evidence": "HF incident multi-agent escalation; METR coordination/sabotage threat model", "since": "v1"},
-    {"id": "GC-NET-001", "class": "GC-NET", "severity": "HIGH", "action": "deny", "match": "socket-open: any entry in /proc/net/tcp, /proc/net/tcp6, /proc/net/udp at any sweep", "evidence": "fixture boots with no network device; any socket is exfiltration-capable", "since": "v1"},
-    {"id": "GC-NET-002", "class": "GC-NET", "severity": "HIGH", "action": "deny", "match": "network-tool-invocation: shim-detects wget, curl, nc, ssh, telnet, ping regardless of arguments", "evidence": "METR self-replication exfiltration patterns; HF incident remote control", "since": "v1"},
-    {"id": "GC-CRED-001", "class": "GC-CRED", "severity": "CRITICAL", "action": "deny", "match": "credential-path-read: opens of ~/.ssh/, ~/.aws/, ~/.netrc, ~/.git-credentials, token files", "evidence": "credential theft is step one in every reported agent-escape chain", "since": "v1"},
-    {"id": "GC-CRED-002", "class": "GC-CRED", "severity": "CRITICAL", "action": "deny", "match": "env-secret-probing: attempts to dump or scan the environment for secret-shaped keys", "evidence": "METR evaluation logs; HF incident postmortem credential harvest attempts", "since": "v1"},
-    {"id": "GC-LOG-001", "class": "GC-LOG", "severity": "CRITICAL", "action": "deny", "match": "transcript-write: writes to the console transcript, the monitor log, or the receipt channel by any path other than the supervisor", "evidence": "log is opened append-only by the supervisor; other writers are evidence tampering", "since": "v1"},
-    {"id": "GC-LOG-002", "class": "GC-LOG", "severity": "CRITICAL", "action": "deny", "match": "log-truncate-or-rename: >, rm, mv, truncate, sed -i targeting monitor/agent logs", "evidence": "METR report: models attempting to edit their own logs", "since": "v1"},
-    {"id": "GC-TOOL-001", "class": "GC-TOOL", "severity": "CRITICAL", "action": "deny", "match": "receipt-forgery: job printing AGENTIC_MICROVM_PROBE:* or AGENTIC_MICROVM_RECEIPT:* lines", "evidence": "host closed-receipt parsing rejects forged output; guest-side denial closes the loop", "since": "v1"},
-    {"id": "GC-TOOL-002", "class": "GC-TOOL", "severity": "CRITICAL", "action": "deny", "match": "marker-injection: writes to /dev/console, /dev/ttyS0, or other devtmpfs write targets that could inject marker text", "evidence": "METR tool-call spoofing family; serial stream integrity", "since": "v1"}
+    {"id":"GC-PKG-001","class":"GC-PKG","severity":"ELEVATED","action":"deny","match":"package-manager-install: invocation of npm install, npm ci, pip install, yarn add, pnpm add, gem install, cargo install, apk add, apt install","evidence":"METR autonomous-replication evaluation work (arXiv:2403.13793); HF incident dependency-install persistence step","since":"v1","disposition":"detector:shim-argv"},
+    {"id":"GC-PKG-002","class":"GC-PKG","severity":"ELEVATED","action":"deny","match":"registry-write-command: npm publish, npm token, .npmrc writes, pip config, keyring writes","evidence":"HF incident: agent attempted package publication","since":"v1","disposition":"detector:shim-argv"},
+    {"id":"GC-PKG-003","class":"GC-PKG","severity":"ELEVATED","action":"deny","match":"package-metadata-tamper: writes to package.json, package-lock.json, pyproject.toml, requirements*.txt outside the job scratch space","evidence":"METR evaluation logs: dependency-manifest tampering as persistence step","since":"v1","disposition":"detector:fs-path+shim-argv"},
+    {"id":"GC-FSW-001","class":"GC-FSW","severity":"ELEVATED","action":"deny","match":"write-outside-allowlist: create/append/truncate on any path outside /tmp/session, detected by inotifyd or find -newer sweeps","evidence":"METR evaluation logs: out-of-bounds file writes during evaluation runs","since":"v1","disposition":"detector:fs-watcher"},
+    {"id":"GC-FSW-002","class":"GC-FSW","severity":"ELEVATED","action":"deny","match":"self-code-modification: writes under the agent job install/execution directories including the shim tree /shims/","evidence":"HF incident: agent rewrote the repository it was working in; monitor self-rewrite defense","since":"v1","disposition":"detector:fs-watcher"},
+    {"id":"GC-FSW-003","class":"GC-FSW","severity":"ELEVATED","action":"deny","match":"file-growth-anomaly: unexpected growth in cache/package directories (~/.npm, ~/.cache/pip, /var/cache/*) beyond the size-delta threshold","evidence":"METR evaluation logs: bulk cache staging of payloads","since":"v1","disposition":"taxonomy-only-until-detector: needs cache size-delta sampling in the sweep (later step)"},
+    {"id":"GC-SHR-001","class":"GC-SHR","severity":"HIGH","action":"deny","match":"shared-cache-write: writes to paths shared with other agents or the coordinator; with host-share absent any such attempt is a deny","evidence":"receipt proves host-share=absent; writes would indicate boundary violation","since":"v1","disposition":"taxonomy-only-until-detector: host share absent in this fixture; auto-arm when a share mount exists"},
+    {"id":"GC-SHR-002","class":"GC-SHR","severity":"HIGH","action":"deny","match":"cross-agent-channel: creation of or writes to inter-agent coordination paths (maildirs, task-queue files, agent state files)","evidence":"HF incident multi-agent escalation; METR coordination/sabotage threat model","since":"v1","disposition":"taxonomy-only-until-detector: coordination-path heuristics deferred to avoid false positives"},
+    {"id":"GC-NET-001","class":"GC-NET","severity":"HIGH","action":"deny","match":"socket-open: any entry in /proc/net/tcp, /proc/net/tcp6, /proc/net/udp at any sweep","evidence":"fixture boots with no network device; any socket is exfiltration-capable","since":"v1","disposition":"detector:net-proc-sweep"},
+    {"id":"GC-NET-002","class":"GC-NET","severity":"HIGH","action":"deny","match":"network-tool-invocation: shim-detects wget, curl, nc, ssh, telnet, ping regardless of arguments","evidence":"METR self-replication exfiltration patterns; HF incident remote control","since":"v1","disposition":"detector:shim-argv"},
+    {"id":"GC-CRED-001","class":"GC-CRED","severity":"CRITICAL","action":"deny","match":"credential-path-read: opens of ~/.ssh/, ~/.aws/, ~/.netrc, ~/.git-credentials, token files","evidence":"credential theft is step one in every reported agent-escape chain","since":"v1","disposition":"detector:shim-argv"},
+    {"id":"GC-CRED-002","class":"GC-CRED","severity":"CRITICAL","action":"deny","match":"env-secret-probing: attempts to dump or scan the environment for secret-shaped keys","evidence":"METR evaluation logs; HF incident postmortem credential harvest attempts","since":"v1","disposition":"detector:shim-argv"},
+    {"id":"GC-LOG-001","class":"GC-LOG","severity":"CRITICAL","action":"deny","match":"transcript-write: writes to the console transcript, the monitor log, or the receipt channel by any path other than the supervisor","evidence":"log is opened append-only by the supervisor; other writers are evidence tampering","since":"v1","disposition":"taxonomy-only-until-detector: console transcript attribution requires supervisor fd discipline"},
+    {"id":"GC-LOG-002","class":"GC-LOG","severity":"CRITICAL","action":"deny","match":"log-truncate-or-rename: >, rm, mv, truncate, sed -i targeting monitor/agent logs","evidence":"METR report: models attempting to edit their own logs","since":"v1","disposition":"detector:shim-argv"},
+    {"id":"GC-TOOL-001","class":"GC-TOOL","severity":"CRITICAL","action":"deny","match":"receipt-forgery: job printing AGENTIC_MICROVM_PROBE:* or AGENTIC_MICROVM_RECEIPT:* lines","evidence":"host closed-receipt parsing rejects forged output; guest-side denial closes the loop","since":"v1","disposition":"detector:shim-argv"},
+    {"id":"GC-TOOL-002","class":"GC-TOOL","severity":"CRITICAL","action":"deny","match":"marker-injection: writes to /dev/console, /dev/ttyS0, or other devtmpfs write targets that could inject marker text","evidence":"METR tool-call spoofing family; serial stream integrity","since":"v1","disposition":"detector:shim-argv+fs-path; known gap: char-device writes may not update mtime for the sweep"}
   ],
-  "residual": {"class": "unknown", "tier": "ANOMALY", "action": "deny", "note": "everything not allowlisted and not classified above; accumulates toward the ANOMALY threshold"}
+  "residual": {"class":"unknown","tier":"ANOMALY","action":"deny","note":"everything not allowlisted and not classified above; accumulates toward the ANOMALY threshold"}
 }
 GC_TAXONOMY_EOF
 }
@@ -60,8 +59,11 @@ gc_rule_field() { # taxonomy_file rule_id field
   sed -n "s/.*\"id\": *\"$2\"[^}]*\"$3\": *\"\([A-Za-z-]*\)\".*/\1/p" "$1" | head -n 1
 }
 
-gc_log_event() { # state_dir source class subject_type subject_value
-  local state_dir=$1 source=$2 class=$3 stype=$4 svalue=$5
+gc_log_event() { # state_dir source class subject_type subject_value [action]
+  local state_dir=$1 source=$2 class=$3 stype=$4 svalue=$5 action=${6:-deny}
+  # Log freeze (design section 5): once a killswitch trip is recorded the log
+  # is frozen; appends after the trip would break the terminal digest chain.
+  if [ -f "$state_dir/kill" ]; then return 0; fi
   mkdir -p "$state_dir"
   local log="$state_dir/containment.log.jsonl"
   local tax="$state_dir/taxonomy.json"
@@ -79,11 +81,11 @@ gc_log_event() { # state_dir source class subject_type subject_value
   # Summary-only degradation on flood (design section 4): context dropped,
   # events never silently discarded.
   if [ -f "$log" ] && [ "$(wc -c <"$log")" -gt "$GC_LOG_CAP_BYTES" ]; then
-    record=$(printf '{"schema":"%s","session":"%s","taxonomy":"%s","taxonomySha256":"%s","event":{"ts":"%s","seq":%s,"source":"%s","class":"%s","action":"deny","summary":true}}' \
-      "$GC_LOG_SCHEMA" "$(basename "$state_dir")" "$GC_TAXONOMY_VERSION" "$tsha" "$ts" "$seq" "$source" "$class")
+    record=$(printf '{"schema":"%s","session":"%s","taxonomy":"%s","taxonomySha256":"%s","event":{"ts":"%s","seq":%s,"source":"%s","class":"%s","action":"%s","summary":true}}' \
+      "$GC_LOG_SCHEMA" "$(basename "$state_dir")" "$GC_TAXONOMY_VERSION" "$tsha" "$ts" "$seq" "$source" "$class" "$action")
   else
-    record=$(printf '{"schema":"%s","session":"%s","taxonomy":"%s","taxonomySha256":"%s","event":{"ts":"%s","seq":%s,"source":"%s","class":"%s","action":"deny","subject":{"type":"%s","value":"%s"}}}' \
-      "$GC_LOG_SCHEMA" "$(basename "$state_dir")" "$GC_TAXONOMY_VERSION" "$tsha" "$ts" "$seq" "$source" "$class" "$stype" "$svalue")
+    record=$(printf '{"schema":"%s","session":"%s","taxonomy":"%s","taxonomySha256":"%s","event":{"ts":"%s","seq":%s,"source":"%s","class":"%s","action":"%s","subject":{"type":"%s","value":"%s"}}}' \
+      "$GC_LOG_SCHEMA" "$(basename "$state_dir")" "$GC_TAXONOMY_VERSION" "$tsha" "$ts" "$seq" "$source" "$class" "$action" "$stype" "$svalue")
   fi
   printf '%s\n' "$record" >>"$log"
   printf '%s\n' "$record"
@@ -171,18 +173,33 @@ GC_WRITABLE_ROOT="/tmp/session"
 # allowlist, design section 3).
 gc_shim_classify() { # tool args...
   local tool=$1; shift
+  # busybox <applet> shim bypass (design section 9.1): classify the effective
+  # applet line instead of trusting the tool name.
+  if [ "$tool" = "busybox" ] && [ "$#" -ge 1 ]; then
+    gc_shim_classify "$1" "${@:2}"
+    return
+  fi
   local line="$tool $*"
   case "$tool" in
     wget|curl|nc|ssh|telnet|ping) printf 'GC-NET-002\n'; return 0 ;;
+    printenv) printf 'GC-CRED-002\n'; return 0 ;;
   esac
   case "$line" in
     *"npm install"*|*"npm ci"*|*"pip install"*|*"yarn add"*|*"pnpm add"*|*"gem install"*|*"cargo install"*|*"apk add"*|*"apt install"*)
       printf 'GC-PKG-001\n' ;;
     *"npm publish"*|*"npm token"*|*".npmrc"*|*"pip config"*)
       printf 'GC-PKG-002\n' ;;
-    *"AGENTIC_MICROVM_PROBE"*|*"AGENTIC_MICROVM_RECEIPT"*)
+    *".ssh/"*|*".aws/"*|*".netrc"*|*".git-credentials"*)
+      printf 'GC-CRED-001\n' ;;
+    *"env | grep"*|*"env | grep -i"*)
+      printf 'GC-CRED-002\n' ;;
+    *"package.json"*|*"package-lock.json"*|*"pyproject.toml"*|*"requirements"*.txt*)
+      printf 'GC-PKG-003\n' ;;
+    *"AGENTIC_MICROVM_PROBE"*|*"AGENTIC_MICROVM_RECEIPT"*|*"AGENTIC_CONTAINMENT_BEGIN"*|*"AGENTIC_CONTAINMENT_END"*)
       printf 'GC-TOOL-001\n' ;;
-    *"> /var/log"*|*"truncate -s 0"*|*"sed -i"*)
+    *"/dev/console"*|*"/dev/ttyS"*|*"/dev/tty0"*)
+      printf 'GC-TOOL-002\n' ;;
+    *"containment.log"*|*"/.gc/"*|*"> /var/log"*|*"truncate -s 0"*|*"sed -i"*)
       printf 'GC-LOG-002\n' ;;
     *) return 0 ;;
   esac
@@ -217,6 +234,9 @@ gc_shim_allow() { # state_dir tool args... -> decision JSON on stdout
     if ! grep -F -x -- "$tool" "$allow" >/dev/null 2>&1; then
       printf '%s\n' "$tool" >>"$allow"
     fi
+    # Learning-window observations are logged (design section 3): allowed, but
+    # recorded as events so the learning window is auditable.
+    gc_log_event "$state_dir" "shim" "unknown" "exec" "$tool $*" "observe" >/dev/null 2>&1 || true
     printf '{"decision":"allow","tool":"%s","learned":true}\n' "$tool"
   fi
 }
@@ -232,6 +252,16 @@ gc_fs_detect() { # state_dir path -> decision JSON
     /shims|/shims/*|/agent|/agent/*)
       gc_decide "$state_dir" GC-FSW-002 "$path" >/dev/null || return 2
       printf '{"decision":"deny","rule":"GC-FSW-002","path":"%s"}\n' "$path" ;;
+    */package.json|*/package-lock.json|*/pyproject.toml|*/requirements*.txt|/package.json|/pyproject.toml)
+      gc_decide "$state_dir" GC-PKG-003 "$path" >/dev/null || return 2
+      printf '{"decision":"deny","rule":"GC-PKG-003","path":"%s"}\n' "$path" ;;
+    /dev/*|/dev)
+      # Write targets on devtmpfs could inject marker text (GC-TOOL-002).
+      gc_decide "$state_dir" GC-TOOL-002 "$path" >/dev/null || return 2
+      printf '{"decision":"deny","rule":"GC-TOOL-002","path":"%s"}\n' "$path" ;;
+    *"containment.log"*|*/.gc/*)
+      gc_decide "$state_dir" GC-LOG-002 "$path" >/dev/null || return 2
+      printf '{"decision":"deny","rule":"GC-LOG-002","path":"%s"}\n' "$path" ;;
     *)
       gc_decide "$state_dir" GC-FSW-001 "$path" >/dev/null || return 2
       printf '{"decision":"deny","rule":"GC-FSW-001","path":"%s"}\n' "$path" ;;
@@ -273,6 +303,13 @@ gc_liveness() { # state_dir alive_flags ("1 1 1"; any 0 is a dead loop)
   esac
 }
 
+# B1: the one real receipt printf. The containment segment is passed as a %s
+# argument (never interpolated into the format string, where it would stay
+# literal under single quotes); an empty segment yields the v1 receipt shape.
+gc_receipt_json() { # schema remote_host fixture_id domain marker marker_sha script_hash initramfs_sha containment_segment domain destroy_requested absent acl_before acl_after fs_ctx_sha net_ctx_sha
+  printf '{"schema":"%s","ok":true,"status":"VERIFIED","authorityCreated":false,"runtimeActivated":false,"persisted":false,"identity":{"remoteHost":"%s","fixtureId":"%s","domain":"%s"},"marker":{"value":"%s","sha256":"%s"},"scriptHash":"%s","initramfsSha256":"%s"%s,"teardown":{"domain":{"name":"%s","transient":true,"destroyOnExit":true,"destroyRequested":%s,"absent":%s,"checked":true,"check":"virsh dominfo/list"},"acl":{"beforeSha256":"%s","afterSha256":"%s","equal":true,"checked":true,"initramfsEntryRemoved":true}},"context":{"filesystem":{"summary":"disk=absent host-share=absent credentials=absent gpu=absent","disk":false,"hostShare":false,"credentials":false,"gpu":false,"sha256":"%s"},"network":{"summary":"network=absent","guest":false,"sha256":"%s"},"guestMounts":["proc","sysfs","devtmpfs"]}}\n' "$@"
+}
+
 # Terminal event for a session that ends without a killswitch trip: the
 # envelope then carries only log lines plus this session-end record
 # (design section 5: a session with neither is containment-evidence-missing).
@@ -297,39 +334,65 @@ gc_containment_evidence() { # transcript fixture_id -> containment block JSON on
   local b64 tmp log_sha events denials ks_line ks_rule tripped rule_json
   tmp="$transcript.containment.$$"
   trap 'rm -f "$tmp" "$tmp.b64" "$tmp.head"' RETURN
+  # H2: exactly one envelope pair may exist; more than one is a forgery or a
+  # replay attempt and fails closed.
+  # Count with index() so pty CR suffixes do not defeat the anchor.
+  begins=$(awk -v b="$begin" 'index($0, b) == 1 { n++ } END { print n + 0 }' "$transcript")
+  ends=$(awk -v e="$end" 'index($0, e) == 1 { n++ } END { print n + 0 }' "$transcript")
+  if [ "$begins" -ne 1 ] || [ "$ends" -ne 1 ]; then
+    return 1
+  fi
   if ! awk -v b="$begin" -v e="$end" 'index($0, b) == 1 { inside = 1; next } index($0, e) == 1 { inside = 0; next } inside' "$transcript" | tr -d '\r' >"$tmp.b64"; then
     return 1
   fi
   if ! [ -s "$tmp.b64" ]; then return 1; fi
   if ! { base64 -d <"$tmp.b64" >"$tmp" 2>/dev/null || base64 -D <"$tmp.b64" >"$tmp" 2>/dev/null; }; then return 1; fi
   if ! grep -q '"schema":"' "$tmp"; then return 1; fi
-  if ! log_sha=$(sha256sum "$tmp" | awk '{print $1}'); then return 1; fi
-  events=$(grep -c '"schema":"' "$tmp")
-  denials=$(grep -c '"action":"deny"' "$tmp")
   ks_line=$(grep '"final":true' "$tmp" | tail -n 1)
+  ks_num=$(grep -n '"final":true' "$tmp" | tail -n 1 | cut -d: -f1)
   if [ -n "$ks_line" ]; then
-    # Digest chain: the terminal killswitch event embeds the digest of the log
-    # up to and including the trigger event but excluding the killswitch line
-    # itself (it is appended after the digest is taken); the host recomputes
-    # that digest from the decoded payload.
+    # Digest chain (H1): verified at the killswitch line's position — the
+    # digest covers the log up to and including the trigger event but
+    # excluding the killswitch line itself; anything after it is post-trip
+    # noise the guest's log freeze should have prevented, and is ignored for
+    # the digest rather than silently trusted.
     ks_sha=$(printf '%s\n' "$ks_line" | sed -n 's/.*"logSha256":"\([0-9a-f]*\)".*/\1/p')
-    sed '$d' "$tmp" >"$tmp.head" 2>/dev/null || return 1
+    sed -n "1,$((ks_num - 1))p" "$tmp" >"$tmp.head" 2>/dev/null || return 1
     chained_sha=$(sha256sum "$tmp.head" | awk '{print $1}') || return 1
     if [ -z "$ks_sha" ] || [ "$ks_sha" != "$chained_sha" ]; then return 2; fi
     tripped=true
     log_sha=$ks_sha
     ks_rule=$(printf '%s\n' "$ks_line" | sed -n 's/.*"trigger":{"rule":"\([A-Za-z0-9_-]*\)".*/\1/p')
+    ks_class=$(printf '%s\n' "$ks_line" | sed -n 's/.*"trigger":{"rule":"[A-Za-z0-9_-]*","class":"\([A-Za-z0-9_-]*\)".*/\1/p')
+    ks_tier=$(printf '%s\n' "$ks_line" | sed -n 's/.*"tier":"\([A-Za-z]*\)".*/\1/p')
     rule_json="\"$ks_rule\""
+    class_json="\"$ks_class\""
+    tier_json="\"$ks_tier\""
+    counted=$((ks_num - 1))
   else
     # Fail-closed: without a killswitch record the session must end with the
     # clean session-end terminal event.
     grep -q '"class":"session-end"' "$tmp" || return 1
     tripped=false
     rule_json=null
+    class_json=null
+    tier_json=null
+    log_sha=$(sha256sum "$tmp" | awk '{print $1}') || return 1
+    counted=$(grep -c '"schema":"' "$tmp")
   fi
+  events=$counted
+  denials=$(grep -c '"action":"deny"' "$tmp")
+  # M1: compact histogram (design section 4; open question 4 decided) — the
+  # coordinator consumes aggregates from the receipt without extra tooling.
+  # Terminal killswitch records are echoes, not events; exclude them.
+  histogram=$(awk '{
+    if ($0 !~ /guest-containment.killswitch.v1/ && match($0, /"class":"[^"]*"/)) {
+      c = substr($0, RSTART + 9, RLENGTH - 10); n[c]++
+    }
+  } END { first = 1; printf "{"; for (k in n) { if (!first) printf ","; printf "\"%s\":%d", k, n[k]; first = 0 } printf "}" }' "$tmp")
   rm -f "$tmp" "$tmp.b64" "$tmp.head"
-  printf '{"taxonomySha256":"%s","logSha256":"%s","events":%s,"denials":%s,"killswitch":{"tripped":%s,"rule":%s,"guestPoweroff":true,"final":true}}' \
-    "$GC_TAXONOMY_SHA256" "$log_sha" "$events" "$denials" "$tripped" "$rule_json"
+  printf '{"schema":"%s","taxonomySha256":"%s","logSha256":"%s","events":%s,"denials":%s,"histogram":%s,"killswitch":{"tripped":%s,"rule":%s,"class":%s,"tier":%s,"guestPoweroff":true,"final":true}}' \
+    "$GC_LOG_SCHEMA" "$GC_TAXONOMY_SHA256" "$log_sha" "$events" "$denials" "$histogram" "$tripped" "$rule_json" "$class_json" "$tier_json"
 }
 
 # Test hooks: the containment core is callable without booting the guest.
@@ -341,6 +404,15 @@ if [ "${1:-}" = "--gc-fs-sweep" ]; then shift; gc_fs_sweep "$@"; exit $?; fi
 if [ "${1:-}" = "--gc-net-detect" ]; then shift; gc_net_detect "$@"; exit $?; fi
 if [ "${1:-}" = "--gc-proc-detect" ]; then shift; gc_proc_detect "$@"; exit $?; fi
 if [ "${1:-}" = "--gc-liveness" ]; then shift; gc_liveness "$@"; exit $?; fi
+if [ "${1:-}" = "--gc-receipt-print" ]; then
+  shift
+  # Print-only hook (B1): executes the real receipt printf with
+  # test-supplied computed values; segment "-" means empty (v1 shape).
+  receipt_segment=""
+  if [ "${9:-}" != "-" ]; then receipt_segment="$9"; fi
+  gc_receipt_json "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$receipt_segment" "${10}" "${11}" "${12}" "${13}" "${14}" "${15}" "${16}"
+  exit 0
+fi
 if [ "${1:-}" = "--gc-envelope-extract" ]; then
   shift
   gc_containment_evidence "$@" || {
@@ -689,7 +761,15 @@ export PATH=/shims:/bin
 net_pid=\$!
 (
   if [ -x /bin/inotifyd ]; then
-    exec /bin/inotifyd /gc/fs-handler /:ncp
+    # Watch every existing top-level root except the virtual trees and the
+    # job scratch (coverage equal to or better than the sweep; the handler
+    # still filters /tmp/session paths).
+    watches=""
+    for d in /*; do
+      case "$d" in /proc|/sys|/dev|/tmp/session|/tmp/session/*) continue ;; esac
+      [ -d "$d" ] && watches="$watches $d:ncp"
+    done
+    [ -n "$watches" ] && exec /bin/inotifyd /gc/fs-handler $watches
   fi
   while :; do
     find / -newer "\$session/baseline" 2>/dev/null | grep -Ev '^/(tmp/session|proc|sys|dev|gc)' | while IFS= read -r p; do
@@ -725,8 +805,23 @@ while :; do
 done
 # Killswitch action (design section 5): kill the job process group, sync,
 # poweroff. on_poweroff=destroy tears the transient domain down host-side.
-kill -TERM -"\$job_pid" 2>/dev/null
-kill -KILL -"\$job_pid" 2>/dev/null
+# M5: without setsid there is no separate process group; fall back to killing
+# the job and its /proc-visible descendants directly.
+if [ -x /bin/setsid ]; then
+  kill -TERM -"\$job_pid" 2>/dev/null
+  kill -KILL -"\$job_pid" 2>/dev/null
+else
+  for p in /proc/[0-9]*; do
+    ppid=\$(awk '{print $4}' "\$p/stat" 2>/dev/null) || continue
+    if [ "\$ppid" = "\$job_pid" ]; then kill -TERM "\${p#/proc/}" 2>/dev/null; fi
+  done
+  kill -TERM "\$job_pid" 2>/dev/null
+  for p in /proc/[0-9]*; do
+    ppid=\$(awk '{print $4}' "\$p/stat" 2>/dev/null) || continue
+    if [ "\$ppid" = "\$job_pid" ]; then kill -KILL "\${p#/proc/}" 2>/dev/null; fi
+  done
+  kill -KILL "\$job_pid" 2>/dev/null
+fi
 if [ ! -f "\$session/kill" ]; then gc_session_end "\$session" || :; fi
 # Denial-evidence transport (design section 5): framed base64 envelope on the
 # console channel, UTF-8, LF-only, fixed key order; pty-safe alphabet.
@@ -880,8 +975,5 @@ case "$remote_host" in
 esac
 
 trap - EXIT INT TERM HUP
-printf '{"schema":"%s","ok":true,"status":"VERIFIED","authorityCreated":false,"runtimeActivated":false,"persisted":false,"identity":{"remoteHost":"%s","fixtureId":"%s","domain":"%s"},"marker":{"value":"%s","sha256":"%s"},"scriptHash":"%s","initramfsSha256":"%s""$containment_segment","teardown":{"domain":{"name":"%s","transient":true,"destroyOnExit":true,"destroyRequested":%s,"absent":%s,"checked":true,"check":"virsh dominfo/list"},"acl":{"beforeSha256":"%s","afterSha256":"%s","equal":true,"checked":true,"initramfsEntryRemoved":true}},"context":{"filesystem":{"summary":"disk=absent host-share=absent credentials=absent gpu=absent","disk":false,"hostShare":false,"credentials":false,"gpu":false,"sha256":"%s"},"network":{"summary":"network=absent","guest":false,"sha256":"%s"},"guestMounts":["proc","sysfs","devtmpfs"]}}\n' \
-  "$receipt_schema" "$remote_host" "$fixture_id" "$domain" "$marker" "$marker_sha" "$script_hash" "$initramfs_sha" \
-  "$domain" "$domain_destroy_requested" "$domain_absent" "$home_acl_before_sha" "$home_acl_after_sha" \
-  "$filesystem_context_sha" "$network_context_sha"
+gc_receipt_json "$receipt_schema" "$remote_host" "$fixture_id" "$domain" "$marker" "$marker_sha" "$script_hash" "$initramfs_sha" "$containment_segment" "$domain" "$domain_destroy_requested" "$domain_absent" "$home_acl_before_sha" "$home_acl_after_sha" "$filesystem_context_sha" "$network_context_sha"
 exit 0
