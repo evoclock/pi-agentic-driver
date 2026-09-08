@@ -22,9 +22,9 @@ const TAXONOMY_FILE = join(ROOT, "scripts/enforcement/guest_containment_taxonomy
 // repository revision; the fixture embeds and verifies the same digest).
 const TAXONOMY_SHA256 = "1b2c9cd424f682d800f8049423a5626a697be1b6f759b2a1d6bb07461978969a";
 
-function runFixture(args) {
+function runFixture(args, env = {}) {
   return new Promise((resolve, reject) => {
-    execFile("bash", [FIXTURE, ...args], (error, stdout, stderr) => {
+    execFile("bash", [FIXTURE, ...args], { env: { ...process.env, ...env } }, (error, stdout, stderr) => {
       if (error) reject(Object.assign(error, { stderr }));
       else resolve(stdout);
     });
@@ -202,4 +202,135 @@ test("log truncates oversized subject values to the 512-byte bound", async () =>
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// --- Step 2: detection (shims, watchers, liveness) ---
+
+test("shim denies an unlisted executable after the learning window with a redacted command line", async () => {
+  const dir = await tempState();
+  try {
+    // Window forced closed: nothing is learned, so even the first invocation
+    // is judged against the locked allowlist.
+    const out = JSON.parse(await runFixture([
+      "--gc-shim", join(dir, "s"), "npm", "install", "--registry=https://evil/TOKEN=abc123",
+    ], { GC_LEARNING_WINDOW_SECONDS: "0" }));
+    assert.equal(out.decision, "deny");
+    assert.equal(out.rule, "GC-PKG-001");
+    const log = await readFile(join(dir, "s/containment.log.jsonl"), "utf8");
+    const event = JSON.parse(log.trim().split("\n").at(-1)).event;
+    assert.doesNotMatch(event.subject.value, /abc123/);
+    assert.match(event.subject.value, /\[REDACTED\]/);
+    assert.match(event.subject.value, /npm install/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("observed-first-use allowlist: learning window allows, lock denies unlisted", async () => {
+  const dir = await tempState();
+  try {
+    // Long window: events allowed and recorded as learned.
+    const learn = JSON.parse(await runFixture([
+      "--gc-shim", join(dir, "s"), "ls", "-la",
+    ], { GC_LEARNING_WINDOW_SECONDS: "999" }));
+    assert.equal(learn.decision, "allow");
+    assert.equal(learn.learned, true);
+    // Force the window closed: the observed tool stays allowed...
+    const locked = JSON.parse(await runFixture([
+      "--gc-shim", join(dir, "s"), "ls",
+    ], { GC_LEARNING_WINDOW_SECONDS: "0" }));
+    assert.equal(locked.decision, "allow");
+    assert.equal(locked.learned, false);
+    // ...while an unobserved tool is now denied.
+    const unlisted = JSON.parse(await runFixture([
+      "--gc-shim", join(dir, "s"), "curl", "http://example.invalid",
+    ], { GC_LEARNING_WINDOW_SECONDS: "0" }));
+    assert.equal(unlisted.decision, "deny");
+    assert.equal(unlisted.rule, "GC-NET-002");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("classified dangerous commands deny even during the learning window", async () => {
+  const dir = await tempState();
+  try {
+    const out = JSON.parse(await runFixture([
+      "--gc-shim", join(dir, "s"), "pip", "install", "requests",
+    ]));
+    assert.equal(out.decision, "deny");
+    assert.equal(out.rule, "GC-PKG-001");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("fs-watcher detects writes outside the allowlist and shim-tree tampering", async () => {
+  const dir = await tempState();
+  try {
+    assert.equal(JSON.parse(await runFixture(["--gc-fs-detect", join(dir, "s"), "/tmp/session/scratch.txt"])).decision, "allow");
+    const deny = JSON.parse(await runFixture(["--gc-fs-detect", join(dir, "s"), "/etc/passwd"]));
+    assert.equal(deny.decision, "deny");
+    assert.equal(deny.rule, "GC-FSW-001");
+    const selfMod = JSON.parse(await runFixture(["--gc-fs-detect", join(dir, "s"), "/shims/wget"]));
+    assert.equal(selfMod.rule, "GC-FSW-002");
+    // find -newer sweep fallback path: multiple candidate paths in one sweep.
+    const sweep = (await runFixture(["--gc-fs-sweep", join(dir, "s2"), "/tmp/session/a", "/var/lib/evil"]))
+      .trim().split("\n").map(JSON.parse);
+    assert.deepEqual(sweep.map((d) => d.decision), ["allow", "deny"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("net-watcher denies any socket entry immediately (GC-NET-001)", async () => {
+  const dir = await tempState();
+  try {
+    const out = JSON.parse(await runFixture([
+      "--gc-net-detect", join(dir, "s"), "  1: 00350033:0035 00000000:0000 0A",
+    ]));
+    assert.equal(out.decision, "deny");
+    assert.equal(out.rule, "GC-NET-001");
+    const log = await readFile(join(dir, "s/containment.log.jsonl"), "utf8");
+    const ks = JSON.parse(log.trim().split("\n").at(-1));
+    assert.equal(ks.schema, "agentic-driver.guest-containment.killswitch.v1");
+    assert.equal(ks.trigger.rule, "GC-NET-001");
+    // The guest supervisor observes the kill flag.
+    assert.equal(await readFile(join(dir, "s/kill"), "utf8"), "immediate\n");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a dead monitor loop is a containment-integrity killswitch", async () => {
+  const dir = await tempState();
+  try {
+    const out = JSON.parse(await runFixture(["--gc-liveness", join(dir, "s"), "1 0 1"]));
+    assert.equal(out.decision, "deny");
+    assert.equal(out.rule, "containment-integrity");
+    assert.equal(out.tier, "CRITICAL");
+    assert.equal(out.mode, "immediate");
+    const healthy = JSON.parse(await runFixture(["--gc-liveness", join(dir, "s2"), "1 1 1"]));
+    assert.equal(healthy.decision, "allow");
+    const log = await readFile(join(dir, "s/containment.log.jsonl"), "utf8");
+    const ks = JSON.parse(log.trim().split("\n").at(-1));
+    assert.equal(ks.trigger.rule, "containment-integrity");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("guest payload: init embeds the core verbatim, shims dispatch, proof mode unchanged", async () => {
+  const fixtureSource = await readFile(FIXTURE, "utf8");
+  // The guest init runs the containment session only when /job.sh exists;
+  // the marker proof path is byte-identical in behavior (mounts, marker, sync, poweroff).
+  assert.match(fixtureSource, /if \[ ! -x \/job\.sh \]; then\n  sync\n  \/bin\/poweroff -f\nfi/);
+  assert.match(fixtureSource, /PATH=\/shims:\/bin/);
+  assert.ok(fixtureSource.includes('gc_liveness'));
+  assert.ok(fixtureSource.includes('gc_net_detect'));
+  assert.ok(fixtureSource.includes('gc_fs_detect'));
+  assert.match(fixtureSource, /awk '\/\^# --- guest containment core\/\{flag=1\} \/\^# Test hooks:\/\{flag=0\} flag' "\$0"/);
+  // inotifyd upgrade is optional; the sweep fallback is unconditional in the fs loop branch.
+  assert.match(fixtureSource, /have_inotifyd=true/);
+  assert.ok(fixtureSource.includes('find / -newer'));
 });

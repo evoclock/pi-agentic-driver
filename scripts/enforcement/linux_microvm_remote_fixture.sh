@@ -101,6 +101,9 @@ gc_killswitch_trip() { # state_dir rule_id class tier mode pressure threshold
   ks=$(printf '{"schema":"%s","session":"%s","trigger":{"rule":"%s","class":"%s","tier":"%s","mode":"%s","pressure":%s,"threshold":%s},"logSha256":"%s","final":true}' \
     "$GC_KILLSWITCH_SCHEMA" "$(basename "$state_dir")" "$rule_id" "$class" "$tier" "$mode" "$pressure" "$threshold" "$log_sha")
   printf '%s\n' "$ks" >>"$log"
+  # Kill flag: the guest supervisor polls this and executes the kill path
+  # (kill process group, sync, poweroff -f); host-side hooks ignore it.
+  printf '%s\n' "$mode" >"$state_dir/kill" 2>/dev/null || true
   printf '%s\n' "$ks"
 }
 
@@ -157,9 +160,128 @@ gc_decide() { # state_dir rule_id [subject_value]
     "$rule_id" "$class" "$severity" "$tier" "$tripped" "$mode" "$pressure" "$threshold"
 }
 
+# --- detection (design section 1.3, 3): shim classification, allowlist,
+# fs/net/proc detection, supervisor liveness. Callable from the guest
+# (sourced by /init and the shim dispatcher) and from the host test hooks.
+GC_LEARNING_WINDOW_SECONDS=${GC_LEARNING_WINDOW_SECONDS:-3}
+GC_WRITABLE_ROOT="/tmp/session"
+
+# Shim classification: map a command line to a taxonomy rule id (empty means
+# unclassified; unclassified executables go through the observed-first-use
+# allowlist, design section 3).
+gc_shim_classify() { # tool args...
+  local tool=$1; shift
+  local line="$tool $*"
+  case "$tool" in
+    wget|curl|nc|ssh|telnet|ping) printf 'GC-NET-002\n'; return 0 ;;
+  esac
+  case "$line" in
+    *"npm install"*|*"npm ci"*|*"pip install"*|*"yarn add"*|*"pnpm add"*|*"gem install"*|*"cargo install"*|*"apk add"*|*"apt install"*)
+      printf 'GC-PKG-001\n' ;;
+    *"npm publish"*|*"npm token"*|*".npmrc"*|*"pip config"*)
+      printf 'GC-PKG-002\n' ;;
+    *"AGENTIC_MICROVM_PROBE"*|*"AGENTIC_MICROVM_RECEIPT"*)
+      printf 'GC-TOOL-001\n' ;;
+    *"> /var/log"*|*"truncate -s 0"*|*"sed -i"*)
+      printf 'GC-LOG-002\n' ;;
+    *) return 0 ;;
+  esac
+}
+
+# Observed-first-use allowlist with a short learning window (design section 3):
+# during the window unlisted executables are logged and allowed; after lock
+# they are denied with the redacted command line.
+gc_shim_allow() { # state_dir tool args... -> decision JSON on stdout
+  local state_dir=$1 tool=$2; shift 2
+  mkdir -p "$state_dir" || return 2
+  local rule
+  rule=$(gc_shim_classify "$tool" "$@")
+  if [ -n "$rule" ]; then
+    gc_decide "$state_dir" "$rule" "$tool $*" >/dev/null || return 2
+    printf '{"decision":"deny","rule":"%s","tool":"%s"}\n' "$rule" "$tool"
+    return 0
+  fi
+  local allow="$state_dir/allowlist" lock="$state_dir/allowlist.lock" start="$state_dir/learning_start"
+  if [ ! -f "$start" ]; then printf '%s\n' "$(date +%s)" >"$start"; fi
+  if [ ! -f "$lock" ] && [ $(( $(date +%s) - $(cat "$start") )) -ge "$GC_LEARNING_WINDOW_SECONDS" ]; then
+    printf '%s\n' "$(date +%s)" >"$lock"
+  fi
+  if [ -f "$lock" ]; then
+    if grep -F -x -- "$tool" "$allow" >/dev/null 2>&1; then
+      printf '{"decision":"allow","tool":"%s","learned":false}\n' "$tool"
+    else
+      gc_decide "$state_dir" "unknown" "$tool $*" >/dev/null || return 2
+      printf '{"decision":"deny","rule":"unknown","tool":"%s"}\n' "$tool"
+    fi
+  else
+    if ! grep -F -x -- "$tool" "$allow" >/dev/null 2>&1; then
+      printf '%s\n' "$tool" >>"$allow"
+    fi
+    printf '{"decision":"allow","tool":"%s","learned":true}\n' "$tool"
+  fi
+}
+
+# fs-watcher detection: only the job scratch root is writable; writes to the
+# shim/agent trees are self-code-modification, everything else is
+# write-outside-allowlist.
+gc_fs_detect() { # state_dir path -> decision JSON
+  local state_dir=$1 path=$2
+  case "$path" in
+    "$GC_WRITABLE_ROOT"|"$GC_WRITABLE_ROOT"/*)
+      printf '{"decision":"allow","path":"%s"}\n' "$path" ;;
+    /shims|/shims/*|/agent|/agent/*)
+      gc_decide "$state_dir" GC-FSW-002 "$path" >/dev/null || return 2
+      printf '{"decision":"deny","rule":"GC-FSW-002","path":"%s"}\n' "$path" ;;
+    *)
+      gc_decide "$state_dir" GC-FSW-001 "$path" >/dev/null || return 2
+      printf '{"decision":"deny","rule":"GC-FSW-001","path":"%s"}\n' "$path" ;;
+  esac
+}
+
+# find -newer sweep fallback for the fs-watcher: detect every path handed in.
+gc_fs_sweep() { # state_dir path...
+  local state_dir=$1; shift
+  local path
+  for path in "$@"; do gc_fs_detect "$state_dir" "$path"; done
+}
+
+# net-watcher detection: any socket row is a violation (GC-NET-001).
+gc_net_detect() { # state_dir socket_entry
+  local state_dir=$1 entry=$2
+  [ -n "$entry" ] || return 0
+  gc_decide "$state_dir" GC-NET-001 "$entry" >/dev/null || return 2
+  printf '{"decision":"deny","rule":"GC-NET-001"}\n'
+}
+
+# proc-watcher detection: a process outside the job tree is an anomaly.
+gc_proc_detect() { # state_dir process_identity
+  local state_dir=$1 identity=$2
+  gc_decide "$state_dir" unknown "proc $identity" >/dev/null || return 2
+  printf '{"decision":"deny","rule":"unknown"}\n'
+}
+
+# Supervisor liveness (design section 1.3): a dead monitor loop is a
+# containment failure and trips the killswitch immediately.
+gc_liveness() { # state_dir alive_flags ("1 1 1"; any 0 is a dead loop)
+  local state_dir=$1 flags=$2
+  case " $flags " in
+    *" 0 "*)
+      gc_log_event "$state_dir" "watcher:proc" containment-integrity proc "monitor loop dead" >/dev/null || return 2
+      gc_killswitch_trip "$state_dir" containment-integrity containment-integrity CRITICAL immediate null null >/dev/null || return 2
+      printf '{"decision":"deny","rule":"containment-integrity","tier":"CRITICAL","mode":"immediate"}\n' ;;
+    *) printf '{"decision":"allow"}\n' ;;
+  esac
+}
+
 # Test hooks: the containment core is callable without booting the guest.
 if [ "${1:-}" = "--gc-decide" ]; then shift; gc_decide "$@"; exit $?; fi
 if [ "${1:-}" = "--gc-log" ]; then shift; gc_log_event "$@"; exit $?; fi
+if [ "${1:-}" = "--gc-shim" ]; then shift; gc_shim_allow "$@"; exit $?; fi
+if [ "${1:-}" = "--gc-fs-detect" ]; then shift; gc_fs_detect "$@"; exit $?; fi
+if [ "${1:-}" = "--gc-fs-sweep" ]; then shift; gc_fs_sweep "$@"; exit $?; fi
+if [ "${1:-}" = "--gc-net-detect" ]; then shift; gc_net_detect "$@"; exit $?; fi
+if [ "${1:-}" = "--gc-proc-detect" ]; then shift; gc_proc_detect "$@"; exit $?; fi
+if [ "${1:-}" = "--gc-liveness" ]; then shift; gc_liveness "$@"; exit $?; fi
 if [ "${1:-}" = "--gc-taxonomy-sha" ]; then
   computed=$(gc_embedded_taxonomy | sha256sum | awk '{print $1}')
   if [ "$computed" != "$GC_TAXONOMY_SHA256" ]; then
@@ -394,8 +516,63 @@ phase=build
 root="$fixture_root/root"
 if ! mkdir -p "$root/bin" "$root/proc" "$root/sys" "$root/dev" "$root/etc"; then fixture_fail 6 'guest root could not be created'; fi
 if ! cp /usr/bin/busybox "$root/bin/busybox"; then fixture_fail 6 'BusyBox could not be copied'; fi
-for name in sh mount poweroff uname; do
+applet_list=$(/usr/bin/busybox --list 2>/dev/null || true)
+for name in sh mount poweroff uname mkdir cat sed awk grep cut wc head tail find tr date touch sha256sum sleep kill ps base64; do
+  if ! grep -qx "$name" <<<"$applet_list"; then fixture_fail 6 "BusyBox applet unavailable: $name"; fi
   if ! ln -s busybox "$root/bin/$name"; then fixture_fail 6 "BusyBox link could not be created: $name"; fi
+done
+# Optional applets: inotifyd upgrades the fs-watcher to event-driven when the
+# build has it (design section 1.2); setsid gives the job its own process group.
+have_inotifyd=false
+have_setsid=false
+if grep -qx inotifyd <<<"$applet_list"; then
+  ln -s busybox "$root/bin/inotifyd" && have_inotifyd=true
+fi
+if grep -qx setsid <<<"$applet_list"; then
+  ln -s busybox "$root/bin/setsid" && have_setsid=true
+fi
+if ! mkdir -p "$root/gc" "$root/shims" "$root/tmp"; then fixture_fail 6 'containment guest directories could not be created'; fi
+# The guest containment core is the fixture's own core, extracted verbatim:
+# one source of truth for taxonomy, log, and killswitch semantics.
+if ! awk '/^# --- guest containment core/{flag=1} /^# Test hooks:/{flag=0} flag' "$0" >"$root/gc/core.sh"; then
+  fixture_fail 6 'guest containment core could not be extracted'
+fi
+if ! grep -q 'gc_killswitch_trip' "$root/gc/core.sh"; then fixture_fail 6 'guest containment core extraction is incomplete'; fi
+if ! cat >"$root/gc/dispatch" <<'GC_DISPATCH_EOF'
+#!/bin/busybox sh
+. /gc/core.sh
+session=/tmp/session/.gc
+tool=$(basename "$0")
+decision=$(gc_shim_allow "$session" "$tool" "$@") || exit 126
+case "$decision" in
+  *'"decision":"allow"'*)
+    exec /bin/busybox "$tool" "$@" ;;
+  *)
+    # Denied and logged (and, per severity tier, possibly killswitched);
+    # the supervisor kill path runs from the kill flag.
+    exit 126 ;;
+esac
+GC_DISPATCH_EOF
+then
+  fixture_fail 6 'guest shim dispatcher could not be written'
+fi
+if ! cat >"$root/gc/fs-handler" <<'GC_FS_HANDLER_EOF'
+#!/bin/busybox sh
+# inotifyd handler: allow only the job scratch root; everything else is
+# classified by gc_fs_detect.
+. /gc/core.sh
+session=/tmp/session/.gc
+event=$1 dir=$2 name=$3
+[ -n "$dir" ] || exit 0
+path="${dir%/}"
+[ -n "$name" ] && [ "$name" != "INSERT" ] && path="$path/$name"
+gc_fs_detect "$session" "$path" >/dev/null 2>&1
+GC_FS_HANDLER_EOF
+then
+  fixture_fail 6 'guest fs-watcher handler could not be written'
+fi
+for name in wget curl nc ssh telnet ping npm npx pip pip3 yarn pnpm gem cargo apk apt apt-get truncate tee; do
+  if ! ln -s ../gc/dispatch "$root/shims/$name"; then fixture_fail 6 "shim link could not be created: $name"; fi
 done
 if ! cat >"$root/init" <<EOF
 #!/bin/busybox sh
@@ -405,13 +582,77 @@ if ! cat >"$root/init" <<EOF
 echo '$marker'
 echo "guest-kernel=\$(/bin/uname -r)"
 echo 'network=absent disk=absent host-share=absent'
+if [ ! -x /job.sh ]; then
+  sync
+  /bin/poweroff -f
+fi
+# --- containment session (design section 1.3): deny-by-default supervisor ---
+. /gc/core.sh
+session=/tmp/session/.gc
+mkdir -p /tmp/session "\$session" || { sync; /bin/poweroff -f; }
+touch "\$session/baseline"
+export PATH=/shims:/bin
+(
+  while :; do
+    for f in /proc/net/tcp /proc/net/tcp6 /proc/net/udp; do
+      if [ -s "\$f" ]; then
+        rows=\$(wc -l < "\$f")
+        if [ "\$rows" -gt 1 ]; then
+          gc_net_detect "\$session" "\$(sed -n 2p "\$f")" >/dev/null 2>&1
+        fi
+      fi
+    done
+    sleep 1
+  done
+) &
+net_pid=\$!
+(
+  if [ -x /bin/inotifyd ]; then
+    exec /bin/inotifyd /gc/fs-handler /:ncp
+  fi
+  while :; do
+    find / -newer "\$session/baseline" 2>/dev/null | grep -Ev '^/(tmp/session|proc|sys|dev|gc)' | while IFS= read -r p; do
+      gc_fs_detect "\$session" "\$p" >/dev/null 2>&1
+    done
+    touch "\$session/baseline"
+    sleep 1
+  done
+) &
+fs_pid=\$!
+(
+  while :; do
+    ps -eo comm 2>/dev/null | tail -n +2 | while IFS= read -r c; do
+      case "\$c" in busybox|sh|init|inotifyd|poweroff|sync|comm) continue ;; esac
+      grep -F -x -- "\$c" "\$session/allowlist" >/dev/null 2>&1 || gc_proc_detect "\$session" "\$c" >/dev/null 2>&1
+    done
+    sleep 1
+  done
+) &
+proc_pid=\$!
+if [ "$have_setsid" = true ]; then
+  /bin/setsid /bin/busybox sh /job.sh &
+else
+  /bin/busybox sh /job.sh &
+fi
+job_pid=\$!
+while :; do
+  alive=\$(for pid in "\$net_pid" "\$fs_pid" "\$proc_pid"; do [ -e "/proc/\$pid" ] && printf '1 ' || printf '0 '; done)
+  gc_liveness "\$session" "\$alive" >/dev/null 2>&1
+  if [ -f "\$session/kill" ]; then break; fi
+  kill -0 "\$job_pid" 2>/dev/null || break
+  sleep 1
+done
+# Killswitch action (design section 5): kill the job process group, sync,
+# poweroff. on_poweroff=destroy tears the transient domain down host-side.
+kill -TERM -"\$job_pid" 2>/dev/null
+kill -KILL -"\$job_pid" 2>/dev/null
 sync
 /bin/poweroff -f
 EOF
 then
   fixture_fail 6 'guest init could not be written'
 fi
-if ! chmod 0755 "$root/init"; then fixture_fail 6 'guest init could not be made executable'; fi
+if ! chmod 0755 "$root/init" "$root/gc/dispatch" "$root/gc/fs-handler"; then fixture_fail 6 'guest containment scripts could not be made executable'; fi
 if ! gc_embedded_taxonomy >"$root/etc/guest-containment-taxonomy.v1.json"; then
   fixture_fail 6 'containment taxonomy could not be embedded in the initramfs'
 fi
