@@ -34,7 +34,7 @@ advisory code review, bounded role communication, and governed isolation
 proofs for agentic workflows.
 
 <p align="center">
-  <img src="assets/agentic-driver-static.png" alt="Static Sage Agentic Driver control vault" width="768">
+  <img src="assets/agentic-driver-sage.gif" alt="Sage Agentic Driver control vault" width="768">
 </p>
 
 <p align="center">
