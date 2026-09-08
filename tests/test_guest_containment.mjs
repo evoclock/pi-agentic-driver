@@ -9,7 +9,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { execFile, spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
+import { createReadStream } from "node:fs";
 import { writeFileSync } from "node:fs";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -331,7 +332,7 @@ test("guest payload: init embeds the core verbatim, shims dispatch, proof mode u
   assert.ok(fixtureSource.includes('gc_liveness'));
   assert.ok(fixtureSource.includes('gc_net_detect'));
   assert.ok(fixtureSource.includes('gc_fs_detect'));
-  assert.match(fixtureSource, /awk '\/\^# --- guest containment core\/\{flag=1\} \/\^# Test hooks:\/\{flag=0\} flag' "\$0"/);
+  assert.ok(fixtureSource.includes("cat >\"$root/gc/core.sh\" <<'GC_CORE_EOF'"), "core embeds via heredoc, not awk-from-$0");
   // inotifyd upgrade is optional; the sweep fallback is unconditional in the fs loop branch.
   assert.match(fixtureSource, /have_inotifyd=true/);
   assert.ok(fixtureSource.includes('find / -newer'));
@@ -987,6 +988,50 @@ test("M6: the model cannot supply the payload (options ignored, tool surface clo
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// --- Live-proof fix: streamed-stdin ($0 = "bash") must not break the core embed ---
+
+test("streamed-stdin regression: bash -s embeds a non-empty core.sh without reading $0", async () => {
+  const dir = await tempState();
+  const dest = join(dir, "core.sh");
+  try {
+    // Reproduce the live path: pipe the fixture through `bash -s` so $0 is
+    // "bash" and there is no script file to read back.
+    await new Promise((resolve, reject) => {
+      const child = spawn("bash", ["-s", "--", "--gc-core-embed", dest], { stdio: ["pipe", "ignore", "pipe"] });
+      const stream = createReadStream(FIXTURE);
+      stream.on("error", reject);
+      stream.on("end", () => child.stdin.end());
+      stream.pipe(child.stdin);
+      child.on("exit", (code) => code === 0 ? resolve() : reject(new Error(`bash -s exited ${code}: ${child.stderr.read()?.toString() ?? ""}`)));
+      child.on("error", reject);
+    });
+    const core = await readFile(dest, "utf8");
+    assert.ok(core.length > 1024, "embedded core must be non-empty over the streamed path");
+    assert.match(core, /gc_killswitch_trip/);
+    assert.match(core, /gc_embedded_taxonomy/);
+    assert.doesNotMatch(core, /"\$0"/, "the guest core must not reference the fixture's $0");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("drift guard: heredoc-rendered core.sh is byte-equal to the fixture's own core region", async () => {
+  const fixtureSource = await readFile(FIXTURE, "utf8");
+  // The same range the (removed) awk extraction used locally, where the file exists.
+  const start = fixtureSource.indexOf("# --- guest containment core");
+  const end = fixtureSource.indexOf("# Test hooks:");
+  assert.ok(start > 0 && end > start);
+  const coreRegion = fixtureSource.slice(start, end);
+  const marker = "cat >\"$root/gc/core.sh\" <<'GC_CORE_EOF'\n";
+  const embedStart = fixtureSource.indexOf(marker) + marker.length;
+  const embedEnd = fixtureSource.indexOf("\nGC_CORE_EOF\n", embedStart);
+  assert.ok(embedStart > 0 && embedEnd > embedStart);
+  const embedded = fixtureSource.slice(embedStart, embedEnd) + "\n";
+  assert.equal(embedded, coreRegion, "embedded core drifted from the fixture's own core");
+  // The build must not read $0 anywhere in the guest build path.
+  assert.doesNotMatch(fixtureSource, /awk '[^']*guest containment core[^']*' "\$0"/);
 });
 
 test("M6: end-to-end containment flow through the fixture (trip → envelope → v2 receipt)", async () => {
