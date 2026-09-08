@@ -107,7 +107,7 @@ function fixtureDomainForId(fixtureId) {
 // choose or change the target. Read order: the user's own config
 // (~/.pi/pi/config/microvm-target.v1.json) first, then the package-local
 // config/microvm-target.v1.json (shipped as a REPLACE-WITH template).
-const TARGET_FIELDS = new Set(["schema", "sshTarget", "local", "vcpu", "memoryMiB", "_comment"]);
+const TARGET_FIELDS = new Set(["schema", "sshTarget", "local", "vcpu", "memoryMiB", "jobPayload", "_comment"]);
 // Elastic resource allocation bounds (design section 6.1). User-configured
 // through the target config only; the model-visible tool surface stays closed.
 const VCPU_MIN = 1, VCPU_MAX = 64;
@@ -154,13 +154,24 @@ function normalizeTarget(parsed) {
   // (fail-closed) rather than silently falling back.
   if (parsed.vcpu !== undefined && !validVcpu(parsed.vcpu)) return null;
   if (parsed.memoryMiB !== undefined && !validMemory(parsed.memoryMiB)) return null;
-  const allocation = {
+  // Containment job payload (design sections 1.3, 3; M6 wiring): a
+  // user-configured job command/script. Present = containment mode; absent =
+  // plain proof mode (backward compatible). Placeholder or invalid shape
+  // rejects the whole config fail-closed. Never model-set.
+  if (parsed.jobPayload !== undefined) {
+    if (typeof parsed.jobPayload !== "string" || !parsed.jobPayload.trim()
+        || parsed.jobPayload.includes("REPLACE-WITH-") || parsed.jobPayload.length > 8192) {
+      return null;
+    }
+  }
+  const extras = {
     ...(parsed.vcpu !== undefined ? { vcpu: parsed.vcpu } : {}),
     ...(parsed.memoryMiB !== undefined ? { memoryMiB: parsed.memoryMiB } : {}),
+    ...(parsed.jobPayload !== undefined ? { jobPayload: parsed.jobPayload } : {}),
   };
   return Object.freeze(hasSshTarget
-    ? { mode: "ssh", sshTarget: parsed.sshTarget.trim(), ...allocation }
-    : { mode: "local", ...allocation });
+    ? { mode: "ssh", sshTarget: parsed.sshTarget.trim(), ...extras }
+    : { mode: "local", ...extras });
 }
 
 // Shape validation for the user-relayed target parameter (untrusted input).
@@ -458,12 +469,15 @@ function normalizedForwardedStderr(result, fallbackPhase, fallbackCode, fallback
     primary?.[2] || (cleanup.length ? "cleanup-failed" : fallbackCode), details.join("; "));
 }
 
-// Containment run mode (design sections 5, 6): `options.containment` is a
-// registration-time option, never a model parameter. NOTE (M6, explicit
-// scope): the guest job payload is not yet wired through the tool argv —
-// the containment path is exercised end-to-end at the fixture/evidence level
-// and by tests; passing the payload argv through the tool surface is the
-// explicitly recorded next step.
+// Containment run mode (design sections 1.3, 5, 6; M6 wired): the
+// user-configured `jobPayload` in the target config is the only source of
+// containment mode — present payload = containment run (v2 receipt with the
+// containment block), absent = plain proof mode (v1, backward compatible).
+// The model cannot set or alter it: the tool schema stays closed (target
+// relay only) and the payload never crosses the model-visible surface.
+function payloadRedacted(payload) {
+  return boundedText(String(payload).replace(/\s+/g, " ").trim(), "payload").slice(0, 160);
+}
 export async function runLinuxMicroVMCutover(context, options = {}) {
   // Session-scoped user switch: only the explicit enable command can set this
   // flag in memory; it never persists to settings and the model cannot set it.
@@ -522,6 +536,7 @@ export async function runLinuxMicroVMCutover(context, options = {}) {
     return denied("blocked", reason("policy", "native-tui-required",
       "Open the Linux microVM cutover in the interactive Pi TUI; headless runs are denied."));
   }
+  const containmentRun = typeof target.jobPayload === "string";
   if (inFlight) return denied("denied", reason("execution", "already-active", "another Linux microVM cutover is active in this host session"));
 
   const fixtureId = `microvm-${randomBytes(12).toString("hex")}`;
@@ -546,8 +561,11 @@ export async function runLinuxMicroVMCutover(context, options = {}) {
     `Fixture: ${fixtureId}; domain: ${fixtureDomain} (preflight absent)`,
     `Versioned fixture SHA-256: ${scriptHash}`,
     "Writes: one generated fixture below ~/agentic-driver-state/cutover-fixtures/microvm/.",
-    ...(options.containment === true
-      ? ["Guest runs a deny-by-default containment monitor; any kill decision kills the guest session and tears down the VM."]
+    ...(containmentRun
+      ? [
+          "Guest runs a deny-by-default containment monitor; any kill decision kills the guest session and tears down the VM.",
+          `Guest job payload (user-configured): ${payloadRedacted(target.jobPayload)}`,
+        ]
       : []),
     `Guest: ${resourceLine(target)}`,
     "A temporary traverse-only ACL for libvirt-qemu is added to the remote home directory and the exact prior ACL is restored after exit or failure.",
@@ -569,6 +587,7 @@ export async function runLinuxMicroVMCutover(context, options = {}) {
   try {
     const allocation = resourceAllocation(target);
     const fixtureArgs = [fixtureId, scriptHash, String(allocation.vcpu), String(allocation.memoryMiB)];
+    if (containmentRun) fixtureArgs.push(target.jobPayload);
     const result = target.mode === "local"
       ? execute("bash", ["-c", "bash -s -- " + fixtureArgs.map(shellQuote).join(" ")], { input: script, timeout: 180000 })
       : execute("ssh", [target.sshTarget, "bash", "-s", "--", ...fixtureArgs], { input: script, timeout: 180000 });
@@ -576,7 +595,7 @@ export async function runLinuxMicroVMCutover(context, options = {}) {
       return denied("blocked", normalizedForwardedStderr(result, "fixture", "execution-failed", "fixed microVM fixture failed"));
     }
     const receipt = parseReceipt(result.stdout);
-    return validateLinuxMicroVMReceipt(receipt, facts, fixtureId, scriptHash, { containment: options.containment === true });
+    return validateLinuxMicroVMReceipt(receipt, facts, fixtureId, scriptHash, { containment: containmentRun });
   } catch (error) {
     return denied("blocked", reasonFromError(error, "execution", "fixture-failed"));
   } finally { inFlight = false; }

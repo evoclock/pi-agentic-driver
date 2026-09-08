@@ -455,6 +455,15 @@ if [ "${#script_hash}" -ne 64 ]; then fixture_fail 2 'invalid fixture script has
 case "$script_hash" in
   ""|*[!0-9a-f]*) fixture_fail 2 'invalid fixture script hash' ;;
 esac
+# Containment job payload (design sections 1.3, 3): the user-configured job
+# command/script the guest executes under the shim PATH. Supplied as fixture
+# argv text (bounded); never model-set. Absent = plain proof mode.
+if [ -n "$containment_payload" ]; then
+  case "$containment_payload" in
+    *[![:print:]\t\n]*) fixture_fail 2 'invalid containment job payload (printable ASCII, newline, tab only)' ;;
+  esac
+  if [ "${#containment_payload}" -gt 8192 ]; then fixture_fail 2 'containment job payload exceeds 8192 bytes'; fi
+fi
 # Elastic resource allocation (design section 6.1): user-configured via the
 # target config, validated here; defaults are the proof values. Never
 # model-set (the tool exposes no parameters for it).
@@ -865,8 +874,8 @@ then
 fi
 if ! chmod 0755 "$root/init" "$root/gc/dispatch" "$root/gc/fs-handler"; then fixture_fail 6 'guest containment scripts could not be made executable'; fi
 if [ -n "$containment_payload" ]; then
-  if ! test -r "$containment_payload"; then fixture_fail 6 'containment payload could not be read'; fi
-  if ! cp "$containment_payload" "$root/job.sh"; then fixture_fail 6 'containment payload could not be embedded'; fi
+  # M6: the payload is inline text; write it as the guest job under the shim PATH.
+  if ! printf '%s\n' "$containment_payload" >"$root/job.sh"; then fixture_fail 6 'containment payload could not be embedded'; fi
   if ! chmod 0755 "$root/job.sh"; then fixture_fail 6 'containment payload could not be made executable'; fi
 fi
 if ! gc_embedded_taxonomy >"$root/etc/guest-containment-taxonomy.v1.json"; then
