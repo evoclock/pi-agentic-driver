@@ -1393,3 +1393,101 @@ test("a fresh save writes the one decision; a later hand-added jobPayload loads 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// --- Live-proof regression: console window must stay open for the envelope ---
+
+test("console wait: a containment run waits for the late envelope instead of tearing down at first marker", async () => {
+  const dir = await tempState();
+  try {
+    const fid = "microvm-" + "d".repeat(24);
+    const transcript = join(dir, "console.typescript");
+    writeFileSync(transcript, "guest boot noise\r\n");
+    // Stub recorder: writes the marker quickly, the envelope END anchor only
+    // ~1.4 s later — the live shape (envelope is a session-END emission).
+    const writer = `f=$1
+( sleep 0.2; printf '%s\\r\\n' 'AGENTIC_MICROVM_PROBE:${fid}' >>"$f"
+  sleep 1.2; printf '%s\\r\\n' 'AGENTIC_CONTAINMENT_END:${fid}' >>"$f"
+  sleep 30 ) &
+w=$!
+bash ${JSON.stringify(FIXTURE)} --gc-console-wait "$f" '${fid}' true "$w" 240
+rc=$?
+kill "$w" 2>/dev/null
+exit $rc`;
+    const run = spawnSync("bash", ["-c", writer, "w", transcript], { encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(await readFile(transcript, "utf8"), /AGENTIC_CONTAINMENT_END:/, "wait ended only after the envelope anchor arrived");
+    // Wiring guard: the fixture's phase=console must route containment runs
+    // through the envelope wait (a hook-only fix would not close the race).
+    const fixtureSource = await readFile(FIXTURE, "utf8");
+    assert.ok(fixtureSource.includes('gc_console_wait "$fixture_root/console.typescript" "$fixture_id" true "$recorder_pid" "$GC_ENVELOPE_WAIT_ATTEMPTS"'),
+      "containment runs must wait for the envelope END anchor before teardown");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("console wait: plain proof mode still breaks at the marker (recorder window unchanged)", async () => {
+  const dir = await tempState();
+  try {
+    const fid = "microvm-" + "e".repeat(24);
+    const transcript = join(dir, "console.typescript");
+    writeFileSync(transcript, "guest boot noise\r\n");
+    const writer = `f=$1
+( sleep 0.2; printf '%s\\r\\n' 'AGENTIC_MICROVM_PROBE:${fid}' >>"$f"
+  sleep 1.5; printf '%s\\r\\n' 'AGENTIC_CONTAINMENT_END:${fid}' >>"$f"
+  sleep 30 ) &
+w=$!
+bash ${JSON.stringify(FIXTURE)} --gc-console-wait "$f" '${fid}' false "$w" 90
+rc=$?
+kill "$w" 2>/dev/null
+exit $rc`;
+    const run = spawnSync("bash", ["-c", writer, "w", transcript], { encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    assert.doesNotMatch(await readFile(transcript, "utf8"), /AGENTIC_CONTAINMENT_END:/,
+      "plain mode must return at first marker, before the (absent) envelope");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("console wait: bounded when the envelope never arrives (fail-closed, no hang)", async () => {
+  const dir = await tempState();
+  try {
+    const fid = "microvm-" + "f".repeat(24);
+    const transcript = join(dir, "console.typescript");
+    writeFileSync(transcript, `AGENTIC_MICROVM_PROBE:${fid}\r\n`);
+    const sleeper = spawnSync("bash", ["-c", "sleep 30 >/dev/null 2>&1 & echo $!"], { encoding: "utf8" });
+    const recorderPid = sleeper.stdout.trim();
+    const started = Date.now();
+    const run = spawnSync("bash", [FIXTURE, "--gc-console-wait", transcript, fid, "true", recorderPid, "4"], { encoding: "utf8", timeout: 15000 });
+    assert.equal(run.status, 1, "bound expiry without the envelope must report failure");
+    assert.ok(Date.now() - started < 10000, "the wait is bounded");
+    spawnSync("bash", ["-c", `kill ${recorderPid} 2>/dev/null`]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("session end: a zero-event session still creates its terminal record and log", async () => {
+  const dir = await tempState();
+  try {
+    const state = join(dir, "empty-session");
+    const run = spawnSync("bash", [FIXTURE, "--gc-session-end", state], { encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    const log = await readFile(join(state, "containment.log.jsonl"), "utf8");
+    const event = JSON.parse(log.trim().split("\n").at(-1));
+    assert.equal(event.event.class, "session-end");
+    assert.equal(event.event.action, "complete");
+    assert.match(event.taxonomySha256, /^[0-9a-f]{64}$/, "taxonomy bootstrapped for the digest");
+    // The resulting log must be envelope-ready: extraction accepts it.
+    const fid = "microvm-" + "9".repeat(24);
+    const b64 = Buffer.from(log, "utf8").toString("base64").replace(/(.{76})/g, "$1\n");
+    const transcript = join(dir, "console.typescript");
+    writeFileSync(transcript, `AGENTIC_CONTAINMENT_BEGIN:${fid}\r\n${b64.replaceAll("\n", "\r\n")}\r\nAGENTIC_CONTAINMENT_END:${fid}\r\n`);
+    const extraction = await envelopeExtract(transcript, fid);
+    assert.equal(extraction.status, 0, extraction.stderr);
+    assert.equal(JSON.parse(extraction.stdout).killswitch.tripped, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

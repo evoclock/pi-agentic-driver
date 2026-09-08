@@ -368,7 +368,18 @@ gc_receipt_json() { # schema remote_host fixture_id domain marker marker_sha scr
 # envelope then carries only log lines plus this session-end record
 # (design section 5: a session with neither is containment-evidence-missing).
 gc_session_end() { # state_dir
-  local state_dir=$1 log="$state_dir/containment.log.jsonl"
+  # Split declarations: bash 3.2 expands every word of one `local` before any
+  # assignment, so referencing $state_dir in the same statement is an unbound
+  # variable under set -u on the host-side hook path.
+  local state_dir=$1
+  local log="$state_dir/containment.log.jsonl"
+  # Bootstrap the taxonomy copy so a zero-event session (no shim invocation,
+  # no watcher hit) still records its terminal event: without it the digest
+  # lookup below fails, no log is created, and no envelope can be emitted.
+  if [ ! -f "$state_dir/taxonomy.json" ]; then
+    mkdir -p "$state_dir" || return 2
+    gc_embedded_taxonomy >"$state_dir/taxonomy.json" || return 2
+  fi
   local seq=1
   if [ -f "$state_dir/seq" ]; then seq=$(( $(cat "$state_dir/seq") + 1 )); fi
   printf '%s\n' "$seq" >"$state_dir/seq"
@@ -885,7 +896,18 @@ gc_receipt_json() { # schema remote_host fixture_id domain marker marker_sha scr
 # envelope then carries only log lines plus this session-end record
 # (design section 5: a session with neither is containment-evidence-missing).
 gc_session_end() { # state_dir
-  local state_dir=$1 log="$state_dir/containment.log.jsonl"
+  # Split declarations: bash 3.2 expands every word of one `local` before any
+  # assignment, so referencing $state_dir in the same statement is an unbound
+  # variable under set -u on the host-side hook path.
+  local state_dir=$1
+  local log="$state_dir/containment.log.jsonl"
+  # Bootstrap the taxonomy copy so a zero-event session (no shim invocation,
+  # no watcher hit) still records its terminal event: without it the digest
+  # lookup below fails, no log is created, and no envelope can be emitted.
+  if [ ! -f "$state_dir/taxonomy.json" ]; then
+    mkdir -p "$state_dir" || return 2
+    gc_embedded_taxonomy >"$state_dir/taxonomy.json" || return 2
+  fi
   local seq=1
   if [ -f "$state_dir/seq" ]; then seq=$(( $(cat "$state_dir/seq") + 1 )); fi
   printf '%s\n' "$seq" >"$state_dir/seq"
@@ -1088,6 +1110,33 @@ gc_payload_text_ok() { # payload text -> 0 ok, 2 invalid
   bad_pattern=$(printf '[^ -~\t]')
   if printf '%s' "$1" | LC_ALL=C grep -q -- "$bad_pattern"; then return 2; fi
 }
+# Console capture window (live-proof fix): in plain proof mode the marker is
+# the only evidence and appears within the first poll ticks. In containment
+# mode the envelope is emitted at SESSION END (after the job and the terminal
+# event), so the host must keep the recorder window open until the envelope
+# END anchor is seen — otherwise teardown destroys the still-running guest
+# before it can emit evidence (live failure: phase=containment code=10).
+# Bounded; missing evidence still fails closed at the evidence phase.
+GC_ENVELOPE_WAIT_ATTEMPTS=240
+gc_console_wait() { # transcript fixture_id payload_present recorder_pid attempts
+  local transcript=$1 fid=$2 payload=$3 recorder=$4 attempts=$5 n
+  local marker="AGENTIC_MICROVM_PROBE:$fid" envend="AGENTIC_CONTAINMENT_END:$fid"
+  for n in $(seq 1 "$attempts"); do
+    if grep -F "$marker" "$transcript" >/dev/null 2>&1; then
+      if [ "$payload" != true ]; then return 0; fi
+      if grep -F "$envend" "$transcript" >/dev/null 2>&1; then return 0; fi
+    fi
+    if ! kill -0 "$recorder" 2>/dev/null; then return 0; fi
+    sleep 0.5
+  done
+  return 1
+}
+if [ "${1:-}" = "--gc-console-wait" ]; then
+  shift; gc_console_wait "$@"; exit $?
+fi
+if [ "${1:-}" = "--gc-session-end" ]; then
+  shift; gc_session_end "$@"; exit $?
+fi
 if [ "${1:-}" = "--gc-payload-validate" ]; then
   shift
   text=$(gc_payload_decode "${1:-}") || { printf 'microvm failure phase=setup code=2 detail=invalid containment job payload (base64 transport)\n' >&2; exit 2; }
@@ -1737,7 +1786,18 @@ gc_receipt_json() { # schema remote_host fixture_id domain marker marker_sha scr
 # envelope then carries only log lines plus this session-end record
 # (design section 5: a session with neither is containment-evidence-missing).
 gc_session_end() { # state_dir
-  local state_dir=$1 log="$state_dir/containment.log.jsonl"
+  # Split declarations: bash 3.2 expands every word of one `local` before any
+  # assignment, so referencing $state_dir in the same statement is an unbound
+  # variable under set -u on the host-side hook path.
+  local state_dir=$1
+  local log="$state_dir/containment.log.jsonl"
+  # Bootstrap the taxonomy copy so a zero-event session (no shim invocation,
+  # no watcher hit) still records its terminal event: without it the digest
+  # lookup below fails, no log is created, and no envelope can be emitted.
+  if [ ! -f "$state_dir/taxonomy.json" ]; then
+    mkdir -p "$state_dir" || return 2
+    gc_embedded_taxonomy >"$state_dir/taxonomy.json" || return 2
+  fi
   local seq=1
   if [ -f "$state_dir/seq" ]; then seq=$(( $(cat "$state_dir/seq") + 1 )); fi
   printf '%s\n' "$seq" >"$state_dir/seq"
@@ -2113,15 +2173,16 @@ phase=console
 domain_started=true
 script -q -e -c "virsh create '$fixture_root/domain.xml' --console" "$fixture_root/console.typescript" > /dev/null 2>"$console_error" &
 recorder_pid=$!
+# Plain proof mode waits for the marker only (unchanged semantics); a
+# containment run additionally waits, bounded, for the envelope END anchor
+# so the guest completes its session and emits evidence before teardown.
+if [ -n "$containment_payload" ]; then
+  gc_console_wait "$fixture_root/console.typescript" "$fixture_id" true "$recorder_pid" "$GC_ENVELOPE_WAIT_ATTEMPTS" || :
+else
+  gc_console_wait "$fixture_root/console.typescript" "$fixture_id" false "$recorder_pid" 90 || :
+fi
 marker_seen=false
-for _attempt in $(seq 1 90); do
-  if grep -F "$marker" "$fixture_root/console.typescript" >/dev/null 2>&1; then
-    marker_seen=true
-    break
-  fi
-  if ! kill -0 "$recorder_pid" 2>/dev/null; then break; fi
-  sleep 0.5
-done
+if grep -F "$marker" "$fixture_root/console.typescript" >/dev/null 2>&1; then marker_seen=true; fi
 
 phase=teardown
 if ! state=$(domain_state); then fixture_fail 9 'domain teardown query failed'; fi
