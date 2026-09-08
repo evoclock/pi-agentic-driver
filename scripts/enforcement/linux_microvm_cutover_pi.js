@@ -522,9 +522,28 @@ export async function runLinuxMicroVMCutover(context, options = {}) {
     if (confirmed !== true) {
       return denied("stopped", reason("confirmation", "not-granted", "No target was saved; native confirmation was not granted."));
     }
-    const saved = targetParam === "local"
-      ? { schema: TARGET_SCHEMA, local: true }
-      : { schema: TARGET_SCHEMA, sshTarget: targetParam };
+    // Read-modify-write: the confirmation authorizes changing WHERE the
+    // microVM runs — nothing else. A fresh narrow object here would silently
+    // drop the user's other configured fields (jobPayload above all: a
+    // re-save stripped it and flipped the next run to plain proof mode).
+    // Preserve every schema field the existing config carries; the decision
+    // under confirmation replaces exactly one of sshTarget/local. Preserved
+    // fields are still fully validated fail-closed by loadMicroVMTarget.
+    let existing = {};
+    try {
+      const parsed = JSON.parse(readFileSync(writePath, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) existing = parsed;
+    } catch {
+      // Absent or unreadable config: fresh write below.
+    }
+    const saved = { ...existing, schema: TARGET_SCHEMA };
+    if (targetParam === "local") {
+      delete saved.sshTarget;
+      saved.local = true;
+    } else {
+      delete saved.local;
+      saved.sshTarget = targetParam;
+    }
     try {
       mkdirSync(dirname(writePath), { recursive: true });
       writeFileSync(writePath, `${JSON.stringify(saved, null, 2)}\n`);

@@ -1237,6 +1237,39 @@ test("Defect 1: the proc-watcher sweep skips kernel threads (empty cmdline, ppid
   }
 });
 
+// --- Config-save round-trip: the target save must not strip jobPayload ---
+
+test("live-sequence regression: a confirmed target save preserves jobPayload and the run stays in containment mode", async () => {
+  const dir = await tempState();
+  try {
+    // The user's existing config carries the payload (plus allocation and a
+    // comment); the model relays the SAME target and the user confirms.
+    const configPath = targetConfigFile(dir, { vcpu: 4, memoryMiB: 2048, jobPayload: JOB_PAYLOAD, _comment: "user comment" });
+    const confirmBodies = [];
+    const executed = [];
+    const harness = runHarness(configPath, (id, sh) => stubV2Receipt(id, sh, "2".repeat(64)), confirmBodies, executed);
+    const value = await runLinuxMicroVMCutover(harness.context, {
+      ...harness.options,
+      targetUserConfigPath: configPath,
+      target: "user@test-microvm-host",
+    });
+    // Before the fix the save rewrote the config WITHOUT jobPayload, so this
+    // same invocation flipped to plain proof mode (v1) and dropped the job.
+    assert.equal(value.ok, true, JSON.stringify(value.reason ?? {}));
+    assert.equal(value.schema, LINUX_MICROVM_CUTOVER_SCHEMA_V2);
+    const after = JSON.parse(await readFile(configPath, "utf8"));
+    assert.equal(after.jobPayload, JOB_PAYLOAD, "jobPayload must survive the save");
+    assert.equal(after.vcpu, 4);
+    assert.equal(after.memoryMiB, 2048);
+    assert.equal(after._comment, "user comment");
+    assert.equal(after.sshTarget, "user@test-microvm-host");
+    const fixtureExec = executed.find(([exe, ...args]) => exe === "ssh" && args[1] === "bash");
+    assert.equal(Buffer.from(fixtureExec.at(-1), "base64").toString("utf8"), JOB_PAYLOAD, "payload still reaches the fixture argv");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("Defect 1: the decision path is frozen after a trip — no re-trips, no pressure growth", async () => {
   const dir = await tempState();
   const state = join(dir, "s");
@@ -1252,6 +1285,25 @@ test("Defect 1: the decision path is frozen after a trip — no re-trips, no pre
     const frozen2 = JSON.parse(await runFixture(["--gc-fs-detect", state, "/etc/again2"]));
     assert.equal(frozen2.frozen, true);
     assert.equal(await readFile(join(state, "containment.log.jsonl"), "utf8"), logAfterTrip);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a save that switches the decision to local keeps jobPayload and drops only sshTarget", async () => {
+  const dir = await tempState();
+  try {
+    const configPath = targetConfigFile(dir, { jobPayload: JOB_PAYLOAD });
+    const harness = runHarness(configPath, (id, sh) => stubV2Receipt(id, sh, "2".repeat(64)), [], []);
+    await runLinuxMicroVMCutover(harness.context, {
+      ...harness.options,
+      targetUserConfigPath: configPath,
+      target: "local",
+    });
+    const after = JSON.parse(await readFile(configPath, "utf8"));
+    assert.equal(after.local, true);
+    assert.equal(after.sshTarget, undefined, "exactly one decision: sshTarget is replaced");
+    assert.equal(after.jobPayload, JOB_PAYLOAD, "jobPayload survives the decision switch");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -1307,6 +1359,36 @@ test("Defect 2: a tripped killswitch produces a durable kill report; clean sessi
       return envelopeExtract(t2, fixtureId);
     })()).stdout);
     assert.equal(cleanBlock.killReportPath, undefined);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a fresh save writes the one decision; a later hand-added jobPayload loads and activates containment", async () => {
+  const dir = await tempState();
+  try {
+    const configPath = join(dir, "microvm-target.v1.json");
+    const harness = runHarness(configPath, (id, sh) => stubV1Receipt(id, sh), [], []);
+    const plain = await runLinuxMicroVMCutover(harness.context, {
+      ...harness.options,
+      targetUserConfigPath: configPath,
+      target: "user@test-microvm-host",
+    });
+    assert.equal(plain.ok, true);
+    assert.equal(plain.schema, LINUX_MICROVM_CUTOVER_SCHEMA, "fresh save = plain proof mode");
+    assert.deepEqual(JSON.parse(await readFile(configPath, "utf8")),
+      { schema: "agentic-driver.microvm-target.v1", sshTarget: "user@test-microvm-host" });
+    // The user then adds jobPayload by hand; the next run must load it.
+    const edited = JSON.parse(await readFile(configPath, "utf8"));
+    edited.jobPayload = JOB_PAYLOAD;
+    writeFileSync(configPath, JSON.stringify(edited, null, 2) + "\n");
+    const executed = [];
+    const harness2 = runHarness(configPath, (id, sh) => stubV2Receipt(id, sh, "2".repeat(64)), [], executed);
+    const contained = await runLinuxMicroVMCutover(harness2.context, harness2.options);
+    assert.equal(contained.ok, true, JSON.stringify(contained.reason ?? {}));
+    assert.equal(contained.schema, LINUX_MICROVM_CUTOVER_SCHEMA_V2, "hand-added jobPayload activates containment");
+    const fixtureExec = executed.find(([exe, ...args]) => exe === "ssh" && args[1] === "bash");
+    assert.equal(Buffer.from(fixtureExec.at(-1), "base64").toString("utf8"), JOB_PAYLOAD);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
