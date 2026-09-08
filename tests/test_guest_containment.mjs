@@ -10,6 +10,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFile, spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -342,6 +343,7 @@ import {
   LINUX_MICROVM_CUTOVER_SCHEMA,
   LINUX_MICROVM_CUTOVER_SCHEMA_V2,
   parseReceipt,
+  runLinuxMicroVMCutover,
   validateLinuxMicroVMReceipt,
 } from "../scripts/enforcement/linux_microvm_cutover_pi.js";
 
@@ -558,4 +560,105 @@ test("receipt-extra-output is relaxed solely for envelope markers on v2 receipts
   // Envelope markers beside a v1 receipt are still extra output.
   const v1 = JSON.stringify(stubV1Receipt(fixtureId, scriptHash));
   assert.throws(() => parseReceipt(`AGENTIC_MICROVM_RECEIPT: ${v1}\nAGENTIC_CONTAINMENT_BEGIN:${fixtureId}\n`), (error) => error.reasonCode === "receipt-extra-output");
+});
+
+// --- Step 4: elastic resource allocation (user-configured, never model-set) ---
+
+import {
+  registerLinuxMicroVMCutoverInterface,
+  LINUX_MICROVM_CUTOVER_TOOL,
+} from "../scripts/enforcement/linux_microvm_cutover_pi.js";
+
+function targetConfigFile(dir, extra = {}) {
+  const path = join(dir, "microvm-target.v1.json");
+  writeFileSync(path, JSON.stringify({ schema: "agentic-driver.microvm-target.v1", sshTarget: "user@test-microvm-host", ...extra }));
+  return path;
+}
+
+function allocationHarness(confirmBodies, executedArgs) {
+  return {
+    context: { mode: "tui", hasUI: true, ui: { confirm: async (_title, body) => { confirmBodies.push(body); return true; } } },
+    options: {
+      isolationSwitch: { get: () => true },
+      targetPath: undefined,
+      execute: (executable, args) => {
+        executedArgs.push([executable, ...args]);
+        // The fixture run carries the fixture id; build a matching receipt.
+        const fixtureId = executable === "ssh" ? args[4] : /microvm-[0-9a-f]{24}/.exec(args[1])?.[0];
+        const scriptHash = executable === "ssh" ? args[5] : createHash("sha256").update(arguments[2]?.input ?? "").digest("hex");
+        return { code: 0, stdout: `AGENTIC_MICROVM_RECEIPT: ${JSON.stringify(stubV1Receipt(fixtureId ?? "microvm-" + "3".repeat(24), scriptHash))}\n`, stderr: "" };
+      },
+      observeFacts: (execute, fixtureId) => stubFactsShape(fixtureId),
+    },
+  };
+}
+
+test("configured allocation flows into the confirmation text and fixture args", async () => {
+  const dir = await tempState();
+  try {
+    const targetPath = targetConfigFile(dir, { vcpu: 4, memoryMiB: 2048 });
+    const confirmBodies = [];
+    const executed = [];
+    const harness = allocationHarness(confirmBodies, executed);
+    const value = await runLinuxMicroVMCutover(harness.context, { ...harness.options, targetPath, userConfigPath: "/nonexistent/user-config.json" });
+    assert.equal(value.ok, true, JSON.stringify(value.reason ?? {}));
+    assert.match(confirmBodies[0], /\b4 vCPU, 2048 MiB\b/);
+    const fixtureExec = executed.find(([exe, ...args]) => exe === "ssh" && args[1] === "bash");
+    assert.ok(fixtureExec, "fixture run expected over ssh");
+    // Identity args are fixture-internal; the allocation args are last.
+    assert.deepEqual(fixtureExec.slice(-2), ["4", "2048"]);
+    assert.equal(fixtureExec.length, 9); // exe + target bash -s -- id hash vcpu mem
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("unconfigured allocation keeps the proof defaults (1 vCPU, 128 MiB)", async () => {
+  const dir = await tempState();
+  try {
+    const targetPath = targetConfigFile(dir);
+    const confirmBodies = [];
+    const executed = [];
+    const harness = allocationHarness(confirmBodies, executed);
+    const value = await runLinuxMicroVMCutover(harness.context, { ...harness.options, targetPath, userConfigPath: "/nonexistent/user-config.json" });
+    assert.equal(value.ok, true, JSON.stringify(value.reason ?? {}));
+    assert.match(confirmBodies[0], /\b1 vCPU, 128 MiB\b/);
+    const fixtureExec = executed.find(([exe, ...args]) => exe === "ssh" && args[1] === "bash");
+    assert.deepEqual(fixtureExec.slice(-2), ["1", "128"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an invalid allocation rejects the whole target config (fail-closed)", async () => {
+  const dir = await tempState();
+  try {
+    const targetPath = targetConfigFile(dir, { vcpu: 0 });
+    const confirmBodies = [];
+    const executed = [];
+    const harness = allocationHarness(confirmBodies, executed);
+    const value = await runLinuxMicroVMCutover(harness.context, { ...harness.options, targetPath, userConfigPath: "/nonexistent/user-config.json" });
+    assert.equal(value.ok, false);
+    assert.equal(value.reason.code, "target-not-configured");
+    assert.equal(executed.length, 0, "no run may start with an invalid allocation");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the model cannot set the allocation: the tool surface stays closed", async () => {
+  const tools = {};
+  const pi = { registerTool: (tool) => { tools[tool.name] = tool; }, registerCommand: () => {} };
+  registerLinuxMicroVMCutoverInterface(pi);
+  const tool = tools[LINUX_MICROVM_CUTOVER_TOOL];
+  assert.equal(tool.parameters.additionalProperties, false);
+  assert.deepEqual(Object.keys(tool.parameters.properties), ["target"]);
+  // Passing an allocation-looking parameter is rejected before any execution.
+  const executed = [];
+  let returned;
+  const context = { mode: "tui", hasUI: true, ui: { confirm: async () => true, notify: () => {} } };
+  const result = await tool.execute("id", { vcpu: 64 }, undefined, undefined, context);
+  returned = result;
+  assert.equal(returned.details.ok, false);
+  assert.equal(returned.details.reason.code, "model-parameters-not-allowed");
 });

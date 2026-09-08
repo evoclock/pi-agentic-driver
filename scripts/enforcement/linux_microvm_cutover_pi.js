@@ -106,7 +106,13 @@ function fixtureDomainForId(fixtureId) {
 // choose or change the target. Read order: the user's own config
 // (~/.pi/pi/config/microvm-target.v1.json) first, then the package-local
 // config/microvm-target.v1.json (shipped as a REPLACE-WITH template).
-const TARGET_FIELDS = new Set(["schema", "sshTarget", "local", "_comment"]);
+const TARGET_FIELDS = new Set(["schema", "sshTarget", "local", "vcpu", "memoryMiB", "_comment"]);
+// Elastic resource allocation bounds (design section 6.1). User-configured
+// through the target config only; the model-visible tool surface stays closed.
+const VCPU_MIN = 1, VCPU_MAX = 64;
+const MEMORY_MIN = 64, MEMORY_MAX = 1048576;
+function validVcpu(value) { return Number.isInteger(value) && value >= VCPU_MIN && value <= VCPU_MAX; }
+function validMemory(value) { return Number.isInteger(value) && value >= MEMORY_MIN && value <= MEMORY_MAX; }
 export function loadMicroVMTarget(options = {}) {
   if (options.target && typeof options.target === "object") {
     return normalizeTarget(options.target);
@@ -143,9 +149,17 @@ function normalizeTarget(parsed) {
     && !parsed.sshTarget.includes("REPLACE-WITH-");
   const hasLocal = parsed.local === true;
   if (hasSshTarget === hasLocal) return null;
+  // Optional elastic allocation: any invalid value rejects the whole config
+  // (fail-closed) rather than silently falling back.
+  if (parsed.vcpu !== undefined && !validVcpu(parsed.vcpu)) return null;
+  if (parsed.memoryMiB !== undefined && !validMemory(parsed.memoryMiB)) return null;
+  const allocation = {
+    ...(parsed.vcpu !== undefined ? { vcpu: parsed.vcpu } : {}),
+    ...(parsed.memoryMiB !== undefined ? { memoryMiB: parsed.memoryMiB } : {}),
+  };
   return Object.freeze(hasSshTarget
-    ? { mode: "ssh", sshTarget: parsed.sshTarget.trim() }
-    : { mode: "local" });
+    ? { mode: "ssh", sshTarget: parsed.sshTarget.trim(), ...allocation }
+    : { mode: "local", ...allocation });
 }
 
 // Shape validation for the user-relayed target parameter (untrusted input).
@@ -536,9 +550,11 @@ export async function runLinuxMicroVMCutover(context, options = {}) {
   }
   inFlight = true;
   try {
+    const allocation = resourceAllocation(target);
+    const fixtureArgs = [fixtureId, scriptHash, String(allocation.vcpu), String(allocation.memoryMiB)];
     const result = target.mode === "local"
-      ? execute("bash", ["-c", "bash -s -- " + shellQuote(fixtureId) + " " + shellQuote(scriptHash)], { input: script, timeout: 180000 })
-      : execute("ssh", [target.sshTarget, "bash", "-s", "--", fixtureId, scriptHash], { input: script, timeout: 180000 });
+      ? execute("bash", ["-c", "bash -s -- " + fixtureArgs.map(shellQuote).join(" ")], { input: script, timeout: 180000 })
+      : execute("ssh", [target.sshTarget, "bash", "-s", "--", ...fixtureArgs], { input: script, timeout: 180000 });
     if (!result || result.code !== 0) {
       return denied("blocked", normalizedForwardedStderr(result, "fixture", "execution-failed", "fixed microVM fixture failed"));
     }

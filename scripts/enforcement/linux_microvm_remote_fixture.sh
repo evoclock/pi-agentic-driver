@@ -367,7 +367,9 @@ if [ "$#" -ne 2 ]; then
 fi
 fixture_id=$1
 script_hash=$2
-containment_payload="${3:-}"
+vcpu_arg=${3:-}
+memory_arg=${4:-}
+containment_payload=${5:-}
 fixture_fail() {
   local code=$1
   shift
@@ -381,6 +383,15 @@ if [ "${#script_hash}" -ne 64 ]; then fixture_fail 2 'invalid fixture script has
 case "$script_hash" in
   ""|*[!0-9a-f]*) fixture_fail 2 'invalid fixture script hash' ;;
 esac
+# Elastic resource allocation (design section 6.1): user-configured via the
+# target config, validated here; defaults are the proof values. Never
+# model-set (the tool exposes no parameters for it).
+validate_vcpu() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ "$1" -ge 1 ] && [ "$1" -le 64 ]; }
+validate_memory() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ "$1" -ge 64 ] && [ "$1" -le 1048576 ]; }
+if ! validate_vcpu "$vcpu_arg"; then fixture_fail 2 'invalid vcpu allocation (integer 1-64)'; fi
+if ! validate_memory "$memory_arg"; then fixture_fail 2 'invalid memory allocation (integer 64-1048576 MiB)'; fi
+vcpu=${vcpu_arg:-1}
+memory_mib=${memory_arg:-128}
 
 state_root="$HOME/agentic-driver-state/cutover-fixtures/microvm"
 fixture_root="$state_root/$fixture_id"
@@ -757,8 +768,8 @@ if [ "${#initramfs_sha}" -ne 64 ]; then fixture_fail 6 'initramfs digest is inva
 if ! cat >"$fixture_root/domain.xml" <<EOF
 <domain type='kvm'>
   <name>$domain</name>
-  <memory unit='MiB'>128</memory>
-  <vcpu placement='static'>1</vcpu>
+  <memory unit='MiB'>$memory_mib</memory>
+  <vcpu placement='static'>$vcpu</vcpu>
   <os>
     <type arch='x86_64' machine='microvm'>hvm</type>
     <kernel>$kernel</kernel>

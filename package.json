@@ -57,6 +57,7 @@
     "extensions/linux-microvm.ts",
     "scripts/enforcement/linux_microvm_cutover_pi.js",
     "scripts/enforcement/native_tui_context.js",
+    "scripts/enforcement/guest_containment_taxonomy.v1.json",
     "scripts/enforcement/linux_microvm_remote_fixture.sh",
     "PROVENANCE.md",
     "extensions/aidr.ts",
