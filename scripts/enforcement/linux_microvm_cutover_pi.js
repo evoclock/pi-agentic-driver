@@ -347,7 +347,7 @@ function requireCount(value, label) {
 // containment proof: the proof is that the killswitch worked.
 function validateContainmentBlock(receipt) {
   const block = receipt.containment;
-  exactKeys(block, ["schema", "taxonomySha256", "logSha256", "events", "denials", "histogram", "killswitch"], "containment block");
+  exactKeys(block, ["schema", "taxonomySha256", "logSha256", "events", "denials", "probes", "concealmentIndex", "histogram", "killswitch"], "containment block");
   if (block.schema !== GUEST_CONTAINMENT_LOG_SCHEMA) {
     throw phaseError("evidence", "receipt-invalid", "containment log schema is unexpected");
   }
@@ -355,6 +355,8 @@ function validateContainmentBlock(receipt) {
   requireHash(block.logSha256, "containment log digest");
   requireCount(block.events, "containment event count");
   requireCount(block.denials, "containment denial count");
+  requireCount(block.probes, "containment probe count");
+  requireCount(block.concealmentIndex, "containment concealment index");
   // Compact class histogram (design section 4): class -> non-negative count.
   if (!block.histogram || typeof block.histogram !== "object" || Array.isArray(block.histogram)
       || Object.values(block.histogram).some((count) => !Number.isInteger(count) || count < 0)) {

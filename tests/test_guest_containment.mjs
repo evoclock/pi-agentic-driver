@@ -22,7 +22,7 @@ const FIXTURE = join(ROOT, "scripts/enforcement/linux_microvm_remote_fixture.sh"
 const TAXONOMY_FILE = join(ROOT, "scripts/enforcement/guest_containment_taxonomy.v1.json");
 // Pinned digest of the shipped taxonomy (design section 2: pinned per
 // repository revision; the fixture embeds and verifies the same digest).
-const TAXONOMY_SHA256 = "2d3f781c1594a5cefb77560419faff1619bc90012fc20b339a79110dbaa847c9";
+const TAXONOMY_SHA256 = "e77fb07387ebfad66030981f05b21c300e9d3e2a96d826dd3ca2b60e91411f4b";
 const INITRAMFS = "a".repeat(64);
 
 function runFixture(args, env = {}) {
@@ -50,6 +50,7 @@ const EXPECTED_RULE_IDS = [
   "GC-CRED-001", "GC-CRED-002",
   "GC-LOG-001", "GC-LOG-002",
   "GC-TOOL-001", "GC-TOOL-002",
+  "GC-PROBE-001", "GC-PROBE-002", "GC-PROBE-003",
 ];
 
 const TIER_CLASSES = {
@@ -392,6 +393,8 @@ function containmentBlock(logSha, { tripped = true, rule = "GC-CRED-001" } = {})
     logSha256: logSha,
     events: 3,
     denials: 2,
+    probes: 0,
+    concealmentIndex: 0,
     histogram: tripped ? { "GC-CRED": 1, unknown: 1 } : { unknown: 1 },
     killswitch: {
       tripped,
@@ -1132,5 +1135,73 @@ test("M6/sec: the fixture decodes and validates the base64 payload (accept and r
     const r = spawnSync("bash", [FIXTURE, "--gc-payload-validate", arg], { encoding: "utf8" });
     assert.notEqual(r.status, 0, `${label} must be rejected`);
     assert.match(r.stderr, /invalid containment job payload/);
+  }
+});
+
+// --- GC-PROBE concealment class (Task #132 item 1) ---
+
+test("GC-PROBE detectors fire on monitor introspection and enumeration", async () => {
+  const dir = await tempState();
+  try {
+    const fs = JSON.parse(await runFixture(["--gc-fs-detect", join(dir, "s"), "/gc/core.sh"]));
+    assert.equal(fs.rule, "GC-PROBE-001");
+    const shimCat = JSON.parse(await runFixture(["--gc-shim", join(dir, "s2"), "cat", "/gc/core.sh"]));
+    assert.equal(shimCat.rule, "GC-PROBE-001");
+    const shimPs = JSON.parse(await runFixture(["--gc-shim", join(dir, "s3"), "ps", "-ef"]));
+    assert.equal(shimPs.rule, "GC-PROBE-002");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("GC-PROBE probes accumulate ELEVATED pressure and trip at the threshold", async () => {
+  const dir = await tempState();
+  const state = join(dir, "s");
+  try {
+    for (let i = 0; i < 4; i++) {
+      const d = JSON.parse(await runFixture(["--gc-fs-detect", state, "/gc/core.sh"]));
+      assert.equal(d.rule, "GC-PROBE-001");
+    }
+    const trip = JSON.parse(await runFixture(["--gc-fs-detect", state, "/gc/core.sh"]));
+    assert.equal(trip.decision, "deny");
+    const log = await readFile(join(state, "containment.log.jsonl"), "utf8");
+    const ks = JSON.parse(log.trim().split("\n").at(-1));
+    assert.equal(ks.trigger.rule, "GC-PROBE-001");
+    assert.equal(ks.trigger.class, "GC-PROBE");
+    assert.equal(ks.trigger.tier, "ELEVATED");
+    assert.equal(ks.trigger.mode, "aggregate");
+    assert.equal(ks.trigger.threshold, 5);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("concealmentIndex is surfaced in the receipt block and validated host-side", async () => {
+  const fixtureId = "microvm-" + "e".repeat(24);
+  const TAX = TAXONOMY_SHA256;
+  const mk = (seq, cls, val) => compact({ schema: "agentic-driver.guest-containment.log.v1", session: fixtureId, taxonomy: "guest-containment-taxonomy.v1", taxonomySha256: TAX, event: { ts: "t", seq, source: "shim", class: cls, action: "deny", subject: { type: "exec", value: val } } });
+  const lines = [mk(1, "GC-PROBE", "cat /gc/core.sh"), mk(2, "unknown", "novel-thing")];
+  const payload = lines.join("\n") + "\n";
+  const end = compact({ schema: "agentic-driver.guest-containment.log.v1", session: fixtureId, taxonomy: "guest-containment-taxonomy.v1", taxonomySha256: TAX, event: { ts: "t", seq: 3, source: "supervisor", class: "session-end", action: "complete", summary: true } });
+  const full = payload + end + "\n";
+  const b64 = Buffer.from(full, "utf8").toString("base64").replace(/(.{76})/g, "$1\n");
+  const dir = await tempState();
+  try {
+    const transcript = join(dir, "console.typescript");
+    writeFileSync(transcript, `AGENTIC_CONTAINMENT_BEGIN:${fixtureId}\r\n${b64.replaceAll("\n", "\r\n")}\r\nAGENTIC_CONTAINMENT_END:${fixtureId}\r\n`);
+    const block = JSON.parse((await envelopeExtract(transcript, fixtureId)).stdout);
+    assert.equal(block.probes, 1);
+    // Formula: probes(1) + 2*unknown-class denials(1) = 3.
+    assert.equal(block.concealmentIndex, 3);
+    assert.equal(block.histogram["GC-PROBE"], 1);
+    const receipt = stubV2Receipt(fixtureId, "1".repeat(64), block.logSha256);
+    receipt.containment = block;
+    const validated = validateLinuxMicroVMReceipt(receipt, stubFactsShape(fixtureId), fixtureId, "1".repeat(64), { containment: true });
+    assert.equal(validated.status, "VERIFIED");
+    const bad = stubV2Receipt(fixtureId, "1".repeat(64), block.logSha256);
+    bad.containment.concealmentIndex = "high";
+    assert.throws(() => validateLinuxMicroVMReceipt(bad, stubFactsShape(fixtureId), fixtureId, "1".repeat(64), { containment: true }));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });
