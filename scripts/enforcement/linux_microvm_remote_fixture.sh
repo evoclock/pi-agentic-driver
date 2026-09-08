@@ -1109,6 +1109,9 @@ script_hash=$2
 vcpu_arg=${3:-}
 memory_arg=${4:-}
 containment_payload_b64=${5:-}
+# set -u invariant: containment_payload is referenced unconditionally later
+# (job.sh embed, envelope gating). Always defined; set only when a payload arrives.
+containment_payload=""
 fixture_fail() {
   local code=$1
   shift
