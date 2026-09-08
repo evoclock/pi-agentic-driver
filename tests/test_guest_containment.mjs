@@ -812,3 +812,77 @@ test("M4: flood degrades to summary-only records without dropping events", async
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// --- Repair pass: R1 (sweep/inotifyd coexistence + nested writes), R2 (full
+// applet shim surface), plus heredoc-render regression guards ---
+
+test("R1: inotifyd runs in the background beside the recursive sweep, never replacing it", async () => {
+  const fixtureSource = await readFile(FIXTURE, "utf8");
+  assert.doesNotMatch(fixtureSource, /exec \/bin\/inotifyd/, "inotifyd must not exec-replace the fs-watcher subshell (the sweep would never run)");
+  assert.ok(fixtureSource.includes('[ -n "\\$watches" ] && /bin/inotifyd /gc/fs-handler \\$watches &'),
+    "inotifyd must be backgrounded so the sweep loop below still runs");
+  const inotifydAt = fixtureSource.indexOf("/bin/inotifyd /gc/fs-handler");
+  const sweepAt = fixtureSource.indexOf("find / -newer");
+  assert.ok(inotifydAt > 0 && sweepAt > 0 && inotifydAt < sweepAt, "the recursive sweep must follow the inotifyd start in the same subshell");
+  // The sweep exclusion must strip only the job scratch under /tmp — /tmp
+  // itself stays visible so nested staging directories are detected.
+  assert.ok(fixtureSource.includes("grep -Ev '^/(tmp/session|proc|sys|dev|gc)'"));
+});
+
+test("R1: nested writes at depth >= 2 under a watched root are detected", async () => {
+  const dir = await tempState();
+  try {
+    const sweep = (await runFixture([
+      "--gc-fs-sweep", join(dir, "s"), "/tmp/staging/payload.bin", "/agent/lib/evil.js", "/tmp/session/ok.txt",
+    ])).trim().split("\n").map(JSON.parse);
+    assert.deepEqual(sweep.map((d) => d.decision), ["deny", "deny", "allow"]);
+    assert.equal(sweep[0].rule, "GC-FSW-001", "depth-2 write under /tmp must not be excluded like the job scratch");
+    assert.equal(sweep[1].rule, "GC-FSW-002", "depth-2 write inside the agent tree is self-code-modification");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("R2: every BusyBox applet is shimmed and the dispatcher is recursion-safe", async () => {
+  const fixtureSource = await readFile(FIXTURE, "utf8");
+  assert.ok(fixtureSource.includes("for name in $applet_list; do"), "shims must be built from the full applet list");
+  assert.ok(!fixtureSource.includes("for name in wget curl nc"), "the fixed dangerous-tools shim list must be gone");
+  // The dispatcher must pin PATH=/bin before sourcing core.sh so its helpers
+  // (sed/grep/awk/sha256sum/...) can never re-enter /shims.
+  const dispatchStart = fixtureSource.indexOf("GC_DISPATCH_EOF");
+  const dispatch = fixtureSource.slice(dispatchStart, fixtureSource.indexOf("GC_DISPATCH_EOF\nthen", dispatchStart));
+  assert.ok(dispatch.includes("PATH=/bin"));
+  assert.ok(dispatch.indexOf("PATH=/bin") < dispatch.indexOf(". /gc/core.sh"));
+  // Only the job runs under the shim PATH; the supervisor stays on /bin.
+  assert.ok(fixtureSource.includes("PATH=/shims:/bin /bin/busybox sh /job.sh &"));
+  assert.ok(!fixtureSource.includes("export PATH=/shims:/bin"));
+  // Classifier-level closure of the plain-applet-name bypass.
+  const dir = await tempState();
+  try {
+    const shim = async (...args) => JSON.parse(await runFixture(["--gc-shim", join(dir, "s"), ...args]));
+    assert.equal((await shim("cat", "/root/.ssh/id_rsa")).rule, "GC-CRED-001");
+    assert.equal((await shim("sed", "-i", "s/a/b/", "/var/log/agent.log")).rule, "GC-LOG-002");
+    assert.equal((await shim("sh", "-c", "echo hi > /dev/console")).rule, "GC-TOOL-002");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("R1/R3: the guest init heredoc renders under set -u (no host-side $ leaks)", async () => {
+  const fixtureSource = await readFile(FIXTURE, "utf8");
+  const opener = 'cat >"$root/init" <<EOF\n';
+  const start = fixtureSource.indexOf(opener) + opener.length;
+  const end = fixtureSource.indexOf("\nEOF\n", start);
+  assert.ok(start > opener.length && end > start, "guest init heredoc not found");
+  const template = fixtureSource.slice(start, end);
+  const render = spawnSync("bash", ["-c",
+    'set -euo pipefail; marker="AGENTIC_MICROVM_PROBE:t"; fixture_id="t"; have_setsid=true; cat <<EOF\n' + template + "\nEOF\n"],
+    { encoding: "utf8" });
+  assert.equal(render.status, 0, render.stderr || "heredoc must not reference host-side variables (set -u violation)");
+  const guest = render.stdout;
+  // Guest-side variables must survive rendering as plain $ references.
+  assert.ok(guest.includes("/bin/inotifyd /gc/fs-handler $watches &"), "guest watches loop must survive rendering");
+  assert.ok(guest.includes("awk '{print $4}'"), "guest awk stat field must survive rendering");
+  assert.ok(guest.includes("PATH=/shims:/bin /bin/busybox sh /job.sh &"));
+  assert.ok(guest.includes("echo 'AGENTIC_MICROVM_PROBE:t'"), "host-side marker substitution must render");
+});

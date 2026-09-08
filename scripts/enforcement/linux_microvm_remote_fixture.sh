@@ -692,9 +692,13 @@ fi
 if ! grep -q 'gc_killswitch_trip' "$root/gc/core.sh"; then fixture_fail 6 'guest containment core extraction is incomplete'; fi
 if ! cat >"$root/gc/dispatch" <<'GC_DISPATCH_EOF'
 #!/bin/busybox sh
+# Every applet is shimmed, so the dispatcher must resolve its own helpers
+# (core.sh uses sed/grep/awk/sha256sum/...) from /bin directly; otherwise
+# each helper would re-enter /shims and recurse.
+PATH=/bin
 . /gc/core.sh
 session=/tmp/session/.gc
-tool=$(basename "$0")
+tool=${0##*/}
 decision=$(gc_shim_allow "$session" "$tool" "$@") || exit 126
 case "$decision" in
   *'"decision":"allow"'*)
@@ -711,7 +715,8 @@ fi
 if ! cat >"$root/gc/fs-handler" <<'GC_FS_HANDLER_EOF'
 #!/bin/busybox sh
 # inotifyd handler: allow only the job scratch root; everything else is
-# classified by gc_fs_detect.
+# classified by gc_fs_detect. PATH=/bin keeps core.sh helpers out of /shims.
+PATH=/bin
 . /gc/core.sh
 session=/tmp/session/.gc
 event=$1 dir=$2 name=$3
@@ -723,9 +728,18 @@ GC_FS_HANDLER_EOF
 then
   fixture_fail 6 'guest fs-watcher handler could not be written'
 fi
-for name in wget curl nc ssh telnet ping npm npx pip pip3 yarn pnpm gem cargo apk apt apt-get truncate tee; do
+# R2: shim every BusyBox applet, not a fixed dangerous-tools list — the shim
+# layer is the command boundary (design sections 1.2, 3), so plain
+# `cat /root/.ssh/...`, `sed -i ...`, or `sh -c '... > /dev/console'` must
+# reach the classifier too. Only the job runs under the shim PATH and the
+# dispatcher resets PATH=/bin for its own helpers, so the wider surface adds
+# no recursion. Observed-first-use learning semantics are unchanged.
+shim_links=0
+for name in $applet_list; do
   if ! ln -s ../gc/dispatch "$root/shims/$name"; then fixture_fail 6 "shim link could not be created: $name"; fi
+  shim_links=$((shim_links + 1))
 done
+if [ "$shim_links" -lt 1 ]; then fixture_fail 6 'no BusyBox applets available for the shim layer'; fi
 if ! cat >"$root/init" <<EOF
 #!/bin/busybox sh
 /bin/mount -t proc proc /proc
@@ -744,7 +758,10 @@ session_id=$fixture_id
 session=/tmp/session/.gc
 mkdir -p /tmp/session "\$session" || { sync; /bin/poweroff -f; }
 touch "\$session/baseline"
-export PATH=/shims:/bin
+# The supervisor and monitor loops resolve applets from /bin directly; only
+# the job below runs under the shim PATH, so the monitor never interposes on
+# its own helpers now that every applet is shimmed.
+export PATH=/bin
 (
   while :; do
     for f in /proc/net/tcp /proc/net/tcp6 /proc/net/udp; do
@@ -761,15 +778,20 @@ export PATH=/shims:/bin
 net_pid=\$!
 (
   if [ -x /bin/inotifyd ]; then
-    # Watch every existing top-level root except the virtual trees and the
-    # job scratch (coverage equal to or better than the sweep; the handler
-    # still filters /tmp/session paths).
+    # R1: event-driven top-level watches close the create/use/delete race at
+    # depth one, but inotify watches are non-recursive — nested writes at
+    # depth >= 2 under a watched root would be invisible to them. Both
+    # detectors run side by side (design sections 1.3, 9.1): inotifyd in the
+    # background for immediacy, the recursive find -newer sweep below
+    # unconditionally for coverage (and as the fallback when inotifyd is
+    # absent or dies). A top-level write may be seen twice; that only adds
+    # deny pressure, never misses one.
     watches=""
     for d in /*; do
-      case "$d" in /proc|/sys|/dev|/tmp/session|/tmp/session/*) continue ;; esac
-      [ -d "$d" ] && watches="$watches $d:ncp"
+      case "\$d" in /proc|/sys|/dev|/tmp/session|/tmp/session/*) continue ;; esac
+      [ -d "\$d" ] && watches="\$watches \$d:ncp"
     done
-    [ -n "$watches" ] && exec /bin/inotifyd /gc/fs-handler $watches
+    [ -n "\$watches" ] && /bin/inotifyd /gc/fs-handler \$watches &
   fi
   while :; do
     find / -newer "\$session/baseline" 2>/dev/null | grep -Ev '^/(tmp/session|proc|sys|dev|gc)' | while IFS= read -r p; do
@@ -790,10 +812,12 @@ fs_pid=\$!
   done
 ) &
 proc_pid=\$!
+# Only the job runs under the shim PATH (design section 1.3); PATH= above
+# keeps the supervisor and monitor loops on /bin.
 if [ "$have_setsid" = true ]; then
-  /bin/setsid /bin/busybox sh /job.sh &
+  PATH=/shims:/bin /bin/setsid /bin/busybox sh /job.sh &
 else
-  /bin/busybox sh /job.sh &
+  PATH=/shims:/bin /bin/busybox sh /job.sh &
 fi
 job_pid=\$!
 while :; do
@@ -806,18 +830,21 @@ done
 # Killswitch action (design section 5): kill the job process group, sync,
 # poweroff. on_poweroff=destroy tears the transient domain down host-side.
 # M5: without setsid there is no separate process group; fall back to killing
-# the job and its /proc-visible descendants directly.
+# the job and its /proc-visible descendants directly. R3 caveats, both bounded
+# by the unconditional poweroff -f below (which ends every descendant
+# regardless): the walk covers direct children only (TERM pass, then KILL
+# pass), and /proc/<pid>/stat field parsing assumes a space-free comm.
 if [ -x /bin/setsid ]; then
   kill -TERM -"\$job_pid" 2>/dev/null
   kill -KILL -"\$job_pid" 2>/dev/null
 else
   for p in /proc/[0-9]*; do
-    ppid=\$(awk '{print $4}' "\$p/stat" 2>/dev/null) || continue
+    ppid=\$(awk '{print \$4}' "\$p/stat" 2>/dev/null) || continue
     if [ "\$ppid" = "\$job_pid" ]; then kill -TERM "\${p#/proc/}" 2>/dev/null; fi
   done
   kill -TERM "\$job_pid" 2>/dev/null
   for p in /proc/[0-9]*; do
-    ppid=\$(awk '{print $4}' "\$p/stat" 2>/dev/null) || continue
+    ppid=\$(awk '{print \$4}' "\$p/stat" 2>/dev/null) || continue
     if [ "\$ppid" = "\$job_pid" ]; then kill -KILL "\${p#/proc/}" 2>/dev/null; fi
   done
   kill -KILL "\$job_pid" 2>/dev/null
