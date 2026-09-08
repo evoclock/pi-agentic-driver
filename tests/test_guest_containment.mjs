@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { createReadStream } from "node:fs";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -25,9 +25,9 @@ const TAXONOMY_FILE = join(ROOT, "scripts/enforcement/guest_containment_taxonomy
 const TAXONOMY_SHA256 = "e77fb07387ebfad66030981f05b21c300e9d3e2a96d826dd3ca2b60e91411f4b";
 const INITRAMFS = "a".repeat(64);
 
-function runFixture(args, env = {}) {
+function runFixture(args, env = {}, stdin = undefined) {
   return new Promise((resolve, reject) => {
-    execFile("bash", [FIXTURE, ...args], { env: { ...process.env, ...env } }, (error, stdout, stderr) => {
+    execFile("bash", [FIXTURE, ...args], { env: { ...process.env, ...env }, input: stdin }, (error, stdout, stderr) => {
       if (error) reject(Object.assign(error, { stderr }));
       else resolve(stdout);
     });
@@ -396,6 +396,7 @@ function containmentBlock(logSha, { tripped = true, rule = "GC-CRED-001" } = {})
     probes: 0,
     concealmentIndex: 0,
     histogram: tripped ? { "GC-CRED": 1, unknown: 1 } : { unknown: 1 },
+    ...(tripped ? { killReportPath: "/fixtures/fid/kill-report.json" } : {}),
     killswitch: {
       tripped,
       rule: tripped ? rule : null,
@@ -449,9 +450,10 @@ function envelopePayloadLines(fixtureId) {
   ];
 }
 
-function envelopeExtract(transcript, fixtureId) {
+function envelopeExtract(transcript, fixtureId, reportPath = undefined) {
+  const args = reportPath ? [transcript, fixtureId, reportPath] : [transcript, fixtureId];
   return new Promise((resolve) => {
-    const child = spawnSync("bash", [FIXTURE, "--gc-envelope-extract", transcript, fixtureId], { encoding: "utf8" });
+    const child = spawnSync("bash", [FIXTURE, "--gc-envelope-extract", ...args], { encoding: "utf8" });
     resolve({ status: child.status, stdout: child.stdout, stderr: child.stderr });
   });
 }
@@ -1067,10 +1069,13 @@ test("M6: end-to-end containment flow through the fixture (trip → envelope →
     assert.equal(block.killswitch.class, "GC-NET");
     assert.equal(block.killswitch.tier, "HIGH");
     // 4. the real receipt printf emits the v2 receipt; host validation passes.
+    // Extraction passes the kill-report path; the tripped block carries it.
+    const extraction2 = await envelopeExtract(transcript, fixtureId);
+    const block2 = JSON.parse(extraction2.stdout);
     const receipt = JSON.parse(runFixtureSync([
       "--gc-receipt-print", LINUX_MICROVM_CUTOVER_SCHEMA_V2, "test-host", fixtureId, `agentic-driver-${fixtureId}`,
       `AGENTIC_MICROVM_PROBE:${fixtureId}`, createHash("sha256").update(`AGENTIC_MICROVM_PROBE:${fixtureId}`).digest("hex"),
-      "1".repeat(64), "a".repeat(64), `,"containment":${extraction.stdout.trim()}`,
+      "1".repeat(64), "a".repeat(64), `,"containment":${JSON.stringify({ ...block2, killReportPath: "/fixtures/fid/kill-report.json" })}`,
       `agentic-driver-${fixtureId}`, "true", "true", "b".repeat(64), "b".repeat(64),
       createHash("sha256").update(JSON.stringify({ disk: false, hostShare: false, credentials: false, gpu: false, initramfsSha256: "a".repeat(64) })).digest("hex"),
       createHash("sha256").update(JSON.stringify({ network: false })).digest("hex"),
@@ -1201,6 +1206,107 @@ test("concealmentIndex is surfaced in the receipt block and validated host-side"
     const bad = stubV2Receipt(fixtureId, "1".repeat(64), block.logSha256);
     bad.containment.concealmentIndex = "high";
     assert.throws(() => validateLinuxMicroVMReceipt(bad, stubFactsShape(fixtureId), fixtureId, "1".repeat(64), { containment: true }));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// --- Live-proof defect fixes: kernel-thread false positives, trip freeze, kill report ---
+
+test("Defect 1: the proc-watcher sweep skips kernel threads (empty cmdline, ppid 2)", async () => {
+  const dir = await tempState();
+  try {
+    // Simulated /proc: kernel thread (empty cmdline), kthreadd child (ppid 2),
+    // userspace unknown, and the allowlisted shell.
+    const base = join(dir, "proc");
+    const mk = (pid, { cmdline = null, comm, ppid = null }) => {
+      mkdirSync(join(base, pid), { recursive: true });
+      writeFileSync(join(base, pid, "comm"), comm);
+      if (cmdline !== null) writeFileSync(join(base, pid, "cmdline"), cmdline);
+      writeFileSync(join(base, pid, "stat"), `1 (x) S ${ppid ?? 1} 1 1 0 0 0 0 0 0`);
+    };
+    mkdirSync(base, { recursive: true });
+    mk("10", { comm: "kthreadd", ppid: 0 });                 // empty cmdline: kernel thread
+    mk("20", { comm: "kworker/u8:2", cmdline: "", ppid: 2 }); // kernel thread, ppid 2
+    mk("30", { comm: "evil-agent", cmdline: "evil\0agent", ppid: 100 });
+    mk("31", { comm: "sh", cmdline: "sh\0/job.sh", ppid: 100 });
+    const out = (await runFixture(["--gc-proc-sweep", base])).trim().split("\n");
+    assert.deepEqual(out, ["evil-agent", "sh"], "kernel threads must not be flagged; userspace processes must be");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("Defect 1: the decision path is frozen after a trip — no re-trips, no pressure growth", async () => {
+  const dir = await tempState();
+  const state = join(dir, "s");
+  try {
+    const first = JSON.parse(await runFixture(["--gc-net-detect", state, "socket-row"]));
+    assert.equal(first.rule, "GC-NET-001");
+    const logAfterTrip = await readFile(join(state, "containment.log.jsonl"), "utf8");
+    const ksCount = logAfterTrip.split("\n").filter((l) => l.includes("killswitch.v1")).length;
+    assert.equal(ksCount, 2, "exactly one trip (trigger event + terminal killswitch line)");
+    // Post-trip events: frozen decision, log unchanged, no new pressure.
+    const frozen = JSON.parse(await runFixture(["--gc-fs-detect", state, "/etc/again"]));
+    assert.equal(frozen.frozen, true);
+    const frozen2 = JSON.parse(await runFixture(["--gc-fs-detect", state, "/etc/again2"]));
+    assert.equal(frozen2.frozen, true);
+    assert.equal(await readFile(join(state, "containment.log.jsonl"), "utf8"), logAfterTrip);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("Defect 2: a tripped killswitch produces a durable kill report; clean sessions do not", async () => {
+  const fixtureId = "microvm-" + "d".repeat(24);
+  const dir = await tempState();
+  try {
+    // Trip path: envelope with a GC-CRED trip and the report path passed.
+    const { body, expectedLogSha } = envelopeTranscript(fixtureId, envelopePayloadLines(fixtureId));
+    // The fixture root layout: the transcript is always console.typescript,
+    // so the saved payload lands next to it for the kill report.
+    const transcript = join(dir, "console.typescript");
+    writeFileSync(transcript, body);
+    const reportPath = join(dir, "kill-report.json");
+    const extraction = await envelopeExtract(transcript, fixtureId, reportPath);
+    assert.equal(extraction.status, 0, extraction.stderr);
+    const block = JSON.parse(extraction.stdout);
+    assert.equal(block.killReportPath, reportPath);
+    // Write the report from the saved payload + block (fixture main-flow behavior).
+    // Block travels as an argv argument (never stdin; bounded at 64 KiB).
+    // The hook prints the report path; the durable report is the file itself.
+    await runFixture([
+      "--gc-kill-report", dir, fixtureId, `agentic-driver-${fixtureId}`, "test-host", extraction.stdout.trim(),
+    ]);
+    const report = JSON.parse(await readFile(reportPath, "utf8"));
+    assert.equal(report.schema, "agentic-driver.guest-containment.kill-report.v1");
+    assert.equal(report.session.fixtureId, fixtureId);
+    assert.equal(report.killswitch.tripped, true);
+    assert.equal(report.killswitch.rule, "GC-CRED-001");
+    assert.equal(report.killswitch.class, "GC-CRED");
+    assert.equal(report.killswitch.tier, "CRITICAL");
+    assert.equal(report.killswitch.mode, "immediate");
+    // Immediate trips carry null pressure/threshold; aggregate trips carry counts.
+    assert.ok(report.killswitch.pressure === null || /^\d+$/.test(report.killswitch.pressure));
+    assert.ok(Array.isArray(report.lastEvents) || typeof report.lastEvents === "string");
+    assert.match(report.logSha256, new RegExp(`^${expectedLogSha.slice(0, 8)}`));
+    // Host validation: the receipt with the report path validates...
+    const receipt = stubV2Receipt(fixtureId, "1".repeat(64), block.logSha256);
+    const validated = validateLinuxMicroVMReceipt(receipt, stubFactsShape(fixtureId), fixtureId, "1".repeat(64), { containment: true });
+    assert.equal(validated.status, "VERIFIED");
+    // ...a tripped receipt WITHOUT the report path is rejected...
+    const noReport = stubV2Receipt(fixtureId, "1".repeat(64), "2".repeat(64));
+    delete noReport.containment.killReportPath;
+    assert.throws(() => validateLinuxMicroVMReceipt(noReport, stubFactsShape(fixtureId), fixtureId, "1".repeat(64), { containment: true }));
+    // ...and a clean (non-trip) session carries no report path.
+    const clean = stubV2Receipt(fixtureId, "1".repeat(64), "2".repeat(64), { tripped: false });
+    assert.equal(clean.containment.killReportPath, undefined);
+    const cleanBlock = JSON.parse((await (async () => {
+      const t2 = join(dir, "t2");
+      writeFileSync(t2, `AGENTIC_CONTAINMENT_BEGIN:${fixtureId}\r\n${Buffer.from(JSON.stringify({ schema: "agentic-driver.guest-containment.log.v1", event: { ts: "t", seq: 1, source: "supervisor", class: "session-end", action: "complete", summary: true } }) + "\n", "utf8").toString("base64")}\r\nAGENTIC_CONTAINMENT_END:${fixtureId}\r\n`);
+      return envelopeExtract(t2, fixtureId);
+    })()).stdout);
+    assert.equal(cleanBlock.killReportPath, undefined);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

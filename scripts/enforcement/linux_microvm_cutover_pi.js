@@ -347,7 +347,12 @@ function requireCount(value, label) {
 // containment proof: the proof is that the killswitch worked.
 function validateContainmentBlock(receipt) {
   const block = receipt.containment;
-  exactKeys(block, ["schema", "taxonomySha256", "logSha256", "events", "denials", "probes", "concealmentIndex", "histogram", "killswitch"], "containment block");
+  // Durable kill report (design section 5): the report path is present only
+  // on a tripped killswitch; a clean session must not carry one.
+  const blockKeys = ["schema", "taxonomySha256", "logSha256", "events", "denials", "probes", "concealmentIndex", "histogram", "killswitch"];
+  const trippedEarly = block?.killswitch?.tripped === true;
+  if (trippedEarly) blockKeys.push("killReportPath");
+  exactKeys(block, blockKeys, "containment block");
   if (block.schema !== GUEST_CONTAINMENT_LOG_SCHEMA) {
     throw phaseError("evidence", "receipt-invalid", "containment log schema is unexpected");
   }
@@ -372,6 +377,9 @@ function validateContainmentBlock(receipt) {
         || typeof block.killswitch.class !== "string" || !block.killswitch.class
         || typeof block.killswitch.tier !== "string" || !block.killswitch.tier) {
       throw phaseError("evidence", "receipt-invalid", "killswitch tripped without rule, class, or tier");
+    }
+    if (typeof block.killReportPath !== "string" || !block.killReportPath.endsWith("kill-report.json")) {
+      throw phaseError("evidence", "receipt-invalid", "killswitch trip without a kill report path");
     }
   } else if (block.killswitch.rule !== null || block.killswitch.class !== null || block.killswitch.tier !== null) {
     throw phaseError("evidence", "receipt-invalid", "killswitch rule, class, and tier must be null when not tripped");
@@ -652,7 +660,7 @@ export function registerLinuxMicroVMCutoverInterface(pi, options = {}) {
     const killswitch = value?.containment?.killswitch;
     if (value?.ok === true && killswitch?.tripped === true && typeof context?.ui?.notify === "function") {
       context.ui.notify(
-        `MICROVM CONTAINMENT: KILLSWITCH TRIPPED — rule ${killswitch.rule}, class ${killswitch.class}, tier ${killswitch.tier}; guest session killed and VM torn down.`,
+        `MICROVM CONTAINMENT: KILLSWITCH TRIPPED — rule ${killswitch.rule}, class ${killswitch.class}, tier ${killswitch.tier}; guest session killed and VM torn down. Kill report: ${value?.containment?.killReportPath ?? "(unavailable)"}`,
         "error",
       );
     }

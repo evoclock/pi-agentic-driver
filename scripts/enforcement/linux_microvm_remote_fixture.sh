@@ -126,6 +126,12 @@ gc_window_pressure() { # pressure_file
 # stdout; a trip also appends the terminal killswitch event to the log.
 gc_decide() { # state_dir rule_id [subject_value]
   local state_dir=$1 rule_id=$2 svalue=${3:-}
+  # Log freeze gates the decision path too: after a trip the session is dead;
+  # further events must not append, re-trip, or grow pressure counters.
+  if [ -f "$state_dir/kill" ]; then
+    printf '{"rule":"%s","frozen":true,"tripped":true,"mode":"post-trip"}\n' "$rule_id"
+    return 0
+  fi
   mkdir -p "$state_dir" || return 2
   local tax="$state_dir/taxonomy.json"
   if [ ! -f "$tax" ]; then gc_embedded_taxonomy >"$tax" || return 2; fi
@@ -260,24 +266,39 @@ gc_fs_detect() { # state_dir path -> decision JSON
       printf '{"decision":"allow","path":"%s"}\n' "$path" ;;
     /gc|/gc/*)
       # GC-PROBE-001: introspection of the monitor tree itself (section 9.1).
-      gc_decide "$state_dir" GC-PROBE-001 "$path" >/dev/null || return 2
-      printf '{"decision":"deny","rule":"GC-PROBE-001","path":"%s"}\n' "$path" ;;
+      decision=$(gc_decide "$state_dir" GC-PROBE-001 "$path") || return 2
+      case "$decision" in
+        *'"frozen":true'*) printf '%s\n' "$decision" ;;
+        *) printf '{"decision":"deny","rule":"GC-PROBE-001","path":"%s"}\n' "$path" ;;
+      esac ;;
     /shims|/shims/*|/agent|/agent/*)
-      gc_decide "$state_dir" GC-FSW-002 "$path" >/dev/null || return 2
-      printf '{"decision":"deny","rule":"GC-FSW-002","path":"%s"}\n' "$path" ;;
+      decision=$(gc_decide "$state_dir" GC-FSW-002 "$path") || return 2
+      case "$decision" in
+        *'"frozen":true'*) printf '%s\n' "$decision" ;;
+        *) printf '{"decision":"deny","rule":"GC-FSW-002","path":"%s"}\n' "$path" ;;
+      esac ;;
     */package.json|*/package-lock.json|*/pyproject.toml|*/requirements*.txt|/package.json|/pyproject.toml)
-      gc_decide "$state_dir" GC-PKG-003 "$path" >/dev/null || return 2
-      printf '{"decision":"deny","rule":"GC-PKG-003","path":"%s"}\n' "$path" ;;
+      decision=$(gc_decide "$state_dir" GC-PKG-003 "$path") || return 2
+      case "$decision" in
+        *'"frozen":true'*) printf '%s\n' "$decision" ;;
+        *) printf '{"decision":"deny","rule":"GC-PKG-003","path":"%s"}\n' "$path" ;;
+      esac ;;
     /dev/*|/dev)
       # Write targets on devtmpfs could inject marker text (GC-TOOL-002).
-      gc_decide "$state_dir" GC-TOOL-002 "$path" >/dev/null || return 2
-      printf '{"decision":"deny","rule":"GC-TOOL-002","path":"%s"}\n' "$path" ;;
+      decision=$(gc_decide "$state_dir" GC-TOOL-002 "$path") || return 2
+      case "$decision" in
+        *'"frozen":true'*) printf '%s\n' "$decision" ;;
+        *) printf '{"decision":"deny","rule":"GC-TOOL-002","path":"%s"}\n' "$path" ;;
+      esac ;;
     *"containment.log"*|*/.gc/*)
       gc_decide "$state_dir" GC-LOG-002 "$path" >/dev/null || return 2
       printf '{"decision":"deny","rule":"GC-LOG-002","path":"%s"}\n' "$path" ;;
     *)
-      gc_decide "$state_dir" GC-FSW-001 "$path" >/dev/null || return 2
-      printf '{"decision":"deny","rule":"GC-FSW-001","path":"%s"}\n' "$path" ;;
+      decision=$(gc_decide "$state_dir" GC-FSW-001 "$path") || return 2
+      case "$decision" in
+        *'"frozen":true'*) printf '%s\n' "$decision" ;;
+        *) printf '{"decision":"deny","rule":"GC-FSW-001","path":"%s"}\n' "$path" ;;
+      esac ;;
   esac
 }
 
@@ -292,8 +313,28 @@ gc_fs_sweep() { # state_dir path...
 gc_net_detect() { # state_dir socket_entry
   local state_dir=$1 entry=$2
   [ -n "$entry" ] || return 0
-  gc_decide "$state_dir" GC-NET-001 "$entry" >/dev/null || return 2
-  printf '{"decision":"deny","rule":"GC-NET-001"}\n'
+  decision=$(gc_decide "$state_dir" GC-NET-001 "$entry") || return 2
+  case "$decision" in
+    *'"frozen":true'*) printf '%s\n' "$decision" ;;
+    *) printf '{"decision":"deny","rule":"GC-NET-001"}\n' ;;
+  esac
+}
+
+# Proc-watcher sweep: enumerate userspace processes only. Kernel threads
+# (kthreadd, kworker/*) have an empty /proc/PID/cmdline and are children of
+# kthreadd (ppid 2); flagging them produced 117+ false unknown-class events on
+# the first live proof and tripped the ANOMALY threshold before the job ran
+# (fixture microvm-ab06221027d3e36afc843b91). base_dir defaults to /proc and
+# is a parameter so tests can exercise the filter against a simulated tree.
+gc_proc_watch_sweep() { # [base_dir] -> "comm" lines of userspace processes
+  local base=${1:-/proc} p comm
+  for p in "$base"/[0-9]*; do
+    [ -d "$p" ] || continue
+    [ -s "$p/cmdline" ] || continue   # kernel threads: empty cmdline
+    [ "$(awk '{print $4}' "$p/stat" 2>/dev/null)" = "2" ] && continue
+    comm=$(cat "$p/comm" 2>/dev/null) || continue
+    [ -n "$comm" ] && printf '%s\n' "$comm"
+  done
 }
 
 # proc-watcher detection: a process outside the job tree is an anomaly.
@@ -341,8 +382,8 @@ gc_session_end() { # state_dir
 # envelope from the console transcript, decode it pty-safe, recompute the log
 # digest per the stated normalization, and cross-check the terminal killswitch
 # event's embedded digest against the full payload.
-gc_containment_evidence() { # transcript fixture_id -> containment block JSON on stdout
-  local transcript=$1 fid=$2
+gc_containment_evidence() { # transcript fixture_id [kill_report_path] -> containment block JSON on stdout
+  local transcript=$1 fid=$2 report_path=${3:-}
   local begin="AGENTIC_CONTAINMENT_BEGIN:$fid" end="AGENTIC_CONTAINMENT_END:$fid"
   local b64 tmp log_sha events denials ks_line ks_rule tripped rule_json
   tmp="$transcript.containment.$$"
@@ -414,9 +455,51 @@ gc_containment_evidence() { # transcript fixture_id -> containment block JSON on
     else if (c == "unknown" && a == "deny") { idx += 2 }
     else if (c == "containment-integrity") { idx += 3 }
   } END { printf "probes=%d; concealment_index=%d;", probes + 0, idx + 0 }' "$tmp")"
+  if [ "$tripped" = true ] && [ -n "$report_path" ]; then
+    cp "$tmp" "$transcript.containment.payload" 2>/dev/null || true
+    report_json=",\"killReportPath\":\"$report_path\""
+  else
+    report_json=""
+  fi
   rm -f "$tmp" "$tmp.b64" "$tmp.head"
-  printf '{"schema":"%s","taxonomySha256":"%s","logSha256":"%s","events":%s,"denials":%s,"probes":%s,"concealmentIndex":%s,"histogram":%s,"killswitch":{"tripped":%s,"rule":%s,"class":%s,"tier":%s,"guestPoweroff":true,"final":true}}' \
-    "$GC_LOG_SCHEMA" "$GC_TAXONOMY_SHA256" "$log_sha" "$events" "$denials" "$probes" "$concealment_index" "$histogram" "$tripped" "$rule_json" "$class_json" "$tier_json"
+  printf '{"schema":"%s","taxonomySha256":"%s","logSha256":"%s","events":%s,"denials":%s,"probes":%s,"concealmentIndex":%s,"histogram":%s,"killswitch":{"tripped":%s,"rule":%s,"class":%s,"tier":%s,"guestPoweroff":true,"final":true}%s}' \
+    "$GC_LOG_SCHEMA" "$GC_TAXONOMY_SHA256" "$log_sha" "$events" "$denials" "$probes" "$concealment_index" "$histogram" "$tripped" "$rule_json" "$class_json" "$tier_json" "$report_json"
+}
+
+# Durable kill report (design section 5; Defect 2): when the killswitch trips,
+# the fixture writes kill-report.json next to console.typescript with session
+# identity, decoded aggregates, the trigger, the last redacted events before
+# the kill, and teardown proof status (finalized after the teardown proofs).
+gc_write_kill_report() { # fixture_root fixture_id domain remote_host block_json
+  local fixture_root=$1 fid=$2 dom=$3 host=$4 block=$5
+  local payload="$fixture_root/console.typescript.containment.payload"
+  local report="$fixture_root/kill-report.json"
+  local log_sha events denials probes concealment histogram rule class tier mode pressure threshold
+  log_sha=$(printf '%s' "$block" | sed -n 's/.*"logSha256":"\([0-9a-f]*\)".*/\1/p')
+  events=$(printf '%s' "$block" | sed -n 's/.*"events":\([0-9]*\).*/\1/p')
+  denials=$(printf '%s' "$block" | sed -n 's/.*"denials":\([0-9]*\).*/\1/p')
+  probes=$(printf '%s' "$block" | sed -n 's/.*"probes":\([0-9]*\).*/\1/p')
+  concealment=$(printf '%s' "$block" | sed -n 's/.*"concealmentIndex":\([0-9]*\).*/\1/p')
+  histogram=$(printf '%s' "$block" | sed -n 's/.*"histogram":\({[^}]*}\).*/\1/p')
+  rule=$(printf '%s' "$block" | sed -n 's/.*"killswitch":{"tripped":true,"rule":"\([^"]*\)".*/\1/p')
+  class=$(printf '%s' "$block" | sed -n 's/.*"class":"\([^"]*\)","tier":"\([^"]*\)".*/\1/p')
+  tier=$(printf '%s' "$block" | sed -n 's/.*"class":"[^"]*","tier":"\([^"]*\)".*/\1/p')
+  local ks_line first_ts last_ts
+  ks_line=$(grep '"logSha256"' "$payload" | tail -n 1 || true)
+  mode=$(printf '%s\n' "$ks_line" | sed -n 's/.*"mode":"\([^"]*\)".*/\1/p' || true)
+  pressure=$(printf '%s\n' "$ks_line" | sed -n 's/.*"pressure":\([0-9]*\).*/\1/p' || true)
+  threshold=$(printf '%s\n' "$ks_line" | sed -n 's/.*"threshold":\([0-9]*\).*/\1/p' || true)
+  # null-safe scalars: the guest emits pressure/threshold null for immediate trips.
+  pressure=${pressure:-null}
+  threshold=${threshold:-null}
+  first_ts=$(grep -o '"ts":"[^"]*"' "$payload" | head -n 1 | cut -d'"' -f4 || true)
+  last_ts=$(grep -o '"ts":"[^"]*"' "$payload" | tail -n 1 | cut -d'"' -f4 || true)
+  local last_events
+  last_events=$(awk '/"action":"deny"/ { lines[n++] = $0 } END { for (i = (n > 5 ? n - 5 : 0); i < n; i++) { if (i > (n > 5 ? n - 5 : 0)) printf ","; printf "%s", lines[i] } }' "$payload" || true)
+  printf '{"schema":"agentic-driver.guest-containment.kill-report.v1","session":{"fixtureId":"%s","domain":"%s","remoteHost":"%s"},"generatedAt":"%s","guestSession":{"firstEventAt":"%s","lastEventAt":"%s","events":%s,"denials":%s,"probes":%s,"concealmentIndex":%s,"histogram":%s},"killswitch":{"tripped":true,"rule":"%s","class":"%s","tier":"%s","mode":"%s","pressure":%s,"threshold":%s},"lastEvents":[%s],"teardown":{"domainAbsent":"PENDING","destroyRequested":"PENDING","aclRestored":"PENDING"},"logSha256":"%s"}\n' \
+    "$fid" "$dom" "$host" "$(gc_iso8601)" "$first_ts" "$last_ts" "$events" "$denials" "$probes" "$concealment" "$histogram" \
+    "$rule" "$class" "$tier" "$mode" "$pressure" "$threshold" "$last_events" "$log_sha" >"$report"
+  printf '%s\n' "$report"
 }
 
 # Test hooks: the containment core is callable without booting the guest.
@@ -427,6 +510,7 @@ if [ "${1:-}" = "--gc-fs-detect" ]; then shift; gc_fs_detect "$@"; exit $?; fi
 if [ "${1:-}" = "--gc-fs-sweep" ]; then shift; gc_fs_sweep "$@"; exit $?; fi
 if [ "${1:-}" = "--gc-net-detect" ]; then shift; gc_net_detect "$@"; exit $?; fi
 if [ "${1:-}" = "--gc-proc-detect" ]; then shift; gc_proc_detect "$@"; exit $?; fi
+if [ "${1:-}" = "--gc-proc-sweep" ]; then shift; gc_proc_watch_sweep "$@"; exit $?; fi
 if [ "${1:-}" = "--gc-liveness" ]; then shift; gc_liveness "$@"; exit $?; fi
 if [ "${1:-}" = "--gc-core-embed" ]; then
   shift
@@ -559,6 +643,12 @@ gc_window_pressure() { # pressure_file
 # stdout; a trip also appends the terminal killswitch event to the log.
 gc_decide() { # state_dir rule_id [subject_value]
   local state_dir=$1 rule_id=$2 svalue=${3:-}
+  # Log freeze gates the decision path too: after a trip the session is dead;
+  # further events must not append, re-trip, or grow pressure counters.
+  if [ -f "$state_dir/kill" ]; then
+    printf '{"rule":"%s","frozen":true,"tripped":true,"mode":"post-trip"}\n' "$rule_id"
+    return 0
+  fi
   mkdir -p "$state_dir" || return 2
   local tax="$state_dir/taxonomy.json"
   if [ ! -f "$tax" ]; then gc_embedded_taxonomy >"$tax" || return 2; fi
@@ -693,24 +783,39 @@ gc_fs_detect() { # state_dir path -> decision JSON
       printf '{"decision":"allow","path":"%s"}\n' "$path" ;;
     /gc|/gc/*)
       # GC-PROBE-001: introspection of the monitor tree itself (section 9.1).
-      gc_decide "$state_dir" GC-PROBE-001 "$path" >/dev/null || return 2
-      printf '{"decision":"deny","rule":"GC-PROBE-001","path":"%s"}\n' "$path" ;;
+      decision=$(gc_decide "$state_dir" GC-PROBE-001 "$path") || return 2
+      case "$decision" in
+        *'"frozen":true'*) printf '%s\n' "$decision" ;;
+        *) printf '{"decision":"deny","rule":"GC-PROBE-001","path":"%s"}\n' "$path" ;;
+      esac ;;
     /shims|/shims/*|/agent|/agent/*)
-      gc_decide "$state_dir" GC-FSW-002 "$path" >/dev/null || return 2
-      printf '{"decision":"deny","rule":"GC-FSW-002","path":"%s"}\n' "$path" ;;
+      decision=$(gc_decide "$state_dir" GC-FSW-002 "$path") || return 2
+      case "$decision" in
+        *'"frozen":true'*) printf '%s\n' "$decision" ;;
+        *) printf '{"decision":"deny","rule":"GC-FSW-002","path":"%s"}\n' "$path" ;;
+      esac ;;
     */package.json|*/package-lock.json|*/pyproject.toml|*/requirements*.txt|/package.json|/pyproject.toml)
-      gc_decide "$state_dir" GC-PKG-003 "$path" >/dev/null || return 2
-      printf '{"decision":"deny","rule":"GC-PKG-003","path":"%s"}\n' "$path" ;;
+      decision=$(gc_decide "$state_dir" GC-PKG-003 "$path") || return 2
+      case "$decision" in
+        *'"frozen":true'*) printf '%s\n' "$decision" ;;
+        *) printf '{"decision":"deny","rule":"GC-PKG-003","path":"%s"}\n' "$path" ;;
+      esac ;;
     /dev/*|/dev)
       # Write targets on devtmpfs could inject marker text (GC-TOOL-002).
-      gc_decide "$state_dir" GC-TOOL-002 "$path" >/dev/null || return 2
-      printf '{"decision":"deny","rule":"GC-TOOL-002","path":"%s"}\n' "$path" ;;
+      decision=$(gc_decide "$state_dir" GC-TOOL-002 "$path") || return 2
+      case "$decision" in
+        *'"frozen":true'*) printf '%s\n' "$decision" ;;
+        *) printf '{"decision":"deny","rule":"GC-TOOL-002","path":"%s"}\n' "$path" ;;
+      esac ;;
     *"containment.log"*|*/.gc/*)
       gc_decide "$state_dir" GC-LOG-002 "$path" >/dev/null || return 2
       printf '{"decision":"deny","rule":"GC-LOG-002","path":"%s"}\n' "$path" ;;
     *)
-      gc_decide "$state_dir" GC-FSW-001 "$path" >/dev/null || return 2
-      printf '{"decision":"deny","rule":"GC-FSW-001","path":"%s"}\n' "$path" ;;
+      decision=$(gc_decide "$state_dir" GC-FSW-001 "$path") || return 2
+      case "$decision" in
+        *'"frozen":true'*) printf '%s\n' "$decision" ;;
+        *) printf '{"decision":"deny","rule":"GC-FSW-001","path":"%s"}\n' "$path" ;;
+      esac ;;
   esac
 }
 
@@ -725,8 +830,28 @@ gc_fs_sweep() { # state_dir path...
 gc_net_detect() { # state_dir socket_entry
   local state_dir=$1 entry=$2
   [ -n "$entry" ] || return 0
-  gc_decide "$state_dir" GC-NET-001 "$entry" >/dev/null || return 2
-  printf '{"decision":"deny","rule":"GC-NET-001"}\n'
+  decision=$(gc_decide "$state_dir" GC-NET-001 "$entry") || return 2
+  case "$decision" in
+    *'"frozen":true'*) printf '%s\n' "$decision" ;;
+    *) printf '{"decision":"deny","rule":"GC-NET-001"}\n' ;;
+  esac
+}
+
+# Proc-watcher sweep: enumerate userspace processes only. Kernel threads
+# (kthreadd, kworker/*) have an empty /proc/PID/cmdline and are children of
+# kthreadd (ppid 2); flagging them produced 117+ false unknown-class events on
+# the first live proof and tripped the ANOMALY threshold before the job ran
+# (fixture microvm-ab06221027d3e36afc843b91). base_dir defaults to /proc and
+# is a parameter so tests can exercise the filter against a simulated tree.
+gc_proc_watch_sweep() { # [base_dir] -> "comm" lines of userspace processes
+  local base=${1:-/proc} p comm
+  for p in "$base"/[0-9]*; do
+    [ -d "$p" ] || continue
+    [ -s "$p/cmdline" ] || continue   # kernel threads: empty cmdline
+    [ "$(awk '{print $4}' "$p/stat" 2>/dev/null)" = "2" ] && continue
+    comm=$(cat "$p/comm" 2>/dev/null) || continue
+    [ -n "$comm" ] && printf '%s\n' "$comm"
+  done
 }
 
 # proc-watcher detection: a process outside the job tree is an anomaly.
@@ -774,8 +899,8 @@ gc_session_end() { # state_dir
 # envelope from the console transcript, decode it pty-safe, recompute the log
 # digest per the stated normalization, and cross-check the terminal killswitch
 # event's embedded digest against the full payload.
-gc_containment_evidence() { # transcript fixture_id -> containment block JSON on stdout
-  local transcript=$1 fid=$2
+gc_containment_evidence() { # transcript fixture_id [kill_report_path] -> containment block JSON on stdout
+  local transcript=$1 fid=$2 report_path=${3:-}
   local begin="AGENTIC_CONTAINMENT_BEGIN:$fid" end="AGENTIC_CONTAINMENT_END:$fid"
   local b64 tmp log_sha events denials ks_line ks_rule tripped rule_json
   tmp="$transcript.containment.$$"
@@ -847,9 +972,51 @@ gc_containment_evidence() { # transcript fixture_id -> containment block JSON on
     else if (c == "unknown" && a == "deny") { idx += 2 }
     else if (c == "containment-integrity") { idx += 3 }
   } END { printf "probes=%d; concealment_index=%d;", probes + 0, idx + 0 }' "$tmp")"
+  if [ "$tripped" = true ] && [ -n "$report_path" ]; then
+    cp "$tmp" "$transcript.containment.payload" 2>/dev/null || true
+    report_json=",\"killReportPath\":\"$report_path\""
+  else
+    report_json=""
+  fi
   rm -f "$tmp" "$tmp.b64" "$tmp.head"
-  printf '{"schema":"%s","taxonomySha256":"%s","logSha256":"%s","events":%s,"denials":%s,"probes":%s,"concealmentIndex":%s,"histogram":%s,"killswitch":{"tripped":%s,"rule":%s,"class":%s,"tier":%s,"guestPoweroff":true,"final":true}}' \
-    "$GC_LOG_SCHEMA" "$GC_TAXONOMY_SHA256" "$log_sha" "$events" "$denials" "$probes" "$concealment_index" "$histogram" "$tripped" "$rule_json" "$class_json" "$tier_json"
+  printf '{"schema":"%s","taxonomySha256":"%s","logSha256":"%s","events":%s,"denials":%s,"probes":%s,"concealmentIndex":%s,"histogram":%s,"killswitch":{"tripped":%s,"rule":%s,"class":%s,"tier":%s,"guestPoweroff":true,"final":true}%s}' \
+    "$GC_LOG_SCHEMA" "$GC_TAXONOMY_SHA256" "$log_sha" "$events" "$denials" "$probes" "$concealment_index" "$histogram" "$tripped" "$rule_json" "$class_json" "$tier_json" "$report_json"
+}
+
+# Durable kill report (design section 5; Defect 2): when the killswitch trips,
+# the fixture writes kill-report.json next to console.typescript with session
+# identity, decoded aggregates, the trigger, the last redacted events before
+# the kill, and teardown proof status (finalized after the teardown proofs).
+gc_write_kill_report() { # fixture_root fixture_id domain remote_host block_json
+  local fixture_root=$1 fid=$2 dom=$3 host=$4 block=$5
+  local payload="$fixture_root/console.typescript.containment.payload"
+  local report="$fixture_root/kill-report.json"
+  local log_sha events denials probes concealment histogram rule class tier mode pressure threshold
+  log_sha=$(printf '%s' "$block" | sed -n 's/.*"logSha256":"\([0-9a-f]*\)".*/\1/p')
+  events=$(printf '%s' "$block" | sed -n 's/.*"events":\([0-9]*\).*/\1/p')
+  denials=$(printf '%s' "$block" | sed -n 's/.*"denials":\([0-9]*\).*/\1/p')
+  probes=$(printf '%s' "$block" | sed -n 's/.*"probes":\([0-9]*\).*/\1/p')
+  concealment=$(printf '%s' "$block" | sed -n 's/.*"concealmentIndex":\([0-9]*\).*/\1/p')
+  histogram=$(printf '%s' "$block" | sed -n 's/.*"histogram":\({[^}]*}\).*/\1/p')
+  rule=$(printf '%s' "$block" | sed -n 's/.*"killswitch":{"tripped":true,"rule":"\([^"]*\)".*/\1/p')
+  class=$(printf '%s' "$block" | sed -n 's/.*"class":"\([^"]*\)","tier":"\([^"]*\)".*/\1/p')
+  tier=$(printf '%s' "$block" | sed -n 's/.*"class":"[^"]*","tier":"\([^"]*\)".*/\1/p')
+  local ks_line first_ts last_ts
+  ks_line=$(grep '"logSha256"' "$payload" | tail -n 1 || true)
+  mode=$(printf '%s\n' "$ks_line" | sed -n 's/.*"mode":"\([^"]*\)".*/\1/p' || true)
+  pressure=$(printf '%s\n' "$ks_line" | sed -n 's/.*"pressure":\([0-9]*\).*/\1/p' || true)
+  threshold=$(printf '%s\n' "$ks_line" | sed -n 's/.*"threshold":\([0-9]*\).*/\1/p' || true)
+  # null-safe scalars: the guest emits pressure/threshold null for immediate trips.
+  pressure=${pressure:-null}
+  threshold=${threshold:-null}
+  first_ts=$(grep -o '"ts":"[^"]*"' "$payload" | head -n 1 | cut -d'"' -f4 || true)
+  last_ts=$(grep -o '"ts":"[^"]*"' "$payload" | tail -n 1 | cut -d'"' -f4 || true)
+  local last_events
+  last_events=$(awk '/"action":"deny"/ { lines[n++] = $0 } END { for (i = (n > 5 ? n - 5 : 0); i < n; i++) { if (i > (n > 5 ? n - 5 : 0)) printf ","; printf "%s", lines[i] } }' "$payload" || true)
+  printf '{"schema":"agentic-driver.guest-containment.kill-report.v1","session":{"fixtureId":"%s","domain":"%s","remoteHost":"%s"},"generatedAt":"%s","guestSession":{"firstEventAt":"%s","lastEventAt":"%s","events":%s,"denials":%s,"probes":%s,"concealmentIndex":%s,"histogram":%s},"killswitch":{"tripped":true,"rule":"%s","class":"%s","tier":"%s","mode":"%s","pressure":%s,"threshold":%s},"lastEvents":[%s],"teardown":{"domainAbsent":"PENDING","destroyRequested":"PENDING","aclRestored":"PENDING"},"logSha256":"%s"}\n' \
+    "$fid" "$dom" "$host" "$(gc_iso8601)" "$first_ts" "$last_ts" "$events" "$denials" "$probes" "$concealment" "$histogram" \
+    "$rule" "$class" "$tier" "$mode" "$pressure" "$threshold" "$last_events" "$log_sha" >"$report"
+  printf '%s\n' "$report"
 }
 
 GC_CORE_EOF
@@ -862,6 +1029,19 @@ if [ "${1:-}" = "--gc-receipt-print" ]; then
   receipt_segment=""
   if [ "${9:-}" != "-" ]; then receipt_segment="$9"; fi
   gc_receipt_json "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$receipt_segment" "${10}" "${11}" "${12}" "${13}" "${14}" "${15}" "${16}"
+  exit 0
+fi
+if [ "${1:-}" = "--gc-kill-report" ]; then
+  shift
+  # Hook: reads the saved payload next to the transcript and the extracted
+  # block as an argv argument (bounded; never stdin — node execFile+input
+  # stalls against this hook in test harnesses). Length guarded below.
+  block=${5:-}
+  if [ "${#block}" -gt 65536 ]; then
+    printf 'microvm failure phase=evidence code=containment-evidence-missing\n' >&2
+    exit 2
+  fi
+  gc_write_kill_report "$1" "$2" "$3" "$4" "$block"
   exit 0
 fi
 if [ "${1:-}" = "--gc-envelope-extract" ]; then
@@ -1312,6 +1492,12 @@ gc_window_pressure() { # pressure_file
 # stdout; a trip also appends the terminal killswitch event to the log.
 gc_decide() { # state_dir rule_id [subject_value]
   local state_dir=$1 rule_id=$2 svalue=${3:-}
+  # Log freeze gates the decision path too: after a trip the session is dead;
+  # further events must not append, re-trip, or grow pressure counters.
+  if [ -f "$state_dir/kill" ]; then
+    printf '{"rule":"%s","frozen":true,"tripped":true,"mode":"post-trip"}\n' "$rule_id"
+    return 0
+  fi
   mkdir -p "$state_dir" || return 2
   local tax="$state_dir/taxonomy.json"
   if [ ! -f "$tax" ]; then gc_embedded_taxonomy >"$tax" || return 2; fi
@@ -1446,24 +1632,39 @@ gc_fs_detect() { # state_dir path -> decision JSON
       printf '{"decision":"allow","path":"%s"}\n' "$path" ;;
     /gc|/gc/*)
       # GC-PROBE-001: introspection of the monitor tree itself (section 9.1).
-      gc_decide "$state_dir" GC-PROBE-001 "$path" >/dev/null || return 2
-      printf '{"decision":"deny","rule":"GC-PROBE-001","path":"%s"}\n' "$path" ;;
+      decision=$(gc_decide "$state_dir" GC-PROBE-001 "$path") || return 2
+      case "$decision" in
+        *'"frozen":true'*) printf '%s\n' "$decision" ;;
+        *) printf '{"decision":"deny","rule":"GC-PROBE-001","path":"%s"}\n' "$path" ;;
+      esac ;;
     /shims|/shims/*|/agent|/agent/*)
-      gc_decide "$state_dir" GC-FSW-002 "$path" >/dev/null || return 2
-      printf '{"decision":"deny","rule":"GC-FSW-002","path":"%s"}\n' "$path" ;;
+      decision=$(gc_decide "$state_dir" GC-FSW-002 "$path") || return 2
+      case "$decision" in
+        *'"frozen":true'*) printf '%s\n' "$decision" ;;
+        *) printf '{"decision":"deny","rule":"GC-FSW-002","path":"%s"}\n' "$path" ;;
+      esac ;;
     */package.json|*/package-lock.json|*/pyproject.toml|*/requirements*.txt|/package.json|/pyproject.toml)
-      gc_decide "$state_dir" GC-PKG-003 "$path" >/dev/null || return 2
-      printf '{"decision":"deny","rule":"GC-PKG-003","path":"%s"}\n' "$path" ;;
+      decision=$(gc_decide "$state_dir" GC-PKG-003 "$path") || return 2
+      case "$decision" in
+        *'"frozen":true'*) printf '%s\n' "$decision" ;;
+        *) printf '{"decision":"deny","rule":"GC-PKG-003","path":"%s"}\n' "$path" ;;
+      esac ;;
     /dev/*|/dev)
       # Write targets on devtmpfs could inject marker text (GC-TOOL-002).
-      gc_decide "$state_dir" GC-TOOL-002 "$path" >/dev/null || return 2
-      printf '{"decision":"deny","rule":"GC-TOOL-002","path":"%s"}\n' "$path" ;;
+      decision=$(gc_decide "$state_dir" GC-TOOL-002 "$path") || return 2
+      case "$decision" in
+        *'"frozen":true'*) printf '%s\n' "$decision" ;;
+        *) printf '{"decision":"deny","rule":"GC-TOOL-002","path":"%s"}\n' "$path" ;;
+      esac ;;
     *"containment.log"*|*/.gc/*)
       gc_decide "$state_dir" GC-LOG-002 "$path" >/dev/null || return 2
       printf '{"decision":"deny","rule":"GC-LOG-002","path":"%s"}\n' "$path" ;;
     *)
-      gc_decide "$state_dir" GC-FSW-001 "$path" >/dev/null || return 2
-      printf '{"decision":"deny","rule":"GC-FSW-001","path":"%s"}\n' "$path" ;;
+      decision=$(gc_decide "$state_dir" GC-FSW-001 "$path") || return 2
+      case "$decision" in
+        *'"frozen":true'*) printf '%s\n' "$decision" ;;
+        *) printf '{"decision":"deny","rule":"GC-FSW-001","path":"%s"}\n' "$path" ;;
+      esac ;;
   esac
 }
 
@@ -1478,8 +1679,28 @@ gc_fs_sweep() { # state_dir path...
 gc_net_detect() { # state_dir socket_entry
   local state_dir=$1 entry=$2
   [ -n "$entry" ] || return 0
-  gc_decide "$state_dir" GC-NET-001 "$entry" >/dev/null || return 2
-  printf '{"decision":"deny","rule":"GC-NET-001"}\n'
+  decision=$(gc_decide "$state_dir" GC-NET-001 "$entry") || return 2
+  case "$decision" in
+    *'"frozen":true'*) printf '%s\n' "$decision" ;;
+    *) printf '{"decision":"deny","rule":"GC-NET-001"}\n' ;;
+  esac
+}
+
+# Proc-watcher sweep: enumerate userspace processes only. Kernel threads
+# (kthreadd, kworker/*) have an empty /proc/PID/cmdline and are children of
+# kthreadd (ppid 2); flagging them produced 117+ false unknown-class events on
+# the first live proof and tripped the ANOMALY threshold before the job ran
+# (fixture microvm-ab06221027d3e36afc843b91). base_dir defaults to /proc and
+# is a parameter so tests can exercise the filter against a simulated tree.
+gc_proc_watch_sweep() { # [base_dir] -> "comm" lines of userspace processes
+  local base=${1:-/proc} p comm
+  for p in "$base"/[0-9]*; do
+    [ -d "$p" ] || continue
+    [ -s "$p/cmdline" ] || continue   # kernel threads: empty cmdline
+    [ "$(awk '{print $4}' "$p/stat" 2>/dev/null)" = "2" ] && continue
+    comm=$(cat "$p/comm" 2>/dev/null) || continue
+    [ -n "$comm" ] && printf '%s\n' "$comm"
+  done
 }
 
 # proc-watcher detection: a process outside the job tree is an anomaly.
@@ -1527,8 +1748,8 @@ gc_session_end() { # state_dir
 # envelope from the console transcript, decode it pty-safe, recompute the log
 # digest per the stated normalization, and cross-check the terminal killswitch
 # event's embedded digest against the full payload.
-gc_containment_evidence() { # transcript fixture_id -> containment block JSON on stdout
-  local transcript=$1 fid=$2
+gc_containment_evidence() { # transcript fixture_id [kill_report_path] -> containment block JSON on stdout
+  local transcript=$1 fid=$2 report_path=${3:-}
   local begin="AGENTIC_CONTAINMENT_BEGIN:$fid" end="AGENTIC_CONTAINMENT_END:$fid"
   local b64 tmp log_sha events denials ks_line ks_rule tripped rule_json
   tmp="$transcript.containment.$$"
@@ -1600,9 +1821,51 @@ gc_containment_evidence() { # transcript fixture_id -> containment block JSON on
     else if (c == "unknown" && a == "deny") { idx += 2 }
     else if (c == "containment-integrity") { idx += 3 }
   } END { printf "probes=%d; concealment_index=%d;", probes + 0, idx + 0 }' "$tmp")"
+  if [ "$tripped" = true ] && [ -n "$report_path" ]; then
+    cp "$tmp" "$transcript.containment.payload" 2>/dev/null || true
+    report_json=",\"killReportPath\":\"$report_path\""
+  else
+    report_json=""
+  fi
   rm -f "$tmp" "$tmp.b64" "$tmp.head"
-  printf '{"schema":"%s","taxonomySha256":"%s","logSha256":"%s","events":%s,"denials":%s,"probes":%s,"concealmentIndex":%s,"histogram":%s,"killswitch":{"tripped":%s,"rule":%s,"class":%s,"tier":%s,"guestPoweroff":true,"final":true}}' \
-    "$GC_LOG_SCHEMA" "$GC_TAXONOMY_SHA256" "$log_sha" "$events" "$denials" "$probes" "$concealment_index" "$histogram" "$tripped" "$rule_json" "$class_json" "$tier_json"
+  printf '{"schema":"%s","taxonomySha256":"%s","logSha256":"%s","events":%s,"denials":%s,"probes":%s,"concealmentIndex":%s,"histogram":%s,"killswitch":{"tripped":%s,"rule":%s,"class":%s,"tier":%s,"guestPoweroff":true,"final":true}%s}' \
+    "$GC_LOG_SCHEMA" "$GC_TAXONOMY_SHA256" "$log_sha" "$events" "$denials" "$probes" "$concealment_index" "$histogram" "$tripped" "$rule_json" "$class_json" "$tier_json" "$report_json"
+}
+
+# Durable kill report (design section 5; Defect 2): when the killswitch trips,
+# the fixture writes kill-report.json next to console.typescript with session
+# identity, decoded aggregates, the trigger, the last redacted events before
+# the kill, and teardown proof status (finalized after the teardown proofs).
+gc_write_kill_report() { # fixture_root fixture_id domain remote_host block_json
+  local fixture_root=$1 fid=$2 dom=$3 host=$4 block=$5
+  local payload="$fixture_root/console.typescript.containment.payload"
+  local report="$fixture_root/kill-report.json"
+  local log_sha events denials probes concealment histogram rule class tier mode pressure threshold
+  log_sha=$(printf '%s' "$block" | sed -n 's/.*"logSha256":"\([0-9a-f]*\)".*/\1/p')
+  events=$(printf '%s' "$block" | sed -n 's/.*"events":\([0-9]*\).*/\1/p')
+  denials=$(printf '%s' "$block" | sed -n 's/.*"denials":\([0-9]*\).*/\1/p')
+  probes=$(printf '%s' "$block" | sed -n 's/.*"probes":\([0-9]*\).*/\1/p')
+  concealment=$(printf '%s' "$block" | sed -n 's/.*"concealmentIndex":\([0-9]*\).*/\1/p')
+  histogram=$(printf '%s' "$block" | sed -n 's/.*"histogram":\({[^}]*}\).*/\1/p')
+  rule=$(printf '%s' "$block" | sed -n 's/.*"killswitch":{"tripped":true,"rule":"\([^"]*\)".*/\1/p')
+  class=$(printf '%s' "$block" | sed -n 's/.*"class":"\([^"]*\)","tier":"\([^"]*\)".*/\1/p')
+  tier=$(printf '%s' "$block" | sed -n 's/.*"class":"[^"]*","tier":"\([^"]*\)".*/\1/p')
+  local ks_line first_ts last_ts
+  ks_line=$(grep '"logSha256"' "$payload" | tail -n 1 || true)
+  mode=$(printf '%s\n' "$ks_line" | sed -n 's/.*"mode":"\([^"]*\)".*/\1/p' || true)
+  pressure=$(printf '%s\n' "$ks_line" | sed -n 's/.*"pressure":\([0-9]*\).*/\1/p' || true)
+  threshold=$(printf '%s\n' "$ks_line" | sed -n 's/.*"threshold":\([0-9]*\).*/\1/p' || true)
+  # null-safe scalars: the guest emits pressure/threshold null for immediate trips.
+  pressure=${pressure:-null}
+  threshold=${threshold:-null}
+  first_ts=$(grep -o '"ts":"[^"]*"' "$payload" | head -n 1 | cut -d'"' -f4 || true)
+  last_ts=$(grep -o '"ts":"[^"]*"' "$payload" | tail -n 1 | cut -d'"' -f4 || true)
+  local last_events
+  last_events=$(awk '/"action":"deny"/ { lines[n++] = $0 } END { for (i = (n > 5 ? n - 5 : 0); i < n; i++) { if (i > (n > 5 ? n - 5 : 0)) printf ","; printf "%s", lines[i] } }' "$payload" || true)
+  printf '{"schema":"agentic-driver.guest-containment.kill-report.v1","session":{"fixtureId":"%s","domain":"%s","remoteHost":"%s"},"generatedAt":"%s","guestSession":{"firstEventAt":"%s","lastEventAt":"%s","events":%s,"denials":%s,"probes":%s,"concealmentIndex":%s,"histogram":%s},"killswitch":{"tripped":true,"rule":"%s","class":"%s","tier":"%s","mode":"%s","pressure":%s,"threshold":%s},"lastEvents":[%s],"teardown":{"domainAbsent":"PENDING","destroyRequested":"PENDING","aclRestored":"PENDING"},"logSha256":"%s"}\n' \
+    "$fid" "$dom" "$host" "$(gc_iso8601)" "$first_ts" "$last_ts" "$events" "$denials" "$probes" "$concealment" "$histogram" \
+    "$rule" "$class" "$tier" "$mode" "$pressure" "$threshold" "$last_events" "$log_sha" >"$report"
+  printf '%s\n' "$report"
 }
 
 GC_CORE_EOF
@@ -1724,10 +1987,11 @@ net_pid=\$!
 fs_pid=\$!
 (
   while :; do
-    ps -eo comm 2>/dev/null | tail -n +2 | while IFS= read -r c; do
+    gc_proc_watch_sweep /proc | while IFS= read -r c; do
       case "\$c" in busybox|sh|init|inotifyd|poweroff|sync|comm) continue ;; esac
       grep -F -x -- "\$c" "\$session/allowlist" >/dev/null 2>&1 || gc_proc_detect "\$session" "\$c" >/dev/null 2>&1
     done
+    [ -f "\$session/kill" ] && break
     sleep 1
   done
 ) &
@@ -1885,7 +2149,7 @@ containment_segment=""
 receipt_schema="agentic-driver.linux-microvm-cutover.v1"
 if [ -n "$containment_payload" ]; then
   receipt_schema="agentic-driver.linux-microvm-cutover.v2"
-  if ! containment_block=$(gc_containment_evidence "$fixture_root/console.typescript" "$fixture_id"); then
+  if ! containment_block=$(gc_containment_evidence "$fixture_root/console.typescript" "$fixture_id" "$fixture_root/kill-report.json"); then
     fixture_fail 10 'containment evidence missing or invalid in bounded console recording'
   fi
   containment_segment=",\"containment\":$containment_block"
@@ -1920,6 +2184,14 @@ if ! remote_host=$(hostname); then fixture_fail 12 'remote host identity could n
 case "$remote_host" in
   ""|*[!A-Za-z0-9._-]*) fixture_fail 12 'remote host identity is unsafe' ;;
 esac
+
+# Defect 2: finalize the durable kill report with teardown proof status.
+if grep -q '"tripped":true' <<<"$containment_block" 2>/dev/null && [ -f "$fixture_root/kill-report.json" ]; then
+  sed -i.bak 's/"domainAbsent":"PENDING"/"domainAbsent":'"$([ "$domain_absent" = true ] && echo true || echo false)"'/' "$fixture_root/kill-report.json"
+  sed -i.bak 's/"destroyRequested":"PENDING"/"destroyRequested":'"$([ "$domain_destroy_requested" = true ] && echo true || echo false)"'/' "$fixture_root/kill-report.json"
+  sed -i.bak 's/"aclRestored":"PENDING"/"aclRestored":'"$([ "$acl_restored" = true ] && echo true || echo false)"'/' "$fixture_root/kill-report.json"
+  rm -f "$fixture_root/kill-report.json.bak"
+fi
 
 trap - EXIT INT TERM HUP
 gc_receipt_json "$receipt_schema" "$remote_host" "$fixture_id" "$domain" "$marker" "$marker_sha" "$script_hash" "$initramfs_sha" "$containment_segment" "$domain" "$domain_destroy_requested" "$domain_absent" "$home_acl_before_sha" "$home_acl_after_sha" "$filesystem_context_sha" "$network_context_sha"
