@@ -37,10 +37,6 @@ proofs for agentic workflows.
   <img src="assets/agentic-driver-sage.gif" alt="Sage Agentic Driver control vault" width="768">
 </p>
 
-<p align="center">
-  <img src="assets/showcase-agentic-driver.gif" alt="Animated Agentic Driver control vault" width="300" height="300">
-</p>
-
 ## Shipped features
 
 | Tool | What it does | Status |
