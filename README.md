@@ -33,6 +33,10 @@ Extensions for [Pi](https://github.com/earendil-works/pi-coding-agent):
 advisory code review, bounded role communication, and governed isolation
 proofs for agentic workflows.
 
+<p align="center">
+  <img src="assets/agentic-driver-full-color.gif" alt="Full-color Agentic Driver control vault" width="768">
+</p>
+
 ## Shipped features
 
 | Tool | What it does | Status |
