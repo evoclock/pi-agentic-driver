@@ -9,7 +9,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -21,6 +21,7 @@ const TAXONOMY_FILE = join(ROOT, "scripts/enforcement/guest_containment_taxonomy
 // Pinned digest of the shipped taxonomy (design section 2: pinned per
 // repository revision; the fixture embeds and verifies the same digest).
 const TAXONOMY_SHA256 = "1b2c9cd424f682d800f8049423a5626a697be1b6f759b2a1d6bb07461978969a";
+const INITRAMFS = "a".repeat(64);
 
 function runFixture(args, env = {}) {
   return new Promise((resolve, reject) => {
@@ -333,4 +334,228 @@ test("guest payload: init embeds the core verbatim, shims dispatch, proof mode u
   // inotifyd upgrade is optional; the sweep fallback is unconditional in the fs loop branch.
   assert.match(fixtureSource, /have_inotifyd=true/);
   assert.ok(fixtureSource.includes('find / -newer'));
+});
+
+// --- Step 3: containment envelope + host receipt v2 ---
+
+import {
+  LINUX_MICROVM_CUTOVER_SCHEMA,
+  LINUX_MICROVM_CUTOVER_SCHEMA_V2,
+  parseReceipt,
+  validateLinuxMicroVMReceipt,
+} from "../scripts/enforcement/linux_microvm_cutover_pi.js";
+
+function compact(value) {
+  return JSON.stringify(value);
+}
+
+function stubFactsShape(fixtureId, host = "test-microvm-host") {
+  return {
+    host, arch: "x86_64", kernel: "6.8.0-generic",
+    libvirt: "qemu:///system",
+    qemu: "QEMU emulator version 10.2.1",
+    qemuBinaryPath: "/usr/bin/qemu-system-x86_64",
+    kvmAccessible: true,
+    fixtureDomain: `agentic-driver-${fixtureId}`, fixtureDomainState: "absent",
+  };
+}
+
+function stubV1Receipt(fixtureId, scriptHash, host = "test-microvm-host") {
+  const domain = `agentic-driver-${fixtureId}`;
+  const marker = `AGENTIC_MICROVM_PROBE:${fixtureId}`;
+  const digest = (value) => createHash("sha256").update(value).digest("hex");
+  return {
+    schema: LINUX_MICROVM_CUTOVER_SCHEMA, ok: true, status: "VERIFIED",
+    authorityCreated: false, runtimeActivated: false, persisted: false,
+    identity: { remoteHost: host, fixtureId, domain },
+    marker: { value: marker, sha256: digest(marker) },
+    scriptHash, initramfsSha256: INITRAMFS,
+    teardown: {
+      domain: { name: domain, transient: true, destroyOnExit: true, destroyRequested: true, absent: true, checked: true, check: "virsh dominfo/list" },
+      acl: { beforeSha256: "b".repeat(64), afterSha256: "b".repeat(64), equal: true, checked: true, initramfsEntryRemoved: true },
+    },
+    context: {
+      filesystem: { summary: "disk=absent host-share=absent credentials=absent gpu=absent", disk: false, hostShare: false, credentials: false, gpu: false, sha256: digest(JSON.stringify({ disk: false, hostShare: false, credentials: false, gpu: false, initramfsSha256: INITRAMFS })) },
+      network: { summary: "network=absent", guest: false, sha256: digest(JSON.stringify({ network: false })) },
+      guestMounts: ["proc", "sysfs", "devtmpfs"],
+    },
+  };
+}
+
+function containmentBlock(logSha, { tripped = true, rule = "GC-CRED-001" } = {}) {
+  return {
+    taxonomySha256: TAXONOMY_SHA256,
+    logSha256: logSha,
+    events: 3,
+    denials: 2,
+    killswitch: { tripped, rule: tripped ? rule : null, guestPoweroff: true, final: true },
+  };
+}
+
+function stubV2Receipt(fixtureId, scriptHash, logSha, options = {}) {
+  const receipt = stubV1Receipt(fixtureId, scriptHash);
+  receipt.schema = LINUX_MICROVM_CUTOVER_SCHEMA_V2;
+  receipt.containment = containmentBlock(logSha, options);
+  return receipt;
+}
+
+function envelopeTranscript(fixtureId, payloadLines, { crlf = true, includeEnvelope = true, digestOverride = null } = {}) {
+  const payload = payloadLines.join("\n") + "\n";
+  // Guest semantics (design section 5): the trigger event is appended, the
+  // digest covers the log up to and including it, then the terminal killswitch
+  // line embedding that digest is appended.
+  const event = compact({
+    schema: "agentic-driver.guest-containment.killswitch.v1", session: fixtureId,
+    trigger: { rule: "GC-CRED-001", class: "GC-CRED", tier: "CRITICAL", mode: "immediate", pressure: null, threshold: null },
+    final: true,
+  });
+  const chained = payload + event + "\n";
+  const sha = digestOverride ?? createHash("sha256").update(chained).digest("hex");
+  const killswitch = compact({
+    schema: "agentic-driver.guest-containment.killswitch.v1", session: fixtureId,
+    trigger: { rule: "GC-CRED-001", class: "GC-CRED", tier: "CRITICAL", mode: "immediate", pressure: null, threshold: null },
+    logSha256: sha, final: true,
+  });
+  const full = chained + killswitch + "\n";
+  let body = `noise\r\nAGENTIC_MICROVM_PROBE:${fixtureId}\r\n`;
+  if (includeEnvelope) {
+    const b64 = Buffer.from(full, "utf8").toString("base64").replace(/(.{76})/g, "$1\n");
+    body += `AGENTIC_CONTAINMENT_BEGIN:${fixtureId}\r\n${crlf ? b64.replaceAll("\n", "\r\n") : b64}\r\nAGENTIC_CONTAINMENT_END:${fixtureId}\r\nmore unbound guest output\r\n`;
+  }
+  return { body, expectedLogSha: sha, full };
+}
+
+function envelopePayloadLines(fixtureId) {
+  return [
+    compact({ schema: "agentic-driver.guest-containment.log.v1", session: fixtureId, taxonomy: "guest-containment-taxonomy.v1", taxonomySha256: TAXONOMY_SHA256,
+      event: { ts: "2026-01-01T00:00:00Z", seq: 1, source: "shim", class: "unknown", action: "deny", subject: { type: "exec", value: "npm install [REDACTED]" } } }),
+    compact({ schema: "agentic-driver.guest-containment.log.v1", session: fixtureId, taxonomy: "guest-containment-taxonomy.v1", taxonomySha256: TAXONOMY_SHA256,
+      event: { ts: "2026-01-01T00:00:01Z", seq: 2, source: "shim", class: "GC-CRED", action: "deny", subject: { type: "exec", value: "cat ~/.ssh/id_rsa" } } }),
+  ];
+}
+
+function envelopeExtract(transcript, fixtureId) {
+  return new Promise((resolve) => {
+    const child = spawnSync("bash", [FIXTURE, "--gc-envelope-extract", transcript, fixtureId], { encoding: "utf8" });
+    resolve({ status: child.status, stdout: child.stdout, stderr: child.stderr });
+  });
+}
+
+test("envelope parse recomputes the log digest from a pty-mangled (CRLF) transcript", async () => {
+  const fixtureId = "microvm-" + "a".repeat(24);
+  const { body, expectedLogSha } = envelopeTranscript(fixtureId, envelopePayloadLines(fixtureId));
+  const dir = await tempState();
+  const transcript = join(dir, "console.typescript");
+  await readFile(FIXTURE, "utf8"); // sanity
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(transcript, body);
+  const result = await envelopeExtract(transcript, fixtureId);
+  assert.equal(result.status, 0, result.stderr);
+  const block = JSON.parse(result.stdout);
+  assert.equal(block.taxonomySha256, TAXONOMY_SHA256);
+  assert.equal(block.logSha256, expectedLogSha, "digest recomputed from decoded payload must match the guest log");
+  // Payload records plus the trigger event and the terminal killswitch line.
+  assert.equal(block.events, 4);
+  assert.equal(block.denials, 2);
+  assert.equal(block.killswitch.tripped, true);
+  assert.equal(block.killswitch.rule, "GC-CRED-001");
+  assert.equal(block.killswitch.guestPoweroff, true);
+  assert.equal(block.killswitch.final, true);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test("missing containment evidence fails closed (containment-evidence-missing)", async () => {
+  const fixtureId = "microvm-" + "b".repeat(24);
+  const dir = await tempState();
+  const transcript = join(dir, "console.typescript");
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(transcript, `noise\r\nAGENTIC_MICROVM_PROBE:${fixtureId}\r\nno envelope here\r\n`);
+  const result = await envelopeExtract(transcript, fixtureId);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /containment-evidence-missing/);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test("a clean session without killswitch ends with the session-end terminal event", async () => {
+  const fixtureId = "microvm-" + "c".repeat(24);
+  const lines = envelopePayloadLines(fixtureId);
+  lines.push(compact({ schema: "agentic-driver.guest-containment.log.v1", session: fixtureId, taxonomy: "guest-containment-taxonomy.v1", taxonomySha256: TAXONOMY_SHA256,
+    event: { ts: "2026-01-01T00:00:02Z", seq: 3, source: "supervisor", class: "session-end", action: "complete", summary: true } }));
+  const payload = lines.join("\n") + "\n";
+  const b64 = Buffer.from(payload, "utf8").toString("base64").replace(/(.{76})/g, "$1\n");
+  const dir = await tempState();
+  const transcript = join(dir, "console.typescript");
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(transcript, `AGENTIC_CONTAINMENT_BEGIN:${fixtureId}\r\n${b64.replaceAll("\n", "\r\n")}\r\nAGENTIC_CONTAINMENT_END:${fixtureId}\r\n`);
+  const result = await envelopeExtract(transcript, fixtureId);
+  assert.equal(result.status, 0, result.stderr);
+  const block = JSON.parse(result.stdout);
+  assert.equal(block.killswitch.tripped, false);
+  assert.equal(block.killswitch.rule, null);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test("a tampered killswitch digest chain is rejected", async () => {
+  const fixtureId = "microvm-" + "d".repeat(24);
+  const { body } = envelopeTranscript(fixtureId, envelopePayloadLines(fixtureId), { digestOverride: "0".repeat(64) });
+  const dir = await tempState();
+  const transcript = join(dir, "console.typescript");
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(transcript, body);
+  const result = await envelopeExtract(transcript, fixtureId);
+  assert.notEqual(result.status, 0);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test("v2 receipt with a closed containment block validates; killswitch trip is VERIFIED", () => {
+  const fixtureId = "microvm-" + "e".repeat(24);
+  const scriptHash = "1".repeat(64);
+  const logSha = "2".repeat(64);
+  const receipt = stubV2Receipt(fixtureId, scriptHash, logSha);
+  const validated = validateLinuxMicroVMReceipt(receipt, stubFactsShape(fixtureId), fixtureId, scriptHash, { containment: true });
+  assert.equal(validated.status, "VERIFIED");
+  assert.equal(validated.containment.killswitch.tripped, true);
+});
+
+test("containment run without the v2 receipt is containment-evidence-missing (fail-closed)", () => {
+  const fixtureId = "microvm-" + "f".repeat(24);
+  const scriptHash = "1".repeat(64);
+  assert.throws(
+    () => validateLinuxMicroVMReceipt(stubV1Receipt(fixtureId, scriptHash), stubFactsShape(fixtureId), fixtureId, scriptHash, { containment: true }),
+    (error) => error.reasonCode === "containment-evidence-missing",
+  );
+});
+
+test("v1 receipts without a containment block still validate (backward compat)", () => {
+  const fixtureId = "microvm-" + "0".repeat(24);
+  const scriptHash = "1".repeat(64);
+  const validated = validateLinuxMicroVMReceipt(stubV1Receipt(fixtureId, scriptHash), stubFactsShape(fixtureId), fixtureId, scriptHash);
+  assert.equal(validated.status, "VERIFIED");
+});
+
+test("containment block fields are closed and digest-typed", () => {
+  const fixtureId = "microvm-" + "9".repeat(24);
+  const scriptHash = "1".repeat(64);
+  const bad = stubV2Receipt(fixtureId, scriptHash, "2".repeat(64));
+  bad.containment.logSha256 = "zz";
+  assert.throws(() => validateLinuxMicroVMReceipt(bad, stubFactsShape(fixtureId), fixtureId, scriptHash, { containment: true }));
+  const extra = stubV2Receipt(fixtureId, scriptHash, "2".repeat(64));
+  extra.containment.histogram = { "GC-CRED": 2 };
+  assert.throws(() => validateLinuxMicroVMReceipt(extra, stubFactsShape(fixtureId), fixtureId, scriptHash, { containment: true }));
+  const badTrip = stubV2Receipt(fixtureId, scriptHash, "2".repeat(64));
+  badTrip.containment.killswitch.rule = null;
+  assert.throws(() => validateLinuxMicroVMReceipt(badTrip, stubFactsShape(fixtureId), fixtureId, scriptHash, { containment: true }));
+});
+
+test("receipt-extra-output is relaxed solely for envelope markers on v2 receipts", () => {
+  const fixtureId = "microvm-" + "7".repeat(24);
+  const scriptHash = "1".repeat(64);
+  const v2 = JSON.stringify(stubV2Receipt(fixtureId, scriptHash, "2".repeat(64)));
+  const withEnvelope = `AGENTIC_MICROVM_RECEIPT: ${v2}\nAGENTIC_CONTAINMENT_BEGIN:${fixtureId}\nAGENTIC_CONTAINMENT_END:${fixtureId}\n`;
+  assert.equal(parseReceipt(withEnvelope).schema, LINUX_MICROVM_CUTOVER_SCHEMA_V2);
+  // Other unbound output still fails, even on v2.
+  assert.throws(() => parseReceipt(`AGENTIC_MICROVM_RECEIPT: ${v2}\nrandom guest chatter\n`), (error) => error.reasonCode === "receipt-extra-output");
+  // Envelope markers beside a v1 receipt are still extra output.
+  const v1 = JSON.stringify(stubV1Receipt(fixtureId, scriptHash));
+  assert.throws(() => parseReceipt(`AGENTIC_MICROVM_RECEIPT: ${v1}\nAGENTIC_CONTAINMENT_BEGIN:${fixtureId}\n`), (error) => error.reasonCode === "receipt-extra-output");
 });

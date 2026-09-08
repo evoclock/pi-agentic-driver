@@ -273,6 +273,65 @@ gc_liveness() { # state_dir alive_flags ("1 1 1"; any 0 is a dead loop)
   esac
 }
 
+# Terminal event for a session that ends without a killswitch trip: the
+# envelope then carries only log lines plus this session-end record
+# (design section 5: a session with neither is containment-evidence-missing).
+gc_session_end() { # state_dir
+  local state_dir=$1 log="$state_dir/containment.log.jsonl"
+  local seq=1
+  if [ -f "$state_dir/seq" ]; then seq=$(( $(cat "$state_dir/seq") + 1 )); fi
+  printf '%s\n' "$seq" >"$state_dir/seq"
+  local tsha
+  tsha=$(sha256sum "$state_dir/taxonomy.json" | awk '{print $1}') || return 2
+  printf '{"schema":"%s","session":"%s","taxonomy":"%s","taxonomySha256":"%s","event":{"ts":"%s","seq":%s,"source":"supervisor","class":"session-end","action":"complete","summary":true}}\n' \
+    "$GC_LOG_SCHEMA" "$(basename "$state_dir")" "$GC_TAXONOMY_VERSION" "$tsha" "$(gc_iso8601)" "$seq" >>"$log"
+}
+
+# Host-side containment evidence (design section 5): extract the framed base64
+# envelope from the console transcript, decode it pty-safe, recompute the log
+# digest per the stated normalization, and cross-check the terminal killswitch
+# event's embedded digest against the full payload.
+gc_containment_evidence() { # transcript fixture_id -> containment block JSON on stdout
+  local transcript=$1 fid=$2
+  local begin="AGENTIC_CONTAINMENT_BEGIN:$fid" end="AGENTIC_CONTAINMENT_END:$fid"
+  local b64 tmp log_sha events denials ks_line ks_rule tripped rule_json
+  tmp="$transcript.containment.$$"
+  trap 'rm -f "$tmp" "$tmp.b64" "$tmp.head"' RETURN
+  if ! awk -v b="$begin" -v e="$end" 'index($0, b) == 1 { inside = 1; next } index($0, e) == 1 { inside = 0; next } inside' "$transcript" | tr -d '\r' >"$tmp.b64"; then
+    return 1
+  fi
+  if ! [ -s "$tmp.b64" ]; then return 1; fi
+  if ! { base64 -d <"$tmp.b64" >"$tmp" 2>/dev/null || base64 -D <"$tmp.b64" >"$tmp" 2>/dev/null; }; then return 1; fi
+  if ! grep -q '"schema":"' "$tmp"; then return 1; fi
+  if ! log_sha=$(sha256sum "$tmp" | awk '{print $1}'); then return 1; fi
+  events=$(grep -c '"schema":"' "$tmp")
+  denials=$(grep -c '"action":"deny"' "$tmp")
+  ks_line=$(grep '"final":true' "$tmp" | tail -n 1)
+  if [ -n "$ks_line" ]; then
+    # Digest chain: the terminal killswitch event embeds the digest of the log
+    # up to and including the trigger event but excluding the killswitch line
+    # itself (it is appended after the digest is taken); the host recomputes
+    # that digest from the decoded payload.
+    ks_sha=$(printf '%s\n' "$ks_line" | sed -n 's/.*"logSha256":"\([0-9a-f]*\)".*/\1/p')
+    sed '$d' "$tmp" >"$tmp.head" 2>/dev/null || return 1
+    chained_sha=$(sha256sum "$tmp.head" | awk '{print $1}') || return 1
+    if [ -z "$ks_sha" ] || [ "$ks_sha" != "$chained_sha" ]; then return 2; fi
+    tripped=true
+    log_sha=$ks_sha
+    ks_rule=$(printf '%s\n' "$ks_line" | sed -n 's/.*"trigger":{"rule":"\([A-Za-z0-9_-]*\)".*/\1/p')
+    rule_json="\"$ks_rule\""
+  else
+    # Fail-closed: without a killswitch record the session must end with the
+    # clean session-end terminal event.
+    grep -q '"class":"session-end"' "$tmp" || return 1
+    tripped=false
+    rule_json=null
+  fi
+  rm -f "$tmp" "$tmp.b64" "$tmp.head"
+  printf '{"taxonomySha256":"%s","logSha256":"%s","events":%s,"denials":%s,"killswitch":{"tripped":%s,"rule":%s,"guestPoweroff":true,"final":true}}' \
+    "$GC_TAXONOMY_SHA256" "$log_sha" "$events" "$denials" "$tripped" "$rule_json"
+}
+
 # Test hooks: the containment core is callable without booting the guest.
 if [ "${1:-}" = "--gc-decide" ]; then shift; gc_decide "$@"; exit $?; fi
 if [ "${1:-}" = "--gc-log" ]; then shift; gc_log_event "$@"; exit $?; fi
@@ -282,6 +341,15 @@ if [ "${1:-}" = "--gc-fs-sweep" ]; then shift; gc_fs_sweep "$@"; exit $?; fi
 if [ "${1:-}" = "--gc-net-detect" ]; then shift; gc_net_detect "$@"; exit $?; fi
 if [ "${1:-}" = "--gc-proc-detect" ]; then shift; gc_proc_detect "$@"; exit $?; fi
 if [ "${1:-}" = "--gc-liveness" ]; then shift; gc_liveness "$@"; exit $?; fi
+if [ "${1:-}" = "--gc-envelope-extract" ]; then
+  shift
+  gc_containment_evidence "$@" || {
+    printf 'microvm failure phase=evidence code=containment-evidence-missing\n' >&2
+    exit 1
+  }
+  printf '\n'
+  exit 0
+fi
 if [ "${1:-}" = "--gc-taxonomy-sha" ]; then
   computed=$(gc_embedded_taxonomy | sha256sum | awk '{print $1}')
   if [ "$computed" != "$GC_TAXONOMY_SHA256" ]; then
@@ -299,6 +367,7 @@ if [ "$#" -ne 2 ]; then
 fi
 fixture_id=$1
 script_hash=$2
+containment_payload="${3:-}"
 fixture_fail() {
   local code=$1
   shift
@@ -588,6 +657,7 @@ if [ ! -x /job.sh ]; then
 fi
 # --- containment session (design section 1.3): deny-by-default supervisor ---
 . /gc/core.sh
+session_id=$fixture_id
 session=/tmp/session/.gc
 mkdir -p /tmp/session "\$session" || { sync; /bin/poweroff -f; }
 touch "\$session/baseline"
@@ -646,6 +716,14 @@ done
 # poweroff. on_poweroff=destroy tears the transient domain down host-side.
 kill -TERM -"\$job_pid" 2>/dev/null
 kill -KILL -"\$job_pid" 2>/dev/null
+if [ ! -f "\$session/kill" ]; then gc_session_end "\$session" || :; fi
+# Denial-evidence transport (design section 5): framed base64 envelope on the
+# console channel, UTF-8, LF-only, fixed key order; pty-safe alphabet.
+if [ -f "\$session/containment.log.jsonl" ]; then
+  printf '%s\n' "AGENTIC_CONTAINMENT_BEGIN:\$session_id"
+  /bin/base64 "\$session/containment.log.jsonl"
+  printf '%s\n' "AGENTIC_CONTAINMENT_END:\$session_id"
+fi
 sync
 /bin/poweroff -f
 EOF
@@ -653,6 +731,11 @@ then
   fixture_fail 6 'guest init could not be written'
 fi
 if ! chmod 0755 "$root/init" "$root/gc/dispatch" "$root/gc/fs-handler"; then fixture_fail 6 'guest containment scripts could not be made executable'; fi
+if [ -n "$containment_payload" ]; then
+  if ! test -r "$containment_payload"; then fixture_fail 6 'containment payload could not be read'; fi
+  if ! cp "$containment_payload" "$root/job.sh"; then fixture_fail 6 'containment payload could not be embedded'; fi
+  if ! chmod 0755 "$root/job.sh"; then fixture_fail 6 'containment payload could not be made executable'; fi
+fi
 if ! gc_embedded_taxonomy >"$root/etc/guest-containment-taxonomy.v1.json"; then
   fixture_fail 6 'containment taxonomy could not be embedded in the initramfs'
 fi
@@ -744,6 +827,17 @@ if [ "$marker_seen" != true ]; then
   fixture_fail 10 'guest marker missing from bounded console recording'
 fi
 
+phase=containment
+containment_segment=""
+receipt_schema="agentic-driver.linux-microvm-cutover.v1"
+if [ -n "$containment_payload" ]; then
+  receipt_schema="agentic-driver.linux-microvm-cutover.v2"
+  if ! containment_block=$(gc_containment_evidence "$fixture_root/console.typescript" "$fixture_id"); then
+    fixture_fail 10 'containment evidence missing or invalid in bounded console recording'
+  fi
+  containment_segment=",\"containment\":$containment_block"
+fi
+
 phase=acl
 if ! setfacl -x u:libvirt-qemu "$initramfs"; then fixture_fail 11 'initramfs ACL could not be removed'; fi
 if ! verify_initramfs_acl_removed; then fixture_fail 11 'initramfs ACL removal could not be verified'; fi
@@ -775,7 +869,7 @@ case "$remote_host" in
 esac
 
 trap - EXIT INT TERM HUP
-printf '{"schema":"%s","ok":true,"status":"VERIFIED","authorityCreated":false,"runtimeActivated":false,"persisted":false,"identity":{"remoteHost":"%s","fixtureId":"%s","domain":"%s"},"marker":{"value":"%s","sha256":"%s"},"scriptHash":"%s","initramfsSha256":"%s","teardown":{"domain":{"name":"%s","transient":true,"destroyOnExit":true,"destroyRequested":%s,"absent":%s,"checked":true,"check":"virsh dominfo/list"},"acl":{"beforeSha256":"%s","afterSha256":"%s","equal":true,"checked":true,"initramfsEntryRemoved":true}},"context":{"filesystem":{"summary":"disk=absent host-share=absent credentials=absent gpu=absent","disk":false,"hostShare":false,"credentials":false,"gpu":false,"sha256":"%s"},"network":{"summary":"network=absent","guest":false,"sha256":"%s"},"guestMounts":["proc","sysfs","devtmpfs"]}}\n' \
+printf '{"schema":"%s","ok":true,"status":"VERIFIED","authorityCreated":false,"runtimeActivated":false,"persisted":false,"identity":{"remoteHost":"%s","fixtureId":"%s","domain":"%s"},"marker":{"value":"%s","sha256":"%s"},"scriptHash":"%s","initramfsSha256":"%s""$containment_segment","teardown":{"domain":{"name":"%s","transient":true,"destroyOnExit":true,"destroyRequested":%s,"absent":%s,"checked":true,"check":"virsh dominfo/list"},"acl":{"beforeSha256":"%s","afterSha256":"%s","equal":true,"checked":true,"initramfsEntryRemoved":true}},"context":{"filesystem":{"summary":"disk=absent host-share=absent credentials=absent gpu=absent","disk":false,"hostShare":false,"credentials":false,"gpu":false,"sha256":"%s"},"network":{"summary":"network=absent","guest":false,"sha256":"%s"},"guestMounts":["proc","sysfs","devtmpfs"]}}\n' \
   "$receipt_schema" "$remote_host" "$fixture_id" "$domain" "$marker" "$marker_sha" "$script_hash" "$initramfs_sha" \
   "$domain" "$domain_destroy_requested" "$domain_absent" "$home_acl_before_sha" "$home_acl_after_sha" \
   "$filesystem_context_sha" "$network_context_sha"

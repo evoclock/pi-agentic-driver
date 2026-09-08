@@ -11,6 +11,16 @@ import { isNativeTuiContext } from "./native_tui_context.js";
 
 export const LINUX_MICROVM_CUTOVER_TOOL = "agentic_linux_microvm_cutover";
 export const LINUX_MICROVM_CUTOVER_SCHEMA = "agentic-driver.linux-microvm-cutover.v1";
+// Containment variant (design section 5): same receipt shape plus one closed
+// `containment` sub-object. v1 consumers stay safe; v2 is required whenever a
+// containment run was requested (fail-closed otherwise).
+export const LINUX_MICROVM_CUTOVER_SCHEMA_V2 = "agentic-driver.linux-microvm-cutover.v2";
+const RECEIPT_SCHEMAS = new Set([LINUX_MICROVM_CUTOVER_SCHEMA, LINUX_MICROVM_CUTOVER_SCHEMA_V2]);
+// Envelope-only relaxation (design sections 5, 6): on the console pty the
+// guest may emit the framed containment envelope after the marker; those
+// lines are parsed separately and never count as unbound output. Everything
+// else remains "unbound output = failure".
+const CONTAINMENT_MARKER_LINE = /^AGENTIC_CONTAINMENT_(BEGIN|END):[A-Za-z0-9._-]+$/;
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REMOTE_FIXTURE = join(SCRIPT_DIR, "linux_microvm_remote_fixture.sh");
 const TARGET_EXAMPLE = join(SCRIPT_DIR, "..", "..", "config", "microvm-target.v1.example.json");
@@ -263,7 +273,7 @@ function requireHash(value, label) {
 function requireBoolean(value, label) {
   if (typeof value !== "boolean") throw phaseError("evidence", "receipt-invalid", `${label} is not boolean evidence`);
 }
-function parseReceipt(stdout) {
+export function parseReceipt(stdout) {
   const candidates = [];
   const unexpected = [];
   for (const line of String(stdout || "").split(/\r?\n/)) {
@@ -277,7 +287,7 @@ function parseReceipt(stdout) {
     }
     try {
       const value = JSON.parse(payload);
-      if (value?.schema === LINUX_MICROVM_CUTOVER_SCHEMA) candidates.push(value);
+      if (value?.schema && RECEIPT_SCHEMAS.has(value.schema)) candidates.push(value);
       else unexpected.push(trimmed);
     } catch {
       unexpected.push(trimmed);
@@ -289,16 +299,64 @@ function parseReceipt(stdout) {
     throw phaseError("evidence", "receipt-missing", detail);
   }
   if (candidates.length !== 1) throw phaseError("evidence", "receipt-ambiguous", "multiple structured microVM receipts were returned");
-  if (unexpected.length) throw phaseError("evidence", "receipt-extra-output", `unbound fixture output: ${unexpected.join(" ")}`);
+  if (unexpected.length) {
+    // Relax receipt-extra-output ONLY for the containment envelope marker
+    // lines, and only when a v2 (containment) receipt is in force. Any other
+    // unbound output still fails closed.
+    const envelopeLines = unexpected.filter((line) => CONTAINMENT_MARKER_LINE.test(line));
+    if (!(envelopeLines.length === unexpected.length
+        && candidates[0]?.schema === LINUX_MICROVM_CUTOVER_SCHEMA_V2)) {
+      throw phaseError("evidence", "receipt-extra-output", `unbound fixture output: ${unexpected.join(" ")}`);
+    }
+  }
   return candidates[0];
 }
-export function validateLinuxMicroVMReceipt(receipt, facts, fixtureId, scriptHash) {
-  exactKeys(receipt, ["schema", "ok", "status", "authorityCreated", "runtimeActivated", "persisted",
-    "identity", "marker", "scriptHash", "initramfsSha256", "teardown", "context"], "receipt");
-  if (receipt.schema !== LINUX_MICROVM_CUTOVER_SCHEMA || receipt.ok !== true || receipt.status !== "VERIFIED"
+function requireCount(value, label) {
+  if (!Number.isInteger(value) || value < 0) {
+    throw phaseError("evidence", "receipt-invalid", `${label} is not a non-negative integer count`);
+  }
+}
+// Closed containment sub-object (design section 5). A verified killswitch
+// trip with a verified log digest is still the success state for the
+// containment proof: the proof is that the killswitch worked.
+function validateContainmentBlock(receipt) {
+  const block = receipt.containment;
+  exactKeys(block, ["taxonomySha256", "logSha256", "events", "denials", "killswitch"], "containment block");
+  requireHash(block.taxonomySha256, "containment taxonomy digest");
+  requireHash(block.logSha256, "containment log digest");
+  requireCount(block.events, "containment event count");
+  requireCount(block.denials, "containment denial count");
+  exactKeys(block.killswitch, ["tripped", "rule", "guestPoweroff", "final"], "containment killswitch");
+  requireBoolean(block.killswitch.tripped, "killswitch tripped");
+  if (block.killswitch.guestPoweroff !== true || block.killswitch.final !== true) {
+    throw phaseError("evidence", "receipt-invalid", "killswitch guest poweroff or final flag is unexpected");
+  }
+  if (block.killswitch.tripped) {
+    if (typeof block.killswitch.rule !== "string" || !block.killswitch.rule) {
+      throw phaseError("evidence", "receipt-invalid", "killswitch tripped without a rule");
+    }
+  } else if (block.killswitch.rule !== null) {
+    throw phaseError("evidence", "receipt-invalid", "killswitch rule must be null when not tripped");
+  }
+  return block;
+}
+export function validateLinuxMicroVMReceipt(receipt, facts, fixtureId, scriptHash, options = {}) {
+  const containmentRun = options.containment === true;
+  // Fail-closed: a containment run without the v2 receipt and its evidence is
+  // containment-evidence-missing, never silently downgraded.
+  if (containmentRun && receipt.schema !== LINUX_MICROVM_CUTOVER_SCHEMA_V2) {
+    throw phaseError("evidence", "containment-evidence-missing",
+      "containment run returned no v2 containment receipt");
+  }
+  const expectedKeys = ["schema", "ok", "status", "authorityCreated", "runtimeActivated", "persisted",
+    "identity", "marker", "scriptHash", "initramfsSha256", "teardown", "context"];
+  if (containmentRun || receipt.schema === LINUX_MICROVM_CUTOVER_SCHEMA_V2) expectedKeys.push("containment");
+  exactKeys(receipt, expectedKeys, "receipt");
+  if (!RECEIPT_SCHEMAS.has(receipt.schema) || receipt.ok !== true || receipt.status !== "VERIFIED"
       || receipt.authorityCreated !== false || receipt.runtimeActivated !== false || receipt.persisted !== false) {
     throw phaseError("evidence", "receipt-invalid", "receipt status or non-authorizing flags are unexpected");
   }
+  if (receipt.schema === LINUX_MICROVM_CUTOVER_SCHEMA_V2) validateContainmentBlock(receipt);
   const domain = fixtureDomainForId(fixtureId);
   exactKeys(receipt.identity, ["remoteHost", "fixtureId", "domain"], "receipt identity");
   if (receipt.identity.remoteHost !== facts.host || receipt.identity.fixtureId !== fixtureId || receipt.identity.domain !== domain) {
@@ -349,6 +407,16 @@ export function validateLinuxMicroVMReceipt(receipt, facts, fixtureId, scriptHas
     throw phaseError("evidence", "context-mismatch", "context digests do not match the closed isolation summary");
   }
   return receipt;
+}
+// Elastic resource allocation (design section 6.1): user-configured through
+// the target config only (never model-set); the model-visible tool surface
+// stays closed. Defaults are the existing proof values.
+function resourceAllocation(target) {
+  return { vcpu: target?.vcpu ?? 1, memoryMiB: target?.memoryMiB ?? 128 };
+}
+function resourceLine(target) {
+  const allocation = resourceAllocation(target);
+  return `${allocation.vcpu} vCPU, ${allocation.memoryMiB} MiB, BusyBox initramfs, no disk, network, host share, credentials, GPU, or serving access.`;
 }
 function normalizedForwardedStderr(result, fallbackPhase, fallbackCode, fallbackDetail) {
   const text = String(result?.stderr || "");
@@ -447,7 +515,10 @@ export async function runLinuxMicroVMCutover(context, options = {}) {
     `Fixture: ${fixtureId}; domain: ${fixtureDomain} (preflight absent)`,
     `Versioned fixture SHA-256: ${scriptHash}`,
     "Writes: one generated fixture below ~/agentic-driver-state/cutover-fixtures/microvm/.",
-    "Guest: 1 vCPU, 128 MiB, BusyBox initramfs, no disk, network, host share, credentials, GPU, or serving access.",
+    ...(options.containment === true
+      ? ["Guest runs a deny-by-default containment monitor; any kill decision kills the guest session and tears down the VM."]
+      : []),
+    `Guest: ${resourceLine(target)}`,
     "A temporary traverse-only ACL for libvirt-qemu is added to the remote home directory and the exact prior ACL is restored after exit or failure.",
     "The transient domain prints one marker, powers off, and must disappear from libvirt.",
     "No install, download, repository mutation, runtime authority, staging, commit, or push.",
@@ -472,7 +543,7 @@ export async function runLinuxMicroVMCutover(context, options = {}) {
       return denied("blocked", normalizedForwardedStderr(result, "fixture", "execution-failed", "fixed microVM fixture failed"));
     }
     const receipt = parseReceipt(result.stdout);
-    return validateLinuxMicroVMReceipt(receipt, facts, fixtureId, scriptHash);
+    return validateLinuxMicroVMReceipt(receipt, facts, fixtureId, scriptHash, { containment: options.containment === true });
   } catch (error) {
     return denied("blocked", reasonFromError(error, "execution", "fixture-failed"));
   } finally { inFlight = false; }
