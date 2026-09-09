@@ -28,7 +28,7 @@ Isolation proofs verify their own cleanup. Sessions survive compaction and
 Git operations stay exact, confirmed, and protected.
 
 Every capability passes fixture-based acceptance, native tests, live-session
-checks, and independent model review before release. We document each
+checks, and independent model review before release. I document each
 extension's restrictions before release, not after.
 
 Extensions for [Pi](https://github.com/earendil-works/pi-coding-agent):
