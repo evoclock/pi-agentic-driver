@@ -290,6 +290,27 @@ matching `qemu-system-<arch>` binary is present. A failed check denies the run
 before anything happens. Note: the shipped fixture guest is x86_64-built, so
 the full proof currently needs an x86_64 KVM host.
 
+**Observed live proof (guest containment).** One observed live cutover run —
+fixture `microvm-be3870730541241f5a177cdd` on `<redacted-host>` — ran a
+containment job whose payload printed a hello prefix and then invoked a
+network tool. What this one run showed:
+
+- The payload prefix executed (`hello-from-contained-job` printed).
+- The network-tool invocation tripped the killswitch: rule `GC-NET-002`,
+  class `GC-NET`, tier `HIGH`, mode `immediate`.
+- The line following the denied invocation did not execute.
+- Guest session aggregates for this run: `denials=1`, `events=2`,
+  `probes=0`, `concealmentIndex=0`, histogram `{"GC-NET":1}`.
+- A durable kill report was written to
+  `~/agentic-driver-state/<redacted>/kill-report.json`, schema
+  `agentic-driver.guest-containment.kill-report.v1`, carrying the evidence
+  digest (`logSha256`)
+  `5167ecf3ec4122e3e048b7fc7b794344e8210641acb601ea6a813dacd0951309`.
+- After teardown, the report's teardown fields finalized as booleans:
+  `domainAbsent=true`, `destroyRequested=true`, `aclRestored=true`.
+- Durable report file SHA-256:
+  `64c22776fe2313ea3aeccd4905d5019892b8ea7d2c2c7c6dd21dac7c76a66136`.
+
 </details>
 
 **Under development in this theme:**

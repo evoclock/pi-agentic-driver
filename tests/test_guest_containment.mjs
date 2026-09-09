@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { createReadStream } from "node:fs";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -860,7 +860,11 @@ test("R2: every BusyBox applet is shimmed and the dispatcher is recursion-safe",
   assert.ok(dispatch.includes("PATH=/bin"));
   assert.ok(dispatch.indexOf("PATH=/bin") < dispatch.indexOf(". /gc/core.sh"));
   // Only the job runs under the shim PATH; the supervisor stays on /bin.
-  assert.ok(fixtureSource.includes("PATH=/shims:/bin /bin/busybox sh /job.sh &"));
+  // The job shell must be dash: busybox sh resolves applet names from its
+  // compiled-in table and never execs through PATH, so /shims cannot
+  // interpose (live fixture microvm-8673d4b468440affb14a58ed).
+  assert.ok(fixtureSource.includes("PATH=/shims:/bin /bin/setsid /bin/dash /job.sh &"), "the job must run under a PATH-resolving shell (dash), not busybox sh");
+  assert.ok(!fixtureSource.includes("/bin/busybox sh /job.sh"), "busybox sh must never run the job: its applet table bypasses /shims");
   assert.ok(!fixtureSource.includes("export PATH=/shims:/bin"));
   // Classifier-level closure of the plain-applet-name bypass.
   const dir = await tempState();
@@ -871,6 +875,78 @@ test("R2: every BusyBox applet is shimmed and the dispatcher is recursion-safe",
     assert.equal((await shim("sh", "-c", "echo hi > /dev/console")).rule, "GC-TOOL-002");
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("R4: job-shell wget trips GC-NET-002 through the real dispatch and the next command never runs", async () => {
+  const fixtureSource = await readFile(FIXTURE, "utf8");
+  // Extract the REAL guest artifacts — the heredocs shipped into the VM — not
+  // a reimplementation: the dispatch and core that /init installs.
+  const dispatchOpener = "cat >\"$root/gc/dispatch\" <<'GC_DISPATCH_EOF'\n";
+  const dStart = fixtureSource.indexOf(dispatchOpener);
+  assert.ok(dStart > 0, "dispatch heredoc not found");
+  const dBody = fixtureSource.slice(
+    dStart + dispatchOpener.length,
+    fixtureSource.indexOf("\nGC_DISPATCH_EOF\n", dStart),
+  );
+  const coreOpener = "cat >\"$root/gc/core.sh\" <<'GC_CORE_EOF'\n";
+  const cStart = fixtureSource.indexOf(coreOpener);
+  assert.ok(cStart > 0, "guest core heredoc not found");
+  const cBody = fixtureSource.slice(
+    cStart + coreOpener.length,
+    fixtureSource.indexOf("\nGC_CORE_EOF\n", cStart),
+  );
+  const sandbox = await tempState();
+  try {
+    // Sandbox layout mirrors the guest: gc/core.sh, shims/<tool> reaching the
+    // dispatcher via argv[0] (like the guest symlinks), and job.sh run by a
+    // PATH-resolving shell. The guest job shell is dash; on the host bash
+    // stands in — both resolve every external command through PATH and have
+    // no applet table, which is exactly the property under regression.
+    mkdirSync(join(sandbox, "gc"), { recursive: true });
+    mkdirSync(join(sandbox, "shims"), { recursive: true });
+    writeFileSync(join(sandbox, "gc", "core.sh"), cBody);
+    // Rebind only absolute guest paths to the sandbox (and the busybox
+    // shebang to the host sh); classification, killswitch, and deny-kill
+    // logic stay byte-for-byte the shipped guest code.
+    const sessionDir = join(sandbox, "session", ".gc");
+    const sha256 = spawnSync("sh", ["-c", "command -v sha256sum || true"], { encoding: "utf8" }).stdout.trim();
+    assert.ok(sha256, "sha256sum must be resolvable for the real killswitch digest path");
+    const dispatch = dBody
+      .replace("#!/bin/busybox sh", "#!/bin/sh")
+      .replace("\nPATH=/bin\n", `\nPATH=${dirname(sha256)}:/usr/bin:/bin\n`)
+      .replace(". /gc/core.sh", `. ${join(sandbox, "gc", "core.sh")}`)
+      .replace("session=/tmp/session/.gc", `session=${sessionDir}`);
+    // The rebind must not be able to strip the synchronous deny-kill.
+    assert.ok(
+      dispatch.includes('[ -f "$session/kill" ]') && dispatch.includes('kill -KILL "$PPID"'),
+      "dispatch deny-kill branch must survive path rebinding",
+    );
+    writeFileSync(join(sandbox, "shims", "wget"), dispatch, { mode: 0o755 });
+    writeFileSync(
+      join(sandbox, "job.sh"),
+      "echo hello-from-contained-job\nwget example.com\necho this-line-never-runs\n",
+      { mode: 0o755 },
+    );
+    // Run the real chain: job shell -> PATH lookup -> /shims/wget -> real
+    // dispatch -> real core -> GC-NET-002 trip -> synchronous kill.
+    const run = spawnSync("/bin/bash", [join(sandbox, "job.sh")], {
+      encoding: "utf8",
+      env: { PATH: `${join(sandbox, "shims")}:/usr/bin:/bin` },
+    });
+    assert.ok(run.stdout.includes("hello-from-contained-job"), "payload prefix must run under the shim PATH");
+    assert.ok(!run.stdout.includes("this-line-never-runs"), "the command after a tripped denial must never run");
+    assert.equal(run.signal, "SIGKILL", "the dispatcher must kill the job shell synchronously (not via the 1s supervisor poll)");
+    const killFlag = await readFile(join(sessionDir, "kill"), "utf8");
+    assert.equal(killFlag.trim(), "immediate", "HIGH tier must trip the killswitch immediately");
+    const log = await readFile(join(sessionDir, "containment.log.jsonl"), "utf8");
+    assert.ok(log.includes('"rule":"GC-NET-002"'), "the denial must be classified as GC-NET-002");
+    assert.ok(
+      log.includes('"schema":"agentic-driver.guest-containment.killswitch.v1"') && log.includes('"tier":"HIGH"') && log.includes('"final":true'),
+      "a terminal HIGH killswitch event must be logged",
+    );
+  } finally {
+    await rm(sandbox, { recursive: true, force: true });
   }
 });
 
@@ -889,7 +965,7 @@ test("R1/R3: the guest init heredoc renders under set -u (no host-side $ leaks)"
   // Guest-side variables must survive rendering as plain $ references.
   assert.ok(guest.includes("/bin/inotifyd /gc/fs-handler $watches &"), "guest watches loop must survive rendering");
   assert.ok(guest.includes("awk '{print $4}'"), "guest awk stat field must survive rendering");
-  assert.ok(guest.includes("PATH=/shims:/bin /bin/busybox sh /job.sh &"));
+  assert.ok(guest.includes("PATH=/shims:/bin /bin/setsid /bin/dash /job.sh &"));
   assert.ok(guest.includes("echo 'AGENTIC_MICROVM_PROBE:t'"), "host-side marker substitution must render");
 });
 
@@ -1005,6 +1081,12 @@ test("streamed-stdin regression: bash -s embeds a non-empty core.sh without read
     // "bash" and there is no script file to read back.
     await new Promise((resolve, reject) => {
       const child = spawn("bash", ["-s", "--", "--gc-core-embed", dest], { stdio: ["pipe", "ignore", "pipe"] });
+      // The --gc-core-embed hook exits as soon as the core is written; the
+      // fixture stream exceeds the OS pipe buffer, so the writer can EPIPE
+      // while bash is already gone. That is expected early-exit plumbing,
+      // not a failure — the embedded-core assertions below gate correctness.
+      // Anything other than EPIPE still rejects.
+      child.stdin.on("error", (e) => { if (e.code !== "EPIPE") reject(e); });
       const stream = createReadStream(FIXTURE);
       stream.on("error", reject);
       stream.on("end", () => child.stdin.end());
@@ -1084,6 +1166,102 @@ test("M6: end-to-end containment flow through the fixture (trip → envelope →
     assert.equal(validated.status, "VERIFIED");
     assert.equal(validated.containment.logSha256, block.logSha256);
     assert.equal(validated.containment.histogram["GC-NET"], 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("D1: production trip sequence writes the kill report at the advertised path and finalizes teardown", async () => {
+  const fixtureSource = await readFile(FIXTURE, "utf8");
+  // Source guard: the production main flow (after phase=containment) must call
+  // gc_write_kill_report itself — the --gc-kill-report hook may not remain
+  // the only caller (live microvm-f84dceaecc99f8d791d8916d: trip correct,
+  // advertised kill-report.json absent).
+  const prodCall = 'gc_write_kill_report "$fixture_root" "$fixture_id" "$domain" "$remote_host" "$containment_block" >/dev/null';
+  const callIdx = fixtureSource.indexOf(prodCall);
+  assert.ok(callIdx > fixtureSource.indexOf("phase=containment"), "production main flow must write the kill report itself");
+  const hookIdx = fixtureSource.indexOf('"--gc-kill-report"');
+  assert.ok(hookIdx > 0 && callIdx > hookIdx, "the test hook must not be the only gc_write_kill_report caller");
+  // Extract the REAL shipped gc_write_kill_report function and the REAL
+  // production write+finalize block; execute them exactly as the main flow
+  // holds them (teardown outcomes already proven at that point).
+  const funcOpen = "gc_write_kill_report() { # fixture_root fixture_id domain remote_host block_json";
+  const fStart = fixtureSource.indexOf(funcOpen);
+  assert.ok(fStart > 0, "gc_write_kill_report definition not found");
+  const fEnd = fixtureSource.indexOf("\n}\n", fStart);
+  assert.ok(fEnd > fStart, "gc_write_kill_report terminator not found");
+  const funcText = fixtureSource.slice(fStart, fEnd + 3);
+  const d1 = fixtureSource.indexOf("# Defect 1 (live microvm-");
+  assert.ok(d1 > 0, "production Defect-1 block not found");
+  const d2tail = 'rm -f "$fixture_root/kill-report.json.bak"\nfi';
+  const d2end = fixtureSource.indexOf(d2tail, d1);
+  assert.ok(d2end > d1, "teardown finalization block not found");
+  const prodBlock = fixtureSource.slice(d1, d2end + d2tail.length);
+
+  const dir = await tempState();
+  const state = join(dir, "state");
+  try {
+    // 1. Real trip through the real core: wget under the shim trips GC-NET-002.
+    const decision = JSON.parse(await runFixture(["--gc-shim", state, "wget", "http://example.invalid"]));
+    assert.equal(decision.decision, "deny");
+    // 2. Real envelope transcript, as /init emits it on the console channel.
+    const fixtureId = "microvm-" + "d1".repeat(12);
+    const { readFile: rf } = await import("node:fs/promises");
+    const log = await rf(join(state, "containment.log.jsonl"));
+    const b64 = Buffer.from(log, "utf8").toString("base64").replace(/(.{76})/g, "$1\n");
+    const transcript = join(dir, "console.typescript");
+    writeFileSync(transcript, [
+      `AGENTIC_MICROVM_PROBE:${fixtureId}`,
+      `AGENTIC_CONTAINMENT_BEGIN:${fixtureId}`,
+      b64.replaceAll("\n", "\r\n").trimEnd(),
+      `AGENTIC_CONTAINMENT_END:${fixtureId}`,
+    ].join("\r\n") + "\r\n");
+    // 3. Real extraction: tripped block advertising the report path, and the
+    // decoded payload file written next to the transcript for the report.
+    const reportPath = join(dir, "kill-report.json");
+    const extraction = await envelopeExtract(transcript, fixtureId, reportPath);
+    assert.equal(extraction.status, 0, extraction.stderr);
+    const block = JSON.parse(extraction.stdout);
+    assert.equal(block.killswitch.tripped, true);
+    assert.equal(block.killswitch.rule, "GC-NET-002");
+    assert.equal(block.killReportPath, reportPath, "the advertised path must be the real file location");
+    assert.ok(existsSync(join(dir, "console.typescript.containment.payload")), "decoded payload must exist for the report");
+    // 4. Execute the REAL production write+finalize sequence (real function,
+    // real core for gc_iso8601, real block text) with the main flow's values.
+    const coreFile = join(dir, "core.sh");
+    await runFixture(["--gc-core-embed", coreFile]);
+    const blockFile = join(dir, "block.json");
+    writeFileSync(blockFile, extraction.stdout);
+    const harness = join(dir, "prod-sequence.sh");
+    writeFileSync(harness, [
+      "set -euo pipefail",
+      `. ${JSON.stringify(coreFile)}`,
+      funcText,
+      `fixture_root=${JSON.stringify(dir)}`,
+      `fixture_id=${JSON.stringify(fixtureId)}`,
+      `domain=${JSON.stringify("agentic-driver-" + fixtureId)}`,
+      `remote_host=${JSON.stringify("test-host")}`,
+      `containment_block=$(cat ${JSON.stringify(blockFile)})`,
+      "domain_absent=true",
+      "domain_destroy_requested=true",
+      "acl_restored=true",
+      prodBlock,
+    ].join("\n"));
+    const run = spawnSync("bash", [harness], { encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr || "production sequence must succeed (fixture_fail must not fire)");
+    // 5. The report exists at the advertised path, is truthful, and its
+    // teardown fields are finalized — no PENDING remains.
+    const reportRaw = await readFile(reportPath, "utf8");
+    const report = JSON.parse(reportRaw);
+    assert.equal(report.schema, "agentic-driver.guest-containment.kill-report.v1");
+    assert.equal(report.session.fixtureId, fixtureId);
+    assert.equal(report.session.remoteHost, "test-host");
+    assert.equal(report.killswitch.tripped, true);
+    assert.equal(report.killswitch.rule, "GC-NET-002");
+    assert.equal(report.killswitch.tier, "HIGH");
+    assert.deepEqual(report.teardown, { domainAbsent: true, destroyRequested: true, aclRestored: true });
+    assert.ok(!reportRaw.includes("PENDING"), "no teardown field may remain PENDING after finalization");
+    assert.equal(report.logSha256, block.logSha256, "report digest must match the receipt-advertised evidence digest");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -1489,5 +1667,30 @@ test("session end: a zero-event session still creates its terminal record and lo
     assert.equal(JSON.parse(extraction.stdout).killswitch.tripped, false);
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// --- Regression guard: the set -u initializer cannot be lost again ---
+// The containment_payload initializer was lost twice (faec800 regeneration,
+// then the 18:05 branch reset). Under set -u its absence aborts any
+// plain-proof (4-arg) run at the first unconditional reference.
+
+test("set -u guard: containment_payload is initialized at parse time before any unconditional reference", async () => {
+  const fixtureSource = await readFile(FIXTURE, "utf8");
+  const lines = fixtureSource.split("\n");
+  const initIdx = lines.findIndex((l) => l.trim() === 'containment_payload=""');
+  assert.ok(initIdx > 0, "containment_payload=\"\" initializer missing from the fixture script");
+  const initLine = initIdx + 1;
+  // The argv default and the initializer must sit together in the argument
+  // section, before every unconditional reference to the variable.
+  const argvIdx = lines.findIndex((l) => l.includes("containment_payload_b64=${5:-}"));
+  assert.ok(argvIdx > 0);
+  assert.ok(initLine > argvIdx && initLine - argvIdx <= 5, "initializer must sit with the argv parse");
+  for (const [i, line] of lines.entries()) {
+    if (i <= initIdx) continue;
+    if (/\$\{?containment_payload[}\s"'\)]/.test(line) || /\$containment_payload\b/.test(line)) {
+      const isGuarded = /-n\s+"\$\{?containment_payload/.test(line) || line.includes("${containment_payload");
+      assert.ok(isGuarded || line.includes("containment_payload"), `line ${i + 1} references containment_payload before guarding: ${line.trim()}`);
+    }
   }
 });

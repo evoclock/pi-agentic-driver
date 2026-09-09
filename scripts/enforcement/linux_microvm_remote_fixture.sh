@@ -1385,6 +1385,16 @@ for tool in /usr/bin/qemu-system-x86_64 /usr/bin/busybox /usr/bin/cpio /usr/bin/
   if ! test -x "$tool"; then fixture_fail 4 "required tool unavailable: $tool"; fi
 done
 if ! test -r /dev/kvm -a -w /dev/kvm; then fixture_fail 4 '/dev/kvm is unavailable'; fi
+# Job shell (containment repair, live fixture microvm-8673d4b4...): busybox
+# ash resolves applet names (wget, curl, ...) from its compiled-in applet
+# table and never execs through PATH — the /shims layer cannot interpose, so
+# GC-NET-002 cannot trip (empirically confirmed on BusyBox v1.37.0). The job
+# therefore runs under dash, a real PATH-resolving shell, copied in with its
+# dynamic loader and libc. Fail closed when any piece is missing: silently
+# falling back to busybox sh would reopen the applet bypass.
+for job_shell_component in /bin/dash /lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/libc.so.6; do
+  if ! test -r "$job_shell_component"; then fixture_fail 4 "job shell component unavailable: $job_shell_component"; fi
+done
 if ! test -e "$kernel"; then fixture_fail 4 "kernel unavailable: $kernel"; fi
 if state=$(domain_state); then
   if [ "$state" != absent ]; then fixture_fail 5 'fixture domain already exists'; fi
@@ -1410,6 +1420,15 @@ if grep -qx inotifyd <<<"$applet_list"; then
 fi
 if grep -qx setsid <<<"$applet_list"; then
   ln -s busybox "$root/bin/setsid" && have_setsid=true
+fi
+# Job shell (see the preflight note): dash plus its loader and libc at the
+# exact PT_INTERP/linker paths dash was linked against, so guest PATH lookups
+# reach /shims instead of busybox's internal applet table.
+if ! cp /bin/dash "$root/bin/dash"; then fixture_fail 6 'job shell could not be copied'; fi
+if ! mkdir -p "$root/lib/x86_64-linux-gnu" "$root/lib64"; then fixture_fail 6 'job shell library directories could not be created'; fi
+if ! cp /lib/x86_64-linux-gnu/libc.so.6 "$root/lib/x86_64-linux-gnu/libc.so.6" \
+  || ! cp /lib64/ld-linux-x86-64.so.2 "$root/lib64/ld-linux-x86-64.so.2"; then
+  fixture_fail 6 'job shell runtime libraries could not be copied'
 fi
 if ! mkdir -p "$root/gc" "$root/shims" "$root/tmp"; then fixture_fail 6 'containment guest directories could not be created'; fi
 # The guest containment core is embedded verbatim as its own heredoc (like
@@ -1950,8 +1969,23 @@ case "$decision" in
   *'"decision":"allow"'*)
     exec /bin/busybox "$tool" "$@" ;;
   *)
-    # Denied and logged (and, per severity tier, possibly killswitched);
-    # the supervisor kill path runs from the kill flag.
+    # Denied and logged (and, per severity tier, possibly killswitched); the
+    # supervisor kill path runs from the kill flag. When this denial TRIPPED
+    # the killswitch (flag present), also kill the job synchronously: the
+    # supervisor polls once a second, and without this the job shell would
+    # run its next command inside that window. Kill our parent (the job
+    # shell), and the whole job process group when we are in one that
+    # excludes PID 1 (setsid job); PID 1's group is never signalled.
+    if [ -f "$session/kill" ]; then
+      kill -KILL "$PPID" 2>/dev/null || true
+      if [ -r /proc/self/stat ] && [ -r /proc/1/stat ]; then
+        my_pgid=$(awk '{print $5}' /proc/self/stat 2>/dev/null) || my_pgid=
+        init_pgid=$(awk '{print $5}' /proc/1/stat 2>/dev/null) || init_pgid=
+        if [ -n "$my_pgid" ] && [ "$my_pgid" != "$init_pgid" ]; then
+          kill -KILL 0 2>/dev/null || true
+        fi
+      fi
+    fi
     exit 126 ;;
 esac
 GC_DISPATCH_EOF
@@ -2060,11 +2094,17 @@ fs_pid=\$!
 ) &
 proc_pid=\$!
 # Only the job runs under the shim PATH (design section 1.3); PATH= above
-# keeps the supervisor and monitor loops on /bin.
+# keeps the supervisor and monitor loops on /bin. The job shell is dash, not
+# busybox sh: busybox ash resolves applet names from its compiled-in table
+# and bypasses PATH, so /shims would never interpose (live fixture
+# microvm-8673d4b468440affb14a58ed: wget ran as an internal applet, GC-NET-002
+# never tripped, the payload ran to completion). dash has no applet table —
+# every external command execs through /shims. The supervisor and monitors
+# stay on busybox applets (PATH=/bin, never shimmed).
 if [ "$have_setsid" = true ]; then
-  PATH=/shims:/bin /bin/setsid /bin/busybox sh /job.sh &
+  PATH=/shims:/bin /bin/setsid /bin/dash /job.sh &
 else
-  PATH=/shims:/bin /bin/busybox sh /job.sh &
+  PATH=/shims:/bin /bin/dash /job.sh &
 fi
 job_pid=\$!
 while :; do
@@ -2248,6 +2288,19 @@ if ! remote_host=$(hostname); then fixture_fail 12 'remote host identity could n
 case "$remote_host" in
   ""|*[!A-Za-z0-9._-]*) fixture_fail 12 'remote host identity is unsafe' ;;
 esac
+
+# Defect 1 (live microvm-f84dceaecc99f8d791d8916d): a tripped session's
+# receipt advertised kill-report.json (gc_containment_evidence embeds the
+# path), but the production path never called gc_write_kill_report — only
+# the --gc-kill-report test hook did, so the advertised file was absent on
+# the live retry. Write it here for tripped sessions, after remote_host is
+# observed and before teardown finalization, and fail closed if it cannot
+# be written: a receipt advertising a durable report must never be emitted
+# without the report existing at the advertised path.
+if grep -q '"tripped":true' <<<"$containment_block" 2>/dev/null; then
+  gc_write_kill_report "$fixture_root" "$fixture_id" "$domain" "$remote_host" "$containment_block" >/dev/null
+  [ -s "$fixture_root/kill-report.json" ] || fixture_fail 10 'kill report could not be written for the tripped session'
+fi
 
 # Defect 2: finalize the durable kill report with teardown proof status.
 if grep -q '"tripped":true' <<<"$containment_block" 2>/dev/null && [ -f "$fixture_root/kill-report.json" ]; then
