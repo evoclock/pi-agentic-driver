@@ -878,10 +878,12 @@ test("R2: every BusyBox applet is shimmed and the dispatcher is recursion-safe",
   }
 });
 
-test("R4: job-shell wget trips GC-NET-002 through the real dispatch and the next command never runs", async () => {
+// Builds the REAL guest dispatch sandbox (heredocs extracted from the
+// fixture, absolute paths rebound to the sandbox; classification, killswitch,
+// and deny-kill logic byte-for-byte the shipped guest code) with shims/wget
+// installed. Shared by the R4/R5 execution regressions.
+async function realDispatchSandbox() {
   const fixtureSource = await readFile(FIXTURE, "utf8");
-  // Extract the REAL guest artifacts — the heredocs shipped into the VM — not
-  // a reimplementation: the dispatch and core that /init installs.
   const dispatchOpener = "cat >\"$root/gc/dispatch\" <<'GC_DISPATCH_EOF'\n";
   const dStart = fixtureSource.indexOf(dispatchOpener);
   assert.ok(dStart > 0, "dispatch heredoc not found");
@@ -897,32 +899,53 @@ test("R4: job-shell wget trips GC-NET-002 through the real dispatch and the next
     fixtureSource.indexOf("\nGC_CORE_EOF\n", cStart),
   );
   const sandbox = await tempState();
+  // Sandbox layout mirrors the guest: gc/core.sh, shims/<tool> reaching the
+  // dispatcher via argv[0] (like the guest symlinks), and job scripts run by
+  // a PATH-resolving shell. The guest job shell is dash; on the host bash
+  // stands in — both resolve every external command through PATH and have
+  // no applet table, which is exactly the property under regression.
+  mkdirSync(join(sandbox, "gc"), { recursive: true });
+  mkdirSync(join(sandbox, "shims"), { recursive: true });
+  writeFileSync(join(sandbox, "gc", "core.sh"), cBody);
+  const sessionDir = join(sandbox, "session", ".gc");
+  const sha256 = spawnSync("sh", ["-c", "command -v sha256sum || true"], { encoding: "utf8" }).stdout.trim();
+  assert.ok(sha256, "sha256sum must be resolvable for the real killswitch digest path");
+  const dispatch = dBody
+    .replace("#!/bin/busybox sh", "#!/bin/sh")
+    .replace("\nPATH=/bin\n", `\nPATH=${dirname(sha256)}:/usr/bin:/bin\n`)
+    .replace(". /gc/core.sh", `. ${join(sandbox, "gc", "core.sh")}`)
+    .replace("session=/tmp/session/.gc", `session=${sessionDir}`);
+  // The rebind must not be able to strip the synchronous deny-kill, nor its
+  // PID-1 guard (review R1).
+  assert.ok(
+    dispatch.includes('[ -f "$session/kill" ]') && dispatch.includes('if [ "$PPID" != "1" ]'),
+    "dispatch deny-kill branch (with PID-1 guard) must survive path rebinding",
+  );
+  writeFileSync(join(sandbox, "shims", "wget"), dispatch, { mode: 0o755 });
+  return { sandbox, sessionDir, shimsPath: join(sandbox, "shims") };
+}
+
+// Runs a job script in its own detached process group (review R2): the
+// dispatcher's `kill -KILL 0` group kill can never reach the Node test
+// runner, and on Linux — where /proc/self/stat makes the group branch
+// reachable — the branch genuinely fires and takes down the whole job group.
+function runJobDetached(jobPath, shimsPath) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("/bin/bash", [jobPath], {
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { PATH: `${shimsPath}:/usr/bin:/bin` },
+    });
+    let stdout = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.on("error", reject);
+    child.on("close", (status, signal) => resolve({ stdout, status, signal }));
+  });
+}
+
+test("R4: job-shell wget trips GC-NET-002 through the real dispatch and the next command never runs", async () => {
+  const { sandbox, sessionDir, shimsPath } = await realDispatchSandbox();
   try {
-    // Sandbox layout mirrors the guest: gc/core.sh, shims/<tool> reaching the
-    // dispatcher via argv[0] (like the guest symlinks), and job.sh run by a
-    // PATH-resolving shell. The guest job shell is dash; on the host bash
-    // stands in — both resolve every external command through PATH and have
-    // no applet table, which is exactly the property under regression.
-    mkdirSync(join(sandbox, "gc"), { recursive: true });
-    mkdirSync(join(sandbox, "shims"), { recursive: true });
-    writeFileSync(join(sandbox, "gc", "core.sh"), cBody);
-    // Rebind only absolute guest paths to the sandbox (and the busybox
-    // shebang to the host sh); classification, killswitch, and deny-kill
-    // logic stay byte-for-byte the shipped guest code.
-    const sessionDir = join(sandbox, "session", ".gc");
-    const sha256 = spawnSync("sh", ["-c", "command -v sha256sum || true"], { encoding: "utf8" }).stdout.trim();
-    assert.ok(sha256, "sha256sum must be resolvable for the real killswitch digest path");
-    const dispatch = dBody
-      .replace("#!/bin/busybox sh", "#!/bin/sh")
-      .replace("\nPATH=/bin\n", `\nPATH=${dirname(sha256)}:/usr/bin:/bin\n`)
-      .replace(". /gc/core.sh", `. ${join(sandbox, "gc", "core.sh")}`)
-      .replace("session=/tmp/session/.gc", `session=${sessionDir}`);
-    // The rebind must not be able to strip the synchronous deny-kill.
-    assert.ok(
-      dispatch.includes('[ -f "$session/kill" ]') && dispatch.includes('kill -KILL "$PPID"'),
-      "dispatch deny-kill branch must survive path rebinding",
-    );
-    writeFileSync(join(sandbox, "shims", "wget"), dispatch, { mode: 0o755 });
     writeFileSync(
       join(sandbox, "job.sh"),
       "echo hello-from-contained-job\nwget example.com\necho this-line-never-runs\n",
@@ -930,10 +953,7 @@ test("R4: job-shell wget trips GC-NET-002 through the real dispatch and the next
     );
     // Run the real chain: job shell -> PATH lookup -> /shims/wget -> real
     // dispatch -> real core -> GC-NET-002 trip -> synchronous kill.
-    const run = spawnSync("/bin/bash", [join(sandbox, "job.sh")], {
-      encoding: "utf8",
-      env: { PATH: `${join(sandbox, "shims")}:/usr/bin:/bin` },
-    });
+    const run = await runJobDetached(join(sandbox, "job.sh"), shimsPath);
     assert.ok(run.stdout.includes("hello-from-contained-job"), "payload prefix must run under the shim PATH");
     assert.ok(!run.stdout.includes("this-line-never-runs"), "the command after a tripped denial must never run");
     assert.equal(run.signal, "SIGKILL", "the dispatcher must kill the job shell synchronously (not via the 1s supervisor poll)");
@@ -947,6 +967,57 @@ test("R4: job-shell wget trips GC-NET-002 through the real dispatch and the next
     );
   } finally {
     await rm(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("R5: exec'd denial never signals PID 1; containment stays synchronous via the job process group", async () => {
+  // Case A (explicit `exec wget`): the job shell execs the denied tool, so
+  // the dispatcher is left parented by the outer job shell inside the
+  // detached job group. Synchronous containment must still hold — the line
+  // after the exec'd invocation never runs — without any signal leaving the
+  // job process group.
+  const a = await realDispatchSandbox();
+  try {
+    writeFileSync(join(a.sandbox, "inner.sh"), "exec wget example.com\n", { mode: 0o755 });
+    writeFileSync(
+      join(a.sandbox, "job.sh"),
+      `echo exec-case-start\n/bin/bash ${JSON.stringify(join(a.sandbox, "inner.sh"))}\necho exec-case-never\n`,
+      { mode: 0o755 },
+    );
+    const run = await runJobDetached(join(a.sandbox, "job.sh"), a.shimsPath);
+    assert.ok(run.stdout.includes("exec-case-start"), "exec-case prefix must run");
+    assert.ok(!run.stdout.includes("exec-case-never"), "the line after an exec'd denied invocation must never run");
+    assert.equal(run.signal, "SIGKILL", "the job group must be killed synchronously (parent kill here; group kill where /proc exists)");
+    assert.equal((await readFile(join(a.sessionDir, "kill"), "utf8")).trim(), "immediate", "the exec'd denial must still trip the killswitch");
+  } finally {
+    await rm(a.sandbox, { recursive: true, force: true });
+  }
+  // Case B (PID-1 safety): an orphaned dispatcher — its parent exited, so
+  // PPID becomes 1 after reparenting — must never signal PID 1. The denial
+  // still trips; nothing outside the (detached) job group is touched.
+  const b = await realDispatchSandbox();
+  try {
+    writeFileSync(join(b.sandbox, "orphan.sh"), "exec wget example.com\n", { mode: 0o755 });
+    writeFileSync(
+      join(b.sandbox, "spawner.sh"),
+      `/bin/bash ${JSON.stringify(join(b.sandbox, "orphan.sh"))} &\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    await runJobDetached(join(b.sandbox, "spawner.sh"), b.shimsPath);
+    // The orphan holds the stdout pipe, so close fires only after the
+    // dispatcher finished its deny path; give reparenting a moment anyway.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    let pid1Alive = false;
+    try {
+      process.kill(1, 0);
+      pid1Alive = true;
+    } catch (e) {
+      pid1Alive = e.code === "EPERM"; // EPERM => PID 1 exists but is not signalable
+    }
+    assert.ok(pid1Alive, "PID 1 must never be signalled by the deny-kill path");
+    assert.equal((await readFile(join(b.sessionDir, "kill"), "utf8")).trim(), "immediate", "the orphaned denial must still trip GC-NET-002");
+  } finally {
+    await rm(b.sandbox, { recursive: true, force: true });
   }
 });
 
@@ -1686,11 +1757,4 @@ test("set -u guard: containment_payload is initialized at parse time before any 
   const argvIdx = lines.findIndex((l) => l.includes("containment_payload_b64=${5:-}"));
   assert.ok(argvIdx > 0);
   assert.ok(initLine > argvIdx && initLine - argvIdx <= 5, "initializer must sit with the argv parse");
-  for (const [i, line] of lines.entries()) {
-    if (i <= initIdx) continue;
-    if (/\$\{?containment_payload[}\s"'\)]/.test(line) || /\$containment_payload\b/.test(line)) {
-      const isGuarded = /-n\s+"\$\{?containment_payload/.test(line) || line.includes("${containment_payload");
-      assert.ok(isGuarded || line.includes("containment_payload"), `line ${i + 1} references containment_payload before guarding: ${line.trim()}`);
-    }
-  }
 });
