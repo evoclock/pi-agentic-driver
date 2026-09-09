@@ -1923,6 +1923,91 @@ test("GC-FSW-003 sampler fails closed when the state dir cannot be created", asy
   }
 });
 
+test("FSW-003 live-wiring regression: pre-job baseline and final sample straddle job-time growth", async () => {
+  // Reproduces the live failure signature (microvm-e2abe44348e29c9472f3b941):
+  // first sample is the baseline, the job dd-writes into a watched cache root
+  // between samples, and the final sample MUST emit the GC-FSW-003 decision.
+  // The existing hook-level tests never caught this because they drove the
+  // sampler directly; this test runs the REAL sampler function from the
+  // extracted guest core in the sequence the guest init now uses.
+  const { sandbox } = await realDispatchSandbox();
+  const dir = await tempState();
+  try {
+    const watched = join(dir, "varcache");
+    mkdirSync(watched, { recursive: true });
+    const sha256 = spawnSync("sh", ["-c", "command -v sha256sum || true"], { encoding: "utf8" }).stdout.trim();
+    assert.ok(sha256, "sha256sum must be resolvable for the real core");
+    const st = join(dir, "st");
+    const harness = join(dir, "seq.sh");
+    writeFileSync(harness, [
+      "set -euo pipefail",
+      `PATH=${JSON.stringify(dirname(sha256))}:/usr/bin:/bin`,
+      `. ${JSON.stringify(join(sandbox, "gc", "core.sh"))}`,
+      // The exact sequence the guest init runs: pre-job baseline, job write,
+      // post-job final sample.
+      `out1=$(gc_cache_growth_sample ${JSON.stringify(st)} ${JSON.stringify(watched)})`,
+      `dd if=/dev/zero of=${JSON.stringify(join(watched, "probe.bin"))} bs=1024 count=2048 2>/dev/null`,
+      `out2=$(gc_cache_growth_sample ${JSON.stringify(st)} ${JSON.stringify(watched)})`,
+      'printf "FIRST=[%s] SECOND=[%s]\n" "$out1" "$out2"',
+    ].join("\n"));
+    const run = spawnSync("bash", [harness], { encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /FIRST=\[\]/, "the pre-job sample must be baseline-only (no decision)");
+    const second = /SECOND=\[(.*)\]/.exec(run.stdout)?.[1] ?? "";
+    const decision = JSON.parse(second);
+    assert.equal(decision.rule, "GC-FSW-003", "the final sample must decide GC-FSW-003 after job-time growth");
+    assert.ok(decision.growthKiB >= 1024, "the dd growth (2048 KiB) must cross the threshold");
+    assert.ok(existsSync(join(st, "pressure.GC-FSW")), "one qualifying growth event must accumulate ELEVATED pressure");
+    assert.ok(!existsSync(join(st, "kill")), "a single event must not trip the aggregate threshold (5)");
+  } finally {
+    await rm(sandbox, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true });
+  }
+  // Wiring: the rendered guest init must guarantee the straddle — baseline
+  // before the job launch, final sample after the supervisor kill block and
+  // before session end, sweep sampling retained.
+  const fixtureSource = await readFile(FIXTURE, "utf8");
+  const opener = 'cat >"$root/init" <<EOF\n';
+  const start = fixtureSource.indexOf(opener) + opener.length;
+  const end = fixtureSource.indexOf("\nEOF\n", start);
+  assert.ok(start > opener.length && end > start, "guest init heredoc not found");
+  const render = spawnSync("bash", ["-c",
+    'set -euo pipefail; marker="t"; fixture_id="t"; have_setsid=true; cat <<EOF\n' + fixtureSource.slice(start, end) + "\nEOF\n"],
+    { encoding: "utf8" });
+  assert.equal(render.status, 0, render.stderr || "init heredoc must render under set -u");
+  const guest = render.stdout;
+  const baselineCall = 'gc_cache_growth_sample "$session" /root/.npm /root/.cache /var/cache >/dev/null 2>&1 || true';
+  const finalCall = 'if ! gc_cache_growth_sample "$session" /root/.npm /root/.cache /var/cache >/dev/null 2>&1; then';
+  const jobLaunch = "PATH=/shims:/bin /bin/setsid /bin/dash /job.sh &";
+  const sessionEnd = 'if [ ! -f "$session/kill" ]; then gc_session_end "$session" || :; fi';
+  const idxBaseline = guest.indexOf(baselineCall);
+  const idxJob = guest.indexOf(jobLaunch);
+  const idxFinal = guest.lastIndexOf(finalCall);
+  const idxEnd = guest.indexOf(sessionEnd);
+  assert.ok(idxBaseline >= 0 && idxJob >= 0 && idxFinal >= 0 && idxEnd >= 0, "all three sampler call sites must render");
+  assert.ok(idxBaseline < idxJob, "the baseline sample must precede the job launch");
+  assert.ok(idxFinal > idxJob, "the final sample must run after the job launch");
+  assert.ok(idxFinal < idxEnd, "the final sample must run before session end");
+  const callSiteCount = (guest.match(/gc_cache_growth_sample "\$session"/g) ?? []).length;
+  assert.ok(callSiteCount >= 3, `expected >= 3 sampler call sites (baseline, sweep, final), found ${callSiteCount}`);
+  // Traced root cause (live microvm-b583fccb8abf8bccb0989e10): the build never
+  // created the watched roots — /var/cache and /root were absent from the
+  // initramfs image — so the payload's dd failed with ENOENT and no growth
+  // ever existed to sample. The build must create the roots, and the failure
+  // mode is documented behaviorally: dd cannot create parent directories.
+  assert.ok(
+    fixtureSource.includes('mkdir -p "$root/gc" "$root/shims" "$root/tmp" "$root/var/cache" "$root/root"'),
+    "the build must create the GC-FSW-003 watched roots (/var/cache, /root)",
+  );
+  const noRoot = await tempState();
+  try {
+    const missing = spawnSync("bash", ["-c", `dd if=/dev/zero of=${JSON.stringify(join(noRoot, "var", "cache", "probe.bin"))} bs=1024 count=1 2>&1`], { encoding: "utf8" });
+    assert.notEqual(missing.status, 0, "dd must fail when the watched root does not exist (the live silent-growth mode)");
+  } finally {
+    await rm(noRoot, { recursive: true, force: true });
+  }
+});
+
 // --- M6 security repairs: shell-safe payload transport, argv-count guard ---
 
 test("M6/sec: a hostile multi-line payload travels shell-safe (base64, no whitespace or metacharacters)", async () => {

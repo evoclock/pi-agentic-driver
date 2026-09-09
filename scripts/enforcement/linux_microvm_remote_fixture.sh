@@ -299,13 +299,19 @@ gc_cache_growth_sample() { # state_dir dir...
     total=$((total + ${kib:-0}))
   done
   if [ ! -f "$baseline" ]; then
-    printf '%s\n' "$total" >"$baseline" 2>/dev/null || return 0
+    if printf '%s\n' "$total" >"$baseline" 2>/dev/null; then
+      gc_log_event "$state_dir" "sweep" "GC-FSW-003" "sample" "baseline=${total}KiB" >/dev/null 2>&1 || true
+    fi
     return 0
   fi
   local prev delta
   prev=$(cat "$baseline" 2>/dev/null) || prev=$total
   printf '%s\n' "$total" >"$baseline" 2>/dev/null || true
   delta=$((total - ${prev:-0}))
+  # Diagnostic observe (live microvm-b583fccb8abf8bccb0989e10): one compact
+  # line per sample so the next live run shows total/prev/delta/threshold and
+  # the decision path even when no event fires.
+  gc_log_event "$state_dir" "sweep" "GC-FSW-003" "sample" "total=${total}KiB prev=${prev:-none}KiB delta=${delta}KiB threshold=${GC_CACHE_GROWTH_KIB}KiB" >/dev/null 2>&1 || true
   if [ "$delta" -ge "$GC_CACHE_GROWTH_KIB" ]; then
     gc_decide "$state_dir" GC-FSW-003 "cache growth ${delta}KiB" >/dev/null || return 2
     printf '{"decision":"deny","rule":"GC-FSW-003","growthKiB":%s}\n' "$delta"
@@ -928,13 +934,19 @@ gc_cache_growth_sample() { # state_dir dir...
     total=$((total + ${kib:-0}))
   done
   if [ ! -f "$baseline" ]; then
-    printf '%s\n' "$total" >"$baseline" 2>/dev/null || return 0
+    if printf '%s\n' "$total" >"$baseline" 2>/dev/null; then
+      gc_log_event "$state_dir" "sweep" "GC-FSW-003" "sample" "baseline=${total}KiB" >/dev/null 2>&1 || true
+    fi
     return 0
   fi
   local prev delta
   prev=$(cat "$baseline" 2>/dev/null) || prev=$total
   printf '%s\n' "$total" >"$baseline" 2>/dev/null || true
   delta=$((total - ${prev:-0}))
+  # Diagnostic observe (live microvm-b583fccb8abf8bccb0989e10): one compact
+  # line per sample so the next live run shows total/prev/delta/threshold and
+  # the decision path even when no event fires.
+  gc_log_event "$state_dir" "sweep" "GC-FSW-003" "sample" "total=${total}KiB prev=${prev:-none}KiB delta=${delta}KiB threshold=${GC_CACHE_GROWTH_KIB}KiB" >/dev/null 2>&1 || true
   if [ "$delta" -ge "$GC_CACHE_GROWTH_KIB" ]; then
     gc_decide "$state_dir" GC-FSW-003 "cache growth ${delta}KiB" >/dev/null || return 2
     printf '{"decision":"deny","rule":"GC-FSW-003","growthKiB":%s}\n' "$delta"
@@ -1631,7 +1643,13 @@ if ! cp /lib/x86_64-linux-gnu/libc.so.6 "$root/lib/x86_64-linux-gnu/libc.so.6" \
   || ! cp /lib64/ld-linux-x86-64.so.2 "$root/lib64/ld-linux-x86-64.so.2"; then
   fixture_fail 6 'job shell runtime libraries could not be copied'
 fi
-if ! mkdir -p "$root/gc" "$root/shims" "$root/tmp"; then fixture_fail 6 'containment guest directories could not be created'; fi
+# Containment guest directories plus the GC-FSW-003 watched roots (live
+# microvm-b583fccb8abf8bccb0989e10: /var/cache and /root were never created in
+# the image, the payload's dd could not create its parent directory, so no
+# growth ever existed to sample — the sampler watched nothing). Creating the
+# roots at build time makes the baseline meaningful and a write into them
+# detectable (and, per the deny-otherwise branch, denied as GC-SHR-001).
+if ! mkdir -p "$root/gc" "$root/shims" "$root/tmp" "$root/var/cache" "$root/root"; then fixture_fail 6 'containment guest directories could not be created'; fi
 # The guest containment core is embedded verbatim as its own heredoc (like
 # the taxonomy embed): one source of truth for taxonomy, log, and killswitch
 # semantics, with no dependency on $0 — the fixture streams over SSH via
@@ -1937,13 +1955,19 @@ gc_cache_growth_sample() { # state_dir dir...
     total=$((total + ${kib:-0}))
   done
   if [ ! -f "$baseline" ]; then
-    printf '%s\n' "$total" >"$baseline" 2>/dev/null || return 0
+    if printf '%s\n' "$total" >"$baseline" 2>/dev/null; then
+      gc_log_event "$state_dir" "sweep" "GC-FSW-003" "sample" "baseline=${total}KiB" >/dev/null 2>&1 || true
+    fi
     return 0
   fi
   local prev delta
   prev=$(cat "$baseline" 2>/dev/null) || prev=$total
   printf '%s\n' "$total" >"$baseline" 2>/dev/null || true
   delta=$((total - ${prev:-0}))
+  # Diagnostic observe (live microvm-b583fccb8abf8bccb0989e10): one compact
+  # line per sample so the next live run shows total/prev/delta/threshold and
+  # the decision path even when no event fires.
+  gc_log_event "$state_dir" "sweep" "GC-FSW-003" "sample" "total=${total}KiB prev=${prev:-none}KiB delta=${delta}KiB threshold=${GC_CACHE_GROWTH_KIB}KiB" >/dev/null 2>&1 || true
   if [ "$delta" -ge "$GC_CACHE_GROWTH_KIB" ]; then
     gc_decide "$state_dir" GC-FSW-003 "cache growth ${delta}KiB" >/dev/null || return 2
     printf '{"decision":"deny","rule":"GC-FSW-003","growthKiB":%s}\n' "$delta"
@@ -2412,6 +2436,13 @@ proc_pid=\$!
 # never tripped, the payload ran to completion). dash has no applet table —
 # every external command execs through /shims. The supervisor and monitors
 # stay on busybox applets (PATH=/bin, never shimmed).
+# GC-FSW-003 pre-job baseline (live microvm-e2abe44348e29c9472f3b941): the
+# sampler previously ran only inside the fs-watcher loop, and a fast job was
+# over before a second sweep could straddle its writes — the live dd (2 MiB
+# into /var/cache) produced no event. Capture the baseline BEFORE the job
+# starts so any job-time growth is provably newer than the baseline; the
+# final post-job sample below closes the straddle deterministically.
+gc_cache_growth_sample "\$session" /root/.npm /root/.cache /var/cache >/dev/null 2>&1 || true
 if [ "$have_setsid" = true ]; then
   PATH=/shims:/bin /bin/setsid /bin/dash /job.sh &
 else
@@ -2446,6 +2477,14 @@ else
     if [ "\$ppid" = "\$job_pid" ]; then kill -KILL "\${p#/proc/}" 2>/dev/null; fi
   done
   kill -KILL "\$job_pid" 2>/dev/null
+fi
+# GC-FSW-003 final sample (see the pre-job baseline note): the supervisor
+# loop exits when the job ends or the killswitch trips, so this is the one
+# sample guaranteed to run AFTER any job-time cache growth, independent of
+# the fs-watcher loop's lifetime. Fail closed: a sampler error is logged,
+# never silently blind.
+if ! gc_cache_growth_sample "\$session" /root/.npm /root/.cache /var/cache >/dev/null 2>&1; then
+  gc_log_event "\$session" "sweep" "GC-FSW-003" "sampler" "cache-growth sampling failed" "error" >/dev/null 2>&1 || true
 fi
 if [ ! -f "\$session/kill" ]; then gc_session_end "\$session" || :; fi
 # Denial-evidence transport (design section 5): framed base64 envelope on the
