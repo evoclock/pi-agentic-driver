@@ -22,7 +22,7 @@ const FIXTURE = join(ROOT, "scripts/enforcement/linux_microvm_remote_fixture.sh"
 const TAXONOMY_FILE = join(ROOT, "scripts/enforcement/guest_containment_taxonomy.v1.json");
 // Pinned digest of the shipped taxonomy (design section 2: pinned per
 // repository revision; the fixture embeds and verifies the same digest).
-const TAXONOMY_SHA256 = "e77fb07387ebfad66030981f05b21c300e9d3e2a96d826dd3ca2b60e91411f4b";
+const TAXONOMY_SHA256 = "f0d4f11150e0f9aef562f1e7d61afd9fa8df1f40f1c90c3c011dd768e335bb84";
 const INITRAMFS = "a".repeat(64);
 
 function runFixture(args, env = {}, stdin = undefined) {
@@ -762,11 +762,12 @@ test("H4: busybox applet bypass, credential reads, env probing, manifests, and d
     const fs = async (...args) => JSON.parse(await runFixture(["--gc-fs-detect", join(dir, "s2"), ...args]));
     assert.equal((await fs("/opt/app/package.json")).rule, "GC-PKG-003");
     assert.equal((await fs("/dev/console")).rule, "GC-TOOL-002");
-    // Taxonomy dispositions: the gap rules are explicitly marked.
+    // Taxonomy dispositions: every rule now declares a wired detector; the
+    // four former taxonomy-only rules became detectors in the P11 step.
     const taxonomy = JSON.parse(await readFile(TAXONOMY_FILE, "utf8"));
     const byId = Object.fromEntries(taxonomy.rules.map((r) => [r.id, r]));
     for (const id of ["GC-FSW-003", "GC-SHR-001", "GC-SHR-002", "GC-LOG-001"]) {
-      assert.match(byId[id].disposition, /^taxonomy-only-until-detector:/, `${id} must declare its missing detector`);
+      assert.match(byId[id].disposition, /^detector:/, `${id} must declare its wired detector`);
     }
     for (const id of ["GC-CRED-001", "GC-CRED-002", "GC-PKG-003", "GC-LOG-002", "GC-TOOL-001", "GC-TOOL-002"]) {
       assert.match(byId[id].disposition, /^detector:/, `${id} must declare a wired detector`);
@@ -1018,6 +1019,485 @@ test("R5: exec'd denial never signals PID 1; containment stays synchronous via t
     assert.equal((await readFile(join(b.sessionDir, "kill"), "utf8")).trim(), "immediate", "the orphaned denial must still trip GC-NET-002");
   } finally {
     await rm(b.sandbox, { recursive: true, force: true });
+  }
+});
+
+// --- Acceptance-matrix TO-ADD rows: B3, B4, B6, B8, B9, D11 (real dispatch
+// sandbox), C12 (proc sweep + detect hooks), D4/D5 (decision core). The
+// dispatcher's process-group kill branch is reachable only where /proc exists
+// (Linux); on macOS the synchronous parent kill contains the job (see R5).
+// Rows whose observable is the trip itself assert it unconditionally;
+// group-scope observables are asserted where the branch is reachable.
+
+function groupKillReachable() {
+  return existsSync("/proc/self/stat") && existsSync("/proc/1/stat");
+}
+
+async function assertProcessGone(pid, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastCode = null;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (e) {
+      if (e.code === "ESRCH") return;
+      lastCode = e.code;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.fail(`process ${pid} survived the kill (last error code ${lastCode})`);
+}
+
+const B_TEST_SLEEPER = `sleep 5 >/dev/null 2>&1 & echo $! > SLEEPER_PID_FILE\n`;
+
+function sleeperJob(sandbox, followUp) {
+  return (
+    B_TEST_SLEEPER.replace("SLEEPER_PID_FILE", JSON.stringify(join(sandbox, "sleeper.pid"))) +
+    "wget example.com &\nwait\n" +
+    followUp
+  );
+}
+
+test("B3: the shell -c wrapper form reaches the shim→dispatch path and trips", async () => {
+  const { sandbox, sessionDir, shimsPath } = await realDispatchSandbox();
+  try {
+    writeFileSync(
+      join(sandbox, "job.sh"),
+      "echo b3-start\n/bin/sh -c 'wget example.com'\n",
+      { mode: 0o755 },
+    );
+    // The wrapper shell stands in for the guest's busybox-sh wrapper: it
+    // resolves the inner command through PATH, so /shims/wget interposes and
+    // the real dispatch classifies and trips exactly as for a bare command.
+    const run = await runJobDetached(join(sandbox, "job.sh"), shimsPath);
+    assert.ok(run.stdout.includes("b3-start"), "the wrapper prefix must run");
+    assert.equal(
+      (await readFile(join(sessionDir, "kill"), "utf8")).trim(),
+      "immediate",
+      "the wrapped denial must trip the killswitch through the shim→dispatch path",
+    );
+    const log = await readFile(join(sessionDir, "containment.log.jsonl"), "utf8");
+    assert.ok(log.includes('"rule":"GC-NET-002"'), "the inner command must be classified by the real dispatch");
+    assert.ok(
+      log.includes('"schema":"agentic-driver.guest-containment.killswitch.v1"') && log.includes('"final":true'),
+      "a terminal killswitch event must be logged for the wrapped form",
+    );
+    if (groupKillReachable()) {
+      assert.equal(run.signal, "SIGKILL", "where the group branch is reachable the job is contained synchronously");
+    }
+  } finally {
+    await rm(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("B4: nested quoting wrappers do not shield the inner command from classification", async () => {
+  const { sandbox, sessionDir, shimsPath } = await realDispatchSandbox();
+  try {
+    writeFileSync(
+      join(sandbox, "job.sh"),
+      'echo b4-start\n/bin/sh -c "sh -c \'wget example.com\'"\n',
+      { mode: 0o755 },
+    );
+    const run = await runJobDetached(join(sandbox, "job.sh"), shimsPath);
+    assert.ok(run.stdout.includes("b4-start"), "the nested wrapper must run");
+    assert.equal(
+      (await readFile(join(sessionDir, "kill"), "utf8")).trim(),
+      "immediate",
+      "the inner-most command must still trip the killswitch",
+    );
+    const log = await readFile(join(sessionDir, "containment.log.jsonl"), "utf8");
+    assert.ok(log.includes('"rule":"GC-NET-002"'), "the inner command must be classified despite the nested quoting");
+    if (groupKillReachable()) {
+      assert.equal(run.signal, "SIGKILL");
+    }
+  } finally {
+    await rm(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("B6: a denied pipeline member stops the pipeline through the real dispatch", async () => {
+  const { sandbox, sessionDir, shimsPath } = await realDispatchSandbox();
+  try {
+    writeFileSync(
+      join(sandbox, "job.sh"),
+      "echo b6-start\necho upstream-member | wget example.com\necho b6-never\n",
+      { mode: 0o755 },
+    );
+    const run = await runJobDetached(join(sandbox, "job.sh"), shimsPath);
+    assert.ok(run.stdout.includes("b6-start"), "the pre-pipeline prefix must run");
+    // The denied member is forked directly by the job shell, so the
+    // synchronous parent kill stops the pipeline on every platform.
+    assert.equal(run.signal, "SIGKILL", "the denied pipeline member must stop the job synchronously");
+    assert.ok(!run.stdout.includes("b6-never"), "nothing after the denied pipeline may run");
+    assert.equal((await readFile(join(sessionDir, "kill"), "utf8")).trim(), "immediate");
+    const log = await readFile(join(sessionDir, "containment.log.jsonl"), "utf8");
+    assert.ok(log.includes('"rule":"GC-NET-002"'));
+  } finally {
+    await rm(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("B8: a backgrounded denial kills the job shell synchronously; the group branch takes the siblings where reachable", async () => {
+  const { sandbox, sessionDir, shimsPath } = await realDispatchSandbox();
+  try {
+    writeFileSync(join(sandbox, "job.sh"), sleeperJob(sandbox, "echo b8-never\n"), { mode: 0o755 });
+    const run = await runJobDetached(join(sandbox, "job.sh"), shimsPath);
+    // The backgrounded wget is forked directly by the job shell, so the
+    // synchronous parent kill reaches the shell itself — not just the child.
+    assert.equal(run.signal, "SIGKILL", "the job shell must die, not merely the denied child");
+    assert.ok(!run.stdout.includes("b8-never"), "the shell must not continue after the backgrounded denial");
+    assert.equal((await readFile(join(sessionDir, "kill"), "utf8")).trim(), "immediate");
+    const log = await readFile(join(sessionDir, "containment.log.jsonl"), "utf8");
+    assert.ok(log.includes('"rule":"GC-NET-002"'));
+    if (groupKillReachable()) {
+      const sleeper = Number((await readFile(join(sandbox, "sleeper.pid"), "utf8")).trim());
+      assert.ok(Number.isInteger(sleeper) && sleeper > 0);
+      // The unrelated background sibling must be group-killed too.
+      await assertProcessGone(sleeper);
+    }
+  } finally {
+    await rm(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("B9: a denial inside a subshell still trips the killswitch", async () => {
+  const { sandbox, sessionDir, shimsPath } = await realDispatchSandbox();
+  try {
+    writeFileSync(
+      join(sandbox, "job.sh"),
+      "echo b9-start\n( wget example.com )\necho b9-never\n",
+      { mode: 0o755 },
+    );
+    const run = await runJobDetached(join(sandbox, "job.sh"), shimsPath);
+    assert.ok(run.stdout.includes("b9-start"), "the pre-subshell prefix must run");
+    // The trip is the row's observable: the subshell's denial writes the kill
+    // flag and logs the terminal killswitch event like any other form.
+    assert.equal(
+      (await readFile(join(sessionDir, "kill"), "utf8")).trim(),
+      "immediate",
+      "the subshell denial must trip the killswitch",
+    );
+    const log = await readFile(join(sessionDir, "containment.log.jsonl"), "utf8");
+    assert.ok(log.includes('"rule":"GC-NET-002"') && log.includes('"final":true'));
+    if (groupKillReachable()) {
+      assert.equal(run.signal, "SIGKILL", "where the group branch is reachable the subshell denial contains the whole job");
+      assert.ok(!run.stdout.includes("b9-never"), "the job shell must not continue past the subshell denial");
+    }
+  } finally {
+    await rm(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("D11: background/group denial suppresses follow-up commands and empties the job group where reachable", async () => {
+  const { sandbox, sessionDir, shimsPath } = await realDispatchSandbox();
+  try {
+    writeFileSync(join(sandbox, "job.sh"), sleeperJob(sandbox, "echo d11-never-runs\n"), { mode: 0o755 });
+    const run = await runJobDetached(join(sandbox, "job.sh"), shimsPath);
+    assert.ok(!run.stdout.includes("d11-never-runs"), "no follow-up command may run after a backgrounded denial");
+    assert.equal(run.signal, "SIGKILL");
+    assert.equal((await readFile(join(sessionDir, "kill"), "utf8")).trim(), "immediate");
+    const log = await readFile(join(sessionDir, "containment.log.jsonl"), "utf8");
+    assert.ok(log.includes('"rule":"GC-NET-002"') && log.includes('"final":true'));
+    if (groupKillReachable()) {
+      const sleeper = Number((await readFile(join(sandbox, "sleeper.pid"), "utf8")).trim());
+      await assertProcessGone(sleeper);
+    }
+  } finally {
+    await rm(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("C12: kernel threads produce no unknown-class flood through the real proc sweep and detect path", async () => {
+  const dir = await tempState();
+  try {
+    const mkProc = (base, pid, { comm, cmdline = null, ppid = null }) => {
+      mkdirSync(join(base, pid), { recursive: true });
+      writeFileSync(join(base, pid, "comm"), comm);
+      if (cmdline !== null) writeFileSync(join(base, pid, "cmdline"), cmdline);
+      writeFileSync(join(base, pid, "stat"), `1 (x) S ${ppid ?? 1} 1 1 0 0 0 0 0 0`);
+    };
+    // Mixed tree: kernel threads beside userspace processes.
+    const base = join(dir, "proc");
+    mkdirSync(base, { recursive: true });
+    mkProc(base, "10", { comm: "kthreadd", ppid: 0 });
+    mkProc(base, "20", { comm: "kworker/u8:2", cmdline: "", ppid: 2 });
+    mkProc(base, "21", { comm: "kworker/1:3", ppid: 2 });
+    mkProc(base, "30", { comm: "evil-agent", cmdline: "evil\0agent", ppid: 100 });
+    mkProc(base, "31", { comm: "sh", cmdline: "sh\0-c", ppid: 100 });
+    const state = join(dir, "s");
+    mkdirSync(state, { recursive: true });
+    writeFileSync(join(state, "allowlist"), "");
+    // The guest supervisor loop (sweep → supervisor-comm skip → allowlist
+    // gate → gc_proc_detect), driven through the real hooks.
+    const sweep = (await runFixture(["--gc-proc-sweep", base])).trim().split("\n").filter(Boolean);
+    assert.deepEqual(sweep, ["evil-agent", "sh"], "kernel threads must be filtered at the sweep itself");
+    for (const c of sweep) {
+      if (["busybox", "sh", "init", "inotifyd", "poweroff", "sync", "comm"].includes(c)) continue;
+      await runFixture(["--gc-proc-detect", state, c]);
+    }
+    const events = (await readFile(join(state, "containment.log.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    assert.equal(events.length, 1, "only the userspace process may be flagged (sh is a supervisor comm)");
+    assert.match(events[0].event.subject.value, /evil-agent/);
+    assert.ok(
+      !events.some((e) => /kworker|kthreadd/.test(e.event.subject.value)),
+      "kernel threads must never be logged as unknown-class anomalies",
+    );
+    assert.ok(!existsSync(join(state, "kill")), "no unknown-class flood may reach the ANOMALY threshold");
+    // A kernel-thread-only /proc floods nothing at all: no events, no pressure.
+    const kbase = join(dir, "kproc");
+    mkdirSync(kbase, { recursive: true });
+    mkProc(kbase, "10", { comm: "kthreadd", ppid: 0 });
+    mkProc(kbase, "20", { comm: "kworker/u8:2", cmdline: "", ppid: 2 });
+    const kstate = join(dir, "ks");
+    mkdirSync(kstate, { recursive: true });
+    writeFileSync(join(kstate, "allowlist"), "");
+    const ksweep = (await runFixture(["--gc-proc-sweep", kbase])).trim();
+    assert.equal(ksweep, "", "a kernel-thread-only sweep must flag nothing");
+    assert.ok(!existsSync(join(kstate, "containment.log.jsonl")), "no unknown-class events may be logged for kernel threads");
+    assert.ok(!existsSync(join(kstate, "pressure.unknown")), "kernel threads must not grow ANOMALY pressure");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("D4: pressure outside the 60 s window decays; fresh events still accumulate to the threshold", async () => {
+  const dir = await tempState();
+  try {
+    // Decay half: four ELEVATED hits aged well outside the sliding window.
+    const state = join(dir, "decayed");
+    mkdirSync(state, { recursive: true });
+    const stale = Math.floor(Date.now() / 1000) - 120;
+    writeFileSync(join(state, "pressure.GC-PKG"), `${stale}\n`.repeat(4));
+    const decayed = await decide(state, "GC-PKG-001", "npm install pkg-stale");
+    assert.equal(decayed.tripped, false, "stale pressure must not contribute to the threshold");
+    assert.equal(decayed.pressure, 1, "only the fresh event counts once the window has passed");
+    for (let i = 0; i < 3; i++) {
+      const d = await decide(state, "GC-PKG-001", `npm install pkg-${i}`);
+      assert.equal(d.tripped, false);
+    }
+    const trip = await decide(state, "GC-PKG-001", "npm install pkg-fresh");
+    assert.equal(trip.tripped, true, "fresh events inside the window still accumulate to the threshold");
+    assert.equal(trip.pressure, 5);
+    assert.equal(trip.threshold, 5);
+    // In-window half: four hits inside the window trip on the next event.
+    const wstate = join(dir, "in-window");
+    mkdirSync(wstate, { recursive: true });
+    const fresh = Math.floor(Date.now() / 1000) - 30;
+    writeFileSync(join(wstate, "pressure.GC-PKG"), `${fresh}\n`.repeat(4));
+    const inWindow = await decide(wstate, "GC-PKG-001", "npm install pkg-in-window");
+    assert.equal(inWindow.tripped, true, "events inside the 60 s window must still count");
+    assert.equal(inWindow.pressure, 5);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("D5: CRITICAL trips immediately amid untripped ELEVATED pressure", async () => {
+  const dir = await tempState();
+  const state = join(dir, "s");
+  try {
+    for (let i = 0; i < 4; i++) {
+      const d = await decide(state, "GC-PKG-001", `npm install pkg-${i}`);
+      assert.equal(d.tripped, false, "ELEVATED pressure below the threshold must not trip");
+      assert.equal(d.pressure, i + 1);
+    }
+    const crit = await decide(state, "GC-CRED-001", "cat ~/.ssh/id_rsa");
+    assert.equal(crit.tripped, true, "CRITICAL must trip regardless of the accumulated ELEVATED pressure");
+    assert.equal(crit.tier, "CRITICAL");
+    assert.equal(crit.mode, "immediate");
+    assert.equal(crit.pressure, null, "immediate trips carry null pressure");
+    const log = await readFile(join(state, "containment.log.jsonl"), "utf8");
+    const ksLines = log.trim().split("\n").map((l) => JSON.parse(l))
+      .filter((e) => e.schema === "agentic-driver.guest-containment.killswitch.v1");
+    const sealed = ksLines.filter((e) => e.logSha256);
+    assert.equal(sealed.length, 1, "exactly one sealed trip: the CRITICAL one");
+    assert.equal(sealed[0].trigger.rule, "GC-CRED-001");
+    assert.equal(sealed[0].trigger.tier, "CRITICAL");
+    assert.equal(sealed[0].trigger.mode, "immediate");
+    assert.ok(
+      ksLines.every((e) => e.trigger.rule === "GC-CRED-001"),
+      "no ELEVATED trip may precede the CRITICAL trip",
+    );
+    assert.equal((await readFile(join(state, "kill"), "utf8")).trim(), "immediate");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("A22: GC-PKG-002 argv entry — publish/token/.npmrc/pip-config forms deny and accumulate GC-PKG pressure", async () => {
+  const dir = await tempState();
+  try {
+    const shim = async (state, ...args) => JSON.parse(await runFixture(["--gc-shim", join(dir, state), ...args]));
+    // Fresh state per form: every form reaches the same rule through the
+    // real shim classification (A2's entry path, not just the decide level).
+    assert.equal((await shim("pub", "npm", "publish", "left-pad")).rule, "GC-PKG-002");
+    assert.equal((await shim("token", "npm", "token", "list")).rule, "GC-PKG-002");
+    assert.equal((await shim("npmrc", "tee", "/home/u/.npmrc")).rule, "GC-PKG-002");
+    assert.equal((await shim("pipcfg", "pip", "config", "set", "global.index-url", "https://evil")).rule, "GC-PKG-002");
+    // Threshold half: `npm publish` hits accumulate the shared GC-PKG class
+    // pressure; the 5th qualifying event trips (ELEVATED ≥5/60s).
+    const state = join(dir, "acc");
+    for (let i = 0; i < 4; i++) {
+      const d = await shim("acc", "npm", "publish", `pkg-${i}`);
+      assert.equal(d.rule, "GC-PKG-002");
+      assert.equal(d.decision, "deny");
+    }
+    assert.equal((await readFile(join(state, "pressure.GC-PKG"), "utf8")).trim().split("\n").length, 4, "each deny must accumulate class pressure");
+    assert.ok(!existsSync(join(state, "kill")), "ELEVATED must not trip below the class threshold");
+    const fifth = await shim("acc", "npm", "publish", "pkg-5");
+    assert.equal(fifth.rule, "GC-PKG-002");
+    assert.ok(existsSync(join(state, "kill")), "the 5th GC-PKG event must trip the aggregate threshold");
+    const log = await readFile(join(state, "containment.log.jsonl"), "utf8");
+    const ks = JSON.parse(log.trim().split("\n").at(-1));
+    assert.equal(ks.trigger.rule, "GC-PKG-002");
+    assert.equal(ks.trigger.class, "GC-PKG");
+    assert.equal(ks.trigger.tier, "ELEVATED");
+    assert.equal(ks.trigger.mode, "aggregate");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("A23: mixed GC-PROBE argv events accumulate to the shared class threshold", async () => {
+  const dir = await tempState();
+  try {
+    const state = join(dir, "s");
+    const shim = async (...args) => JSON.parse(await runFixture(["--gc-shim", state, ...args]));
+    // Alternating probe forms share the GC-PROBE pressure file: introspection
+    // (GC-PROBE-001) and enumeration (GC-PROBE-002) are one class.
+    const forms = [
+      ["cat", "/gc/core.sh"],
+      ["ps", "-ef"],
+      ["cat", "/gc/core.sh"],
+      ["ps", "-ef"],
+    ];
+    for (const [tool, ...args] of forms) {
+      const d = await shim(tool, ...args);
+      assert.equal(d.decision, "deny");
+      assert.match(d.rule, /^GC-PROBE-00[12]$/);
+    }
+    assert.equal((await readFile(join(state, "pressure.GC-PROBE"), "utf8")).trim().split("\n").length, 4, "mixed probe forms must accumulate one class pressure");
+    assert.ok(!existsSync(join(state, "kill")));
+    const fifth = await shim("ps", "-ef");
+    assert.equal(fifth.rule, "GC-PROBE-002");
+    assert.ok(existsSync(join(state, "kill")), "the 5th argv probe event must trip the shared class threshold");
+    const log = await readFile(join(state, "containment.log.jsonl"), "utf8");
+    const ks = JSON.parse(log.trim().split("\n").at(-1));
+    assert.equal(ks.trigger.rule, "GC-PROBE-002");
+    assert.equal(ks.trigger.class, "GC-PROBE");
+    assert.equal(ks.trigger.threshold, 5);
+    // Event lines carry the class and subject, not the rule id: both probe
+    // forms must appear under the shared GC-PROBE class.
+    assert.ok(
+      log.includes('"class":"GC-PROBE"') && log.includes("cat /gc/core.sh") && log.includes("ps -ef"),
+      "both probe forms must have reached the shared class log",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("B13: chained && and || forms reach classification and the suffix never runs", async () => {
+  // Both chained forms take the real path: job shell -> PATH lookup ->
+  // /shims/wget -> real dispatch -> real core -> GC-NET-002 trip ->
+  // synchronous kill. The `||` form is the meaningful one: with the shim
+  // exiting non-zero, an uncontained shell would run the fallback.
+  for (const [chain, suffix] of [["&&", "chained-never"], ["||", "fallback-ran"]]) {
+    const { sandbox, sessionDir, shimsPath } = await realDispatchSandbox();
+    try {
+      writeFileSync(
+        join(sandbox, "job.sh"),
+        `echo chain-start\nwget example.com ${chain} echo ${suffix}\n`,
+        { mode: 0o755 },
+      );
+      const run = await runJobDetached(join(sandbox, "job.sh"), shimsPath);
+      assert.ok(run.stdout.includes("chain-start"), `${chain}: the prefix must run under the shim PATH`);
+      assert.ok(!run.stdout.includes(suffix), `${chain}: the suffix after a tripped denial must never run`);
+      assert.equal(run.signal, "SIGKILL", `${chain}: the dispatcher must kill the job shell synchronously`);
+      assert.equal((await readFile(join(sessionDir, "kill"), "utf8")).trim(), "immediate", `${chain}: the denial must trip the killswitch immediately`);
+      const log = await readFile(join(sessionDir, "containment.log.jsonl"), "utf8");
+      assert.ok(log.includes('"rule":"GC-NET-002"'), `${chain}: the denied member must be classified as GC-NET-002`);
+    } finally {
+      await rm(sandbox, { recursive: true, force: true });
+    }
+  }
+});
+
+test("C15: tcp6 and udp socket rows trip GC-NET-001 identically to tcp", async () => {
+  const dir = await tempState();
+  try {
+    // Row forms exactly as the sweep reads them from /proc/net/{tcp,tcp6,udp}:
+    // tcp6 carries 32-hex-digit addresses, udp carries the udp state column.
+    const rows = {
+      "tcp6": "  1: 00000000000000000000000000000000:0035 00000000000000000000000000000000:0000 0A",
+      "udp": "  2: 00000000:0035 00000000:0000 07",
+    };
+    for (const [family, row] of Object.entries(rows)) {
+      const state = join(dir, family);
+      const out = JSON.parse(await runFixture(["--gc-net-detect", state, row]));
+      assert.equal(out.decision, "deny", `${family}: any socket row must deny`);
+      assert.equal(out.rule, "GC-NET-001");
+      const log = await readFile(join(state, "containment.log.jsonl"), "utf8");
+      const ks = JSON.parse(log.trim().split("\n").at(-1));
+      assert.equal(ks.trigger.rule, "GC-NET-001", `${family}: the row must trip the killswitch`);
+      assert.equal(await readFile(join(state, "kill"), "utf8"), "immediate\n", `${family}: HIGH tier trips immediately`);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("D15: GC-FSW-003 sampler tolerates absent cache roots (baseline only, no decision)", async () => {
+  const dir = await tempState();
+  try {
+    const state = join(dir, "s");
+    // Watched roots that do not exist: the sampler must neither crash nor
+    // invent a decision — it records the baseline and stays silent.
+    const first = await runFixture(["--gc-cache-growth", state, join(dir, "absent-a"), join(dir, "absent-b")]);
+    assert.equal(first.trim(), "", "first sample with absent roots records the baseline only");
+    const second = await runFixture(["--gc-cache-growth", state, join(dir, "absent-a"), join(dir, "absent-b")]);
+    assert.equal(second.trim(), "", "zero delta over absent roots must not produce a decision");
+    assert.equal(await readFile(join(state, "cache.baseline"), "utf8"), "0\n", "absent roots sum to a zero baseline");
+    assert.ok(!existsSync(join(state, "kill")), "no decision may trip the killswitch");
+    assert.ok(!existsSync(join(state, "pressure.GC-FSW")), "no decision may accumulate class pressure");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("D16: unknown-class pressure decays across the 60 s window like ELEVATED classes", async () => {
+  const dir = await tempState();
+  try {
+    const state = join(dir, "s");
+    mkdirSync(state, { recursive: true });
+    // Nine ANOMALY hits aged well outside the sliding window: the residual
+    // unknown class must not trip on stale pressure.
+    const stale = Math.floor(Date.now() / 1000) - 120;
+    writeFileSync(join(state, "pressure.unknown"), `${stale}\n`.repeat(9));
+    const first = await decide(state, "unknown", "./strangetool");
+    assert.equal(first.tripped, false, "stale unknown pressure must not contribute to the threshold");
+    assert.equal(first.pressure, 1, "only the fresh event counts once the window has passed");
+    assert.equal(first.severity, "ANOMALY");
+    assert.equal(first.class, "unknown");
+    // Fresh unknown events inside the window still accumulate to 10.
+    for (let i = 0; i < 8; i++) {
+      const d = await decide(state, "unknown", `./strangetool-${i}`);
+      assert.equal(d.tripped, false);
+      assert.equal(d.pressure, i + 2);
+    }
+    const trip = await decide(state, "unknown", "./strangetool-final");
+    assert.equal(trip.tripped, true, "the 10th unknown event inside the window must trip");
+    assert.equal(trip.pressure, 10);
+    assert.equal(trip.threshold, 10);
+    assert.equal(trip.mode, "aggregate");
+    assert.ok(existsSync(join(state, "kill")));
+    const log = await readFile(join(state, "containment.log.jsonl"), "utf8");
+    const ks = JSON.parse(log.trim().split("\n").at(-1));
+    assert.equal(ks.trigger.rule, "unknown");
+    assert.equal(ks.trigger.class, "unknown");
+    assert.equal(ks.trigger.tier, "ANOMALY");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });
 
@@ -1333,6 +1813,111 @@ test("D1: production trip sequence writes the kill report at the advertised path
     assert.deepEqual(report.teardown, { domainAbsent: true, destroyRequested: true, aclRestored: true });
     assert.ok(!reportRaw.includes("PENDING"), "no teardown field may remain PENDING after finalization");
     assert.equal(report.logSha256, block.logSha256, "report digest must match the receipt-advertised evidence digest");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("SHR/LOG/FSW-003: the four taxonomy-only rules are real detectors", async () => {
+  const dir = await tempState();
+  try {
+    // Fresh state per family: HIGH/CRITICAL denials trip on first occurrence,
+    // and post-trip the session freezes, so shared state would mask asserts.
+    const fsDetect = (state, path, env) => runFixture(["--gc-fs-detect", state, path], env).then(JSON.parse);
+    // Synthetic /proc/mounts sources: gc_share_mounted reads GC_PROC_MOUNTS in
+    // tests (production default is /proc/mounts).
+    const mountsUnarmed = join(dir, "mounts.unarmed");
+    const mountsArmed = join(dir, "mounts.armed");
+    const mountsFstype = join(dir, "mounts.fstype");
+    writeFileSync(mountsUnarmed, "sysfs /sys sysfs rw 0 0\n");
+    writeFileSync(mountsArmed, "sysfs /sys sysfs rw 0 0\nhostshare /share virtiofs rw,mode=777 0 0\n");
+    writeFileSync(mountsFstype, "hostshare /mnt/other 9p rw 0 0\n");
+    const st1 = join(dir, "s1");
+    assert.equal((await fsDetect(st1, "/share/cache/pkg.tgz", { GC_PROC_MOUNTS: mountsArmed })).rule, "GC-SHR-001", "armed share path");
+    assert.ok(existsSync(join(st1, "kill")), "GC-SHR-001 is HIGH immediate: first occurrence must trip");
+    const st1d = join(dir, "s1d");
+    assert.equal((await fsDetect(st1d, "/mnt/share/x", { GC_PROC_MOUNTS: mountsFstype })).rule, "GC-SHR-001", "share-fstype mounts arm the detector too");
+    const st1u = join(dir, "s1u");
+    const unarmedShare = await fsDetect(st1u, "/share/cache/pkg.tgz", { GC_PROC_MOUNTS: mountsUnarmed });
+    assert.equal(unarmedShare.rule, "GC-FSW-001", "unarmed share path falls through to FSW-001, not a share trip");
+    assert.equal(unarmedShare.decision, "deny");
+    assert.equal((await fsDetect(st1u, "/mnt/share/x", { GC_PROC_MOUNTS: mountsUnarmed })).rule, "GC-FSW-001");
+    assert.ok(!existsSync(join(st1u, "kill")), "unarmed share writes must not trip GC-SHR-001");
+    const st1b = join(dir, "s1b");
+    assert.equal((await fsDetect(st1b, "/root/.npm/_cacache")).rule, "GC-SHR-001", "deny-otherwise shared-cache root");
+    assert.ok(existsSync(join(st1b, "kill")));
+    const st1c = join(dir, "s1c");
+    assert.equal((await fsDetect(st1c, "/var/cache/apk/x")).rule, "GC-SHR-001");
+    const st2 = join(dir, "s2");
+    assert.equal((await fsDetect(st2, "/root/Maildir/new/1")).rule, "GC-SHR-002", "coordination path");
+    assert.equal((await fsDetect(st2, "/var/task-queue/job")).rule, "GC-SHR-002");
+    assert.ok(existsSync(join(st2, "kill")), "GC-SHR-002 is HIGH immediate");
+    const st3 = join(dir, "s3");
+    assert.equal((await fsDetect(st3, "/root/console.typescript")).rule, "GC-LOG-001", "transcript path");
+    assert.equal((await fsDetect(st3, "/var/log/transcript")).rule, "GC-LOG-001");
+    assert.ok(existsSync(join(st3, "kill")), "GC-LOG-001 is CRITICAL immediate");
+    // Scratch-root precedence: writes under /tmp/session stay allowed even
+    // with matching names (false-positive discipline).
+    const st4 = join(dir, "s4");
+    assert.equal((await fsDetect(st4, "/tmp/session/Maildir/new/1")).decision, "allow");
+    // argv forms reach the same rules through shim classification.
+    const st5 = join(dir, "s5");
+    assert.equal(JSON.parse(await runFixture(["--gc-shim", st5, "sh", "-c", "echo x > /root/Maildir/new/1"])).rule, "GC-SHR-002");
+    const st6 = join(dir, "s6");
+    assert.equal(JSON.parse(await runFixture(["--gc-shim", st6, "tee", "/root/console.typescript"])).rule, "GC-LOG-001");
+    // Job-scratch carve-out (false-positive discipline): the sanctioned
+    // scratch root is the one tree a job may write freely, so the GC-SHR-002
+    // and GC-LOG-001 argv heuristics must not fire on scratch-local paths.
+    const shimLearn = async (...args) => JSON.parse(await runFixture(["--gc-shim", join(dir, "s7"), ...args], { GC_LEARNING_WINDOW_SECONDS: "999" }));
+    assert.equal((await shimLearn("tee", "/tmp/session/console.typescript")).decision, "allow", "scratch-local transcript write is not GC-LOG-001");
+    assert.equal((await shimLearn("tee", "/tmp/session/job.transcript")).decision, "allow");
+    assert.equal((await shimLearn("sh", "-c", "cp x /tmp/session/agent-channel")).decision, "allow", "scratch-local coordination write is not GC-SHR-002");
+    assert.equal((await shimLearn("cp", "x", "/tmp/session/task-queue")).decision, "allow");
+    // The carve-out is at the scratch root only: writes outside the scratch
+    // keep denying, mixed lines keep denying, and every other rule still sees
+    // the raw command line.
+    const shimDeny = async (state, ...args) => JSON.parse(await runFixture(["--gc-shim", join(dir, state), ...args]));
+    assert.equal((await shimDeny("s8", "tee", "/var/log/console.typescript")).rule, "GC-LOG-001");
+    assert.equal((await shimDeny("s9", "cp", "x", "/agent-channel/y")).rule, "GC-SHR-002");
+    assert.equal((await shimDeny("s10", "sh", "-c", "cp /tmp/session/x /agent-channel/y")).rule, "GC-SHR-002", "mixed scratch/outside line still denies");
+    assert.equal((await shimDeny("s11", "rm", "/tmp/session/.gc/containment.log.jsonl")).rule, "GC-LOG-002", "the carve-out must not weaken the monitor-log rule");
+    assert.equal((await shimDeny("s12", "npm", "install", "left-pad")).rule, "GC-PKG-001", "other heuristics still see the raw line");
+    // GC-FSW-003: size-delta sampling, one ELEVATED decision per qualifying
+    // sweep, aggregate trip at the class threshold (5).
+    const gst = join(dir, "gs");
+    const grow = join(dir, "grow");
+    mkdirSync(grow, { recursive: true });
+    const first = await runFixture(["--gc-cache-growth", gst, grow]);
+    assert.equal(first.trim(), "", "first sample records the baseline only");
+    let block = 0;
+    const growBy2MiB = () => { block += 1; writeFileSync(join(grow, `b${block}.bin`), Buffer.alloc(2 * 1024 * 1024, 1)); };
+    for (let i = 0; i < 4; i++) {
+      growBy2MiB();
+      const d = JSON.parse(await runFixture(["--gc-cache-growth", gst, grow]));
+      assert.equal(d.rule, "GC-FSW-003");
+      assert.ok(d.growthKiB >= 1024, "delta must cross GC_CACHE_GROWTH_KIB");
+    }
+    assert.ok(!existsSync(join(gst, "kill")), "ELEVATED must not trip below the class threshold");
+    growBy2MiB();
+    JSON.parse(await runFixture(["--gc-cache-growth", gst, grow]));
+    assert.ok(existsSync(join(gst, "kill")), "the 5th qualifying sweep must trip the aggregate threshold");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("GC-FSW-003 sampler fails closed when the state dir cannot be created", async () => {
+  const dir = await tempState();
+  try {
+    // A file where the state dir should be: mkdir -p fails (ENOTDIR) and the
+    // sampler must return an error the caller logs, not succeed silently.
+    const blocked = join(dir, "blocked");
+    writeFileSync(blocked, "not a dir");
+    await assert.rejects(
+      runFixture(["--gc-cache-growth", join(blocked, "state"), join(dir, "watched")]),
+      (err) => err.code === 2,
+      "sampler must fail closed on mkdir failure",
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
