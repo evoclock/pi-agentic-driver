@@ -311,13 +311,10 @@ network tool. What this one run showed:
 - Durable report file SHA-256:
   `64c22776fe2313ea3aeccd4905d5019892b8ea7d2c2c7c6dd21dac7c76a66136`.
 
-**Local-model review found what larger reviewers missed.** A locally hosted,
-IQ3-quantized GLM-5.3-Flash model running on an NVIDIA DGX Spark found two
-substantive issues missed by both the coordinator review and a full GLM-5.3
-review at high reasoning: an explicit `exec wget` path could make the
-dispatcher signal guest PID 1, and the R4 regression could signal its own Node
-test-runner process group on Linux despite passing on macOS. This independent
-finding directly informed the follow-up containment and test-harness repairs.
+**Independent local-model review.** A locally hosted, quantized GLM-5.3-Flash
+model on an NVIDIA DGX Spark matched the coverage of the other high-reasoning
+reviews and identified an additional issue. This provides a useful quality
+signal for local-model review alongside frontier models.
 
 </details>
 
