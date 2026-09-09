@@ -1973,15 +1973,21 @@ case "$decision" in
     # supervisor kill path runs from the kill flag. When this denial TRIPPED
     # the killswitch (flag present), also kill the job synchronously: the
     # supervisor polls once a second, and without this the job shell would
-    # run its next command inside that window. Kill our parent (the job
-    # shell), and the whole job process group when we are in one that
-    # excludes PID 1 (setsid job); PID 1's group is never signalled.
+    # run its next command inside that window. PID-1 safety (review R1):
+    # never signal PPID directly when it is PID 1 — a job shell that exec'd
+    # the denied tool leaves dispatch parented by init; synchronous
+    # containment for that case is the process-group kill below, which fires
+    # only when dispatch's group differs from PID 1's group (setsid job) and
+    # is skipped when either group id cannot be established. PID 1 and its
+    # group are never signalled.
     if [ -f "$session/kill" ]; then
-      kill -KILL "$PPID" 2>/dev/null || true
+      if [ "$PPID" != "1" ]; then
+        kill -KILL "$PPID" 2>/dev/null || true
+      fi
       if [ -r /proc/self/stat ] && [ -r /proc/1/stat ]; then
         my_pgid=$(awk '{print $5}' /proc/self/stat 2>/dev/null) || my_pgid=
         init_pgid=$(awk '{print $5}' /proc/1/stat 2>/dev/null) || init_pgid=
-        if [ -n "$my_pgid" ] && [ "$my_pgid" != "$init_pgid" ]; then
+        if [ -n "$my_pgid" ] && [ -n "$init_pgid" ] && [ "$my_pgid" != "$init_pgid" ]; then
           kill -KILL 0 2>/dev/null || true
         fi
       fi
