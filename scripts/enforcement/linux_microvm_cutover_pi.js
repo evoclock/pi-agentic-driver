@@ -11,6 +11,17 @@ import { isNativeTuiContext } from "./native_tui_context.js";
 
 export const LINUX_MICROVM_CUTOVER_TOOL = "agentic_linux_microvm_cutover";
 export const LINUX_MICROVM_CUTOVER_SCHEMA = "agentic-driver.linux-microvm-cutover.v1";
+// Containment variant (design section 5): same receipt shape plus one closed
+// `containment` sub-object. v1 consumers stay safe; v2 is required whenever a
+// containment run was requested (fail-closed otherwise).
+export const LINUX_MICROVM_CUTOVER_SCHEMA_V2 = "agentic-driver.linux-microvm-cutover.v2";
+const RECEIPT_SCHEMAS = new Set([LINUX_MICROVM_CUTOVER_SCHEMA, LINUX_MICROVM_CUTOVER_SCHEMA_V2]);
+// Envelope-only relaxation (design sections 5, 6): on the console pty the
+// guest may emit the framed containment envelope after the marker; those
+// lines are parsed separately and never count as unbound output. Everything
+// else remains "unbound output = failure".
+const CONTAINMENT_MARKER_LINE = /^AGENTIC_CONTAINMENT_(BEGIN|END):[A-Za-z0-9._-]+$/;
+export const GUEST_CONTAINMENT_LOG_SCHEMA = "agentic-driver.guest-containment.log.v1";
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REMOTE_FIXTURE = join(SCRIPT_DIR, "linux_microvm_remote_fixture.sh");
 const TARGET_EXAMPLE = join(SCRIPT_DIR, "..", "..", "config", "microvm-target.v1.example.json");
@@ -96,7 +107,13 @@ function fixtureDomainForId(fixtureId) {
 // choose or change the target. Read order: the user's own config
 // (~/.pi/pi/config/microvm-target.v1.json) first, then the package-local
 // config/microvm-target.v1.json (shipped as a REPLACE-WITH template).
-const TARGET_FIELDS = new Set(["schema", "sshTarget", "local", "_comment"]);
+const TARGET_FIELDS = new Set(["schema", "sshTarget", "local", "vcpu", "memoryMiB", "jobPayload", "_comment"]);
+// Elastic resource allocation bounds (design section 6.1). User-configured
+// through the target config only; the model-visible tool surface stays closed.
+const VCPU_MIN = 1, VCPU_MAX = 64;
+const MEMORY_MIN = 64, MEMORY_MAX = 1048576;
+function validVcpu(value) { return Number.isInteger(value) && value >= VCPU_MIN && value <= VCPU_MAX; }
+function validMemory(value) { return Number.isInteger(value) && value >= MEMORY_MIN && value <= MEMORY_MAX; }
 export function loadMicroVMTarget(options = {}) {
   if (options.target && typeof options.target === "object") {
     return normalizeTarget(options.target);
@@ -133,9 +150,28 @@ function normalizeTarget(parsed) {
     && !parsed.sshTarget.includes("REPLACE-WITH-");
   const hasLocal = parsed.local === true;
   if (hasSshTarget === hasLocal) return null;
+  // Optional elastic allocation: any invalid value rejects the whole config
+  // (fail-closed) rather than silently falling back.
+  if (parsed.vcpu !== undefined && !validVcpu(parsed.vcpu)) return null;
+  if (parsed.memoryMiB !== undefined && !validMemory(parsed.memoryMiB)) return null;
+  // Containment job payload (design sections 1.3, 3; M6 wiring): a
+  // user-configured job command/script. Present = containment mode; absent =
+  // plain proof mode (backward compatible). Placeholder or invalid shape
+  // rejects the whole config fail-closed. Never model-set.
+  if (parsed.jobPayload !== undefined) {
+    if (typeof parsed.jobPayload !== "string" || !parsed.jobPayload.trim()
+        || parsed.jobPayload.includes("REPLACE-WITH-") || parsed.jobPayload.length > 8192) {
+      return null;
+    }
+  }
+  const extras = {
+    ...(parsed.vcpu !== undefined ? { vcpu: parsed.vcpu } : {}),
+    ...(parsed.memoryMiB !== undefined ? { memoryMiB: parsed.memoryMiB } : {}),
+    ...(parsed.jobPayload !== undefined ? { jobPayload: parsed.jobPayload } : {}),
+  };
   return Object.freeze(hasSshTarget
-    ? { mode: "ssh", sshTarget: parsed.sshTarget.trim() }
-    : { mode: "local" });
+    ? { mode: "ssh", sshTarget: parsed.sshTarget.trim(), ...extras }
+    : { mode: "local", ...extras });
 }
 
 // Shape validation for the user-relayed target parameter (untrusted input).
@@ -263,7 +299,7 @@ function requireHash(value, label) {
 function requireBoolean(value, label) {
   if (typeof value !== "boolean") throw phaseError("evidence", "receipt-invalid", `${label} is not boolean evidence`);
 }
-function parseReceipt(stdout) {
+export function parseReceipt(stdout) {
   const candidates = [];
   const unexpected = [];
   for (const line of String(stdout || "").split(/\r?\n/)) {
@@ -277,7 +313,7 @@ function parseReceipt(stdout) {
     }
     try {
       const value = JSON.parse(payload);
-      if (value?.schema === LINUX_MICROVM_CUTOVER_SCHEMA) candidates.push(value);
+      if (value?.schema && RECEIPT_SCHEMAS.has(value.schema)) candidates.push(value);
       else unexpected.push(trimmed);
     } catch {
       unexpected.push(trimmed);
@@ -289,16 +325,84 @@ function parseReceipt(stdout) {
     throw phaseError("evidence", "receipt-missing", detail);
   }
   if (candidates.length !== 1) throw phaseError("evidence", "receipt-ambiguous", "multiple structured microVM receipts were returned");
-  if (unexpected.length) throw phaseError("evidence", "receipt-extra-output", `unbound fixture output: ${unexpected.join(" ")}`);
+  if (unexpected.length) {
+    // Relax receipt-extra-output ONLY for the containment envelope marker
+    // lines, and only when a v2 (containment) receipt is in force. Any other
+    // unbound output still fails closed.
+    const envelopeLines = unexpected.filter((line) => CONTAINMENT_MARKER_LINE.test(line));
+    if (!(envelopeLines.length === unexpected.length
+        && candidates[0]?.schema === LINUX_MICROVM_CUTOVER_SCHEMA_V2)) {
+      throw phaseError("evidence", "receipt-extra-output", `unbound fixture output: ${unexpected.join(" ")}`);
+    }
+  }
   return candidates[0];
 }
-export function validateLinuxMicroVMReceipt(receipt, facts, fixtureId, scriptHash) {
-  exactKeys(receipt, ["schema", "ok", "status", "authorityCreated", "runtimeActivated", "persisted",
-    "identity", "marker", "scriptHash", "initramfsSha256", "teardown", "context"], "receipt");
-  if (receipt.schema !== LINUX_MICROVM_CUTOVER_SCHEMA || receipt.ok !== true || receipt.status !== "VERIFIED"
+function requireCount(value, label) {
+  if (!Number.isInteger(value) || value < 0) {
+    throw phaseError("evidence", "receipt-invalid", `${label} is not a non-negative integer count`);
+  }
+}
+// Closed containment sub-object (design section 5). A verified killswitch
+// trip with a verified log digest is still the success state for the
+// containment proof: the proof is that the killswitch worked.
+function validateContainmentBlock(receipt) {
+  const block = receipt.containment;
+  // Durable kill report (design section 5): the report path is present only
+  // on a tripped killswitch; a clean session must not carry one.
+  const blockKeys = ["schema", "taxonomySha256", "logSha256", "events", "denials", "probes", "concealmentIndex", "histogram", "killswitch"];
+  const trippedEarly = block?.killswitch?.tripped === true;
+  if (trippedEarly) blockKeys.push("killReportPath");
+  exactKeys(block, blockKeys, "containment block");
+  if (block.schema !== GUEST_CONTAINMENT_LOG_SCHEMA) {
+    throw phaseError("evidence", "receipt-invalid", "containment log schema is unexpected");
+  }
+  requireHash(block.taxonomySha256, "containment taxonomy digest");
+  requireHash(block.logSha256, "containment log digest");
+  requireCount(block.events, "containment event count");
+  requireCount(block.denials, "containment denial count");
+  requireCount(block.probes, "containment probe count");
+  requireCount(block.concealmentIndex, "containment concealment index");
+  // Compact class histogram (design section 4): class -> non-negative count.
+  if (!block.histogram || typeof block.histogram !== "object" || Array.isArray(block.histogram)
+      || Object.values(block.histogram).some((count) => !Number.isInteger(count) || count < 0)) {
+    throw phaseError("evidence", "receipt-invalid", "containment histogram is not a class-count map");
+  }
+  exactKeys(block.killswitch, ["tripped", "rule", "class", "tier", "guestPoweroff", "final"], "containment killswitch");
+  requireBoolean(block.killswitch.tripped, "killswitch tripped");
+  if (block.killswitch.guestPoweroff !== true || block.killswitch.final !== true) {
+    throw phaseError("evidence", "receipt-invalid", "killswitch guest poweroff or final flag is unexpected");
+  }
+  if (block.killswitch.tripped) {
+    if (typeof block.killswitch.rule !== "string" || !block.killswitch.rule
+        || typeof block.killswitch.class !== "string" || !block.killswitch.class
+        || typeof block.killswitch.tier !== "string" || !block.killswitch.tier) {
+      throw phaseError("evidence", "receipt-invalid", "killswitch tripped without rule, class, or tier");
+    }
+    if (typeof block.killReportPath !== "string" || !block.killReportPath.endsWith("kill-report.json")) {
+      throw phaseError("evidence", "receipt-invalid", "killswitch trip without a kill report path");
+    }
+  } else if (block.killswitch.rule !== null || block.killswitch.class !== null || block.killswitch.tier !== null) {
+    throw phaseError("evidence", "receipt-invalid", "killswitch rule, class, and tier must be null when not tripped");
+  }
+  return block;
+}
+export function validateLinuxMicroVMReceipt(receipt, facts, fixtureId, scriptHash, options = {}) {
+  const containmentRun = options.containment === true;
+  // Fail-closed: a containment run without the v2 receipt and its evidence is
+  // containment-evidence-missing, never silently downgraded.
+  if (containmentRun && receipt.schema !== LINUX_MICROVM_CUTOVER_SCHEMA_V2) {
+    throw phaseError("evidence", "containment-evidence-missing",
+      "containment run returned no v2 containment receipt");
+  }
+  const expectedKeys = ["schema", "ok", "status", "authorityCreated", "runtimeActivated", "persisted",
+    "identity", "marker", "scriptHash", "initramfsSha256", "teardown", "context"];
+  if (containmentRun || receipt.schema === LINUX_MICROVM_CUTOVER_SCHEMA_V2) expectedKeys.push("containment");
+  exactKeys(receipt, expectedKeys, "receipt");
+  if (!RECEIPT_SCHEMAS.has(receipt.schema) || receipt.ok !== true || receipt.status !== "VERIFIED"
       || receipt.authorityCreated !== false || receipt.runtimeActivated !== false || receipt.persisted !== false) {
     throw phaseError("evidence", "receipt-invalid", "receipt status or non-authorizing flags are unexpected");
   }
+  if (receipt.schema === LINUX_MICROVM_CUTOVER_SCHEMA_V2) validateContainmentBlock(receipt);
   const domain = fixtureDomainForId(fixtureId);
   exactKeys(receipt.identity, ["remoteHost", "fixtureId", "domain"], "receipt identity");
   if (receipt.identity.remoteHost !== facts.host || receipt.identity.fixtureId !== fixtureId || receipt.identity.domain !== domain) {
@@ -350,6 +454,16 @@ export function validateLinuxMicroVMReceipt(receipt, facts, fixtureId, scriptHas
   }
   return receipt;
 }
+// Elastic resource allocation (design section 6.1): user-configured through
+// the target config only (never model-set); the model-visible tool surface
+// stays closed. Defaults are the existing proof values.
+function resourceAllocation(target) {
+  return { vcpu: target?.vcpu ?? 1, memoryMiB: target?.memoryMiB ?? 128 };
+}
+function resourceLine(target) {
+  const allocation = resourceAllocation(target);
+  return `${allocation.vcpu} vCPU, ${allocation.memoryMiB} MiB, BusyBox initramfs, no disk, network, host share, credentials, GPU, or serving access.`;
+}
 function normalizedForwardedStderr(result, fallbackPhase, fallbackCode, fallbackDetail) {
   const text = String(result?.stderr || "");
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -365,6 +479,15 @@ function normalizedForwardedStderr(result, fallbackPhase, fallbackCode, fallback
     primary?.[2] || (cleanup.length ? "cleanup-failed" : fallbackCode), details.join("; "));
 }
 
+// Containment run mode (design sections 1.3, 5, 6; M6 wired): the
+// user-configured `jobPayload` in the target config is the only source of
+// containment mode — present payload = containment run (v2 receipt with the
+// containment block), absent = plain proof mode (v1, backward compatible).
+// The model cannot set or alter it: the tool schema stays closed (target
+// relay only) and the payload never crosses the model-visible surface.
+function payloadRedacted(payload) {
+  return boundedText(String(payload).replace(/\s+/g, " ").trim(), "payload").slice(0, 160);
+}
 export async function runLinuxMicroVMCutover(context, options = {}) {
   // Session-scoped user switch: only the explicit enable command can set this
   // flag in memory; it never persists to settings and the model cannot set it.
@@ -399,9 +522,28 @@ export async function runLinuxMicroVMCutover(context, options = {}) {
     if (confirmed !== true) {
       return denied("stopped", reason("confirmation", "not-granted", "No target was saved; native confirmation was not granted."));
     }
-    const saved = targetParam === "local"
-      ? { schema: TARGET_SCHEMA, local: true }
-      : { schema: TARGET_SCHEMA, sshTarget: targetParam };
+    // Read-modify-write: the confirmation authorizes changing WHERE the
+    // microVM runs — nothing else. A fresh narrow object here would silently
+    // drop the user's other configured fields (jobPayload above all: a
+    // re-save stripped it and flipped the next run to plain proof mode).
+    // Preserve every schema field the existing config carries; the decision
+    // under confirmation replaces exactly one of sshTarget/local. Preserved
+    // fields are still fully validated fail-closed by loadMicroVMTarget.
+    let existing = {};
+    try {
+      const parsed = JSON.parse(readFileSync(writePath, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) existing = parsed;
+    } catch {
+      // Absent or unreadable config: fresh write below.
+    }
+    const saved = { ...existing, schema: TARGET_SCHEMA };
+    if (targetParam === "local") {
+      delete saved.sshTarget;
+      saved.local = true;
+    } else {
+      delete saved.local;
+      saved.sshTarget = targetParam;
+    }
     try {
       mkdirSync(dirname(writePath), { recursive: true });
       writeFileSync(writePath, `${JSON.stringify(saved, null, 2)}\n`);
@@ -423,6 +565,7 @@ export async function runLinuxMicroVMCutover(context, options = {}) {
     return denied("blocked", reason("policy", "native-tui-required",
       "Open the Linux microVM cutover in the interactive Pi TUI; headless runs are denied."));
   }
+  const containmentRun = typeof target.jobPayload === "string";
   if (inFlight) return denied("denied", reason("execution", "already-active", "another Linux microVM cutover is active in this host session"));
 
   const fixtureId = `microvm-${randomBytes(12).toString("hex")}`;
@@ -447,7 +590,13 @@ export async function runLinuxMicroVMCutover(context, options = {}) {
     `Fixture: ${fixtureId}; domain: ${fixtureDomain} (preflight absent)`,
     `Versioned fixture SHA-256: ${scriptHash}`,
     "Writes: one generated fixture below ~/agentic-driver-state/cutover-fixtures/microvm/.",
-    "Guest: 1 vCPU, 128 MiB, BusyBox initramfs, no disk, network, host share, credentials, GPU, or serving access.",
+    ...(containmentRun
+      ? [
+          "Guest runs a deny-by-default containment monitor; any kill decision kills the guest session and tears down the VM.",
+          `Guest job payload (user-configured): ${payloadRedacted(target.jobPayload)}`,
+        ]
+      : []),
+    `Guest: ${resourceLine(target)}`,
     "A temporary traverse-only ACL for libvirt-qemu is added to the remote home directory and the exact prior ACL is restored after exit or failure.",
     "The transient domain prints one marker, powers off, and must disappear from libvirt.",
     "No install, download, repository mutation, runtime authority, staging, commit, or push.",
@@ -465,14 +614,23 @@ export async function runLinuxMicroVMCutover(context, options = {}) {
   }
   inFlight = true;
   try {
+    const allocation = resourceAllocation(target);
+    const fixtureArgs = [fixtureId, scriptHash, String(allocation.vcpu), String(allocation.memoryMiB)];
+    // The payload travels base64-encoded: ssh concatenates argv into one
+    // command string parsed by the remote login shell, so a raw payload
+    // (newlines, quotes, semicolons are allowed by design) would be word-
+    // split, reinterpreted, or injected as remote commands. Base64 is
+    // shell-safe (no whitespace/metacharacters) and round-trips exactly;
+    // the fixture decodes and validates it. Local mode benefits identically.
+    if (containmentRun) fixtureArgs.push(Buffer.from(target.jobPayload, "utf8").toString("base64"));
     const result = target.mode === "local"
-      ? execute("bash", ["-c", "bash -s -- " + shellQuote(fixtureId) + " " + shellQuote(scriptHash)], { input: script, timeout: 180000 })
-      : execute("ssh", [target.sshTarget, "bash", "-s", "--", fixtureId, scriptHash], { input: script, timeout: 180000 });
+      ? execute("bash", ["-c", "bash -s -- " + fixtureArgs.map(shellQuote).join(" ")], { input: script, timeout: 180000 })
+      : execute("ssh", [target.sshTarget, "bash", "-s", "--", ...fixtureArgs], { input: script, timeout: 180000 });
     if (!result || result.code !== 0) {
       return denied("blocked", normalizedForwardedStderr(result, "fixture", "execution-failed", "fixed microVM fixture failed"));
     }
     const receipt = parseReceipt(result.stdout);
-    return validateLinuxMicroVMReceipt(receipt, facts, fixtureId, scriptHash);
+    return validateLinuxMicroVMReceipt(receipt, facts, fixtureId, scriptHash, { containment: containmentRun });
   } catch (error) {
     return denied("blocked", reasonFromError(error, "execution", "fixture-failed"));
   } finally { inFlight = false; }
@@ -516,6 +674,15 @@ export function registerLinuxMicroVMCutoverInterface(pi, options = {}) {
           ...options,
           ...(typeof params?.target === "string" ? { target: params.target } : {}),
         });
+    // M2 (design section 5): a killswitch trip raises an error-severity
+    // notification naming the rule, class, and severity tier.
+    const killswitch = value?.containment?.killswitch;
+    if (value?.ok === true && killswitch?.tripped === true && typeof context?.ui?.notify === "function") {
+      context.ui.notify(
+        `MICROVM CONTAINMENT: KILLSWITCH TRIPPED — rule ${killswitch.rule}, class ${killswitch.class}, tier ${killswitch.tier}; guest session killed and VM torn down. Kill report: ${value?.containment?.killReportPath ?? "(unavailable)"}`,
+        "error",
+      );
+    }
     notifyOutcome(context, value);
     return { content: [{ type: "text", text: `${outcomeLine(value)}\n${JSON.stringify(value, null, 2)}` }], details: value };
   };
