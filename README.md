@@ -319,6 +319,36 @@ dispatcher signal guest PID 1, and the R4 regression could signal its own Node
 test-runner process group on Linux despite passing on macOS. This independent
 finding directly informed the follow-up containment and test-harness repairs.
 
+**What the containment layer defends against.** The severity-tiered killswitch
+covers the attack chain observed in published agent-escape incidents —
+including the HuggingFace agent incident — at every stage:
+
+- **Credential theft** (reading SSH/AWS/token material, dumping environment
+  secrets) — immediate termination.
+- **Exfiltration and remote control** (network tools, any socket activity) —
+  immediate termination.
+- **Persistence via dependency installs** (package-manager invocations,
+  registry writes, manifest tampering) — denied and accumulated; repeated
+  attempts terminate the session.
+- **Self-modification** (rewriting the agent's own tools or the monitoring
+  layer) — denied and accumulated.
+- **Bulk cache staging** (sudden growth in package/cache directories, the
+  payload-staging pattern) — detected by size-delta sampling; repeated growth
+  terminates the session.
+- **Cross-agent escalation** (coordination channels, shared paths used to
+  reach other agents or the coordinator) — immediate termination.
+- **Evidence tampering** (editing or truncating logs, forging receipts,
+  writing to the transcript or console channel) — immediate termination.
+- **Reconnaissance of the monitor itself** (probing the sandbox to learn
+  whether it is watched, enumerating watchers, timing detection) — accumulated
+  into a concealment index surfaced in the run receipt.
+
+Every denial is logged to a tamper-evident, digest-chained evidence log that
+survives the session; every trip produces a durable kill report naming the
+rule, class, and severity tier, with teardown proof. A full acceptance matrix
+(79 scenarios covering every rule, invocation form, and threshold boundary) is
+executable-tested in the repository.
+
 </details>
 
 **Under development in this theme:**
