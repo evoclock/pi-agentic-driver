@@ -420,6 +420,26 @@ gc_fs_sweep() { # state_dir path...
   for path in "$@"; do gc_fs_detect "$state_dir" "$path"; done
 }
 
+# Sweep-baseline retreat (live microvm-11d339266876dcfad3d3ac32, card R2):
+# the sweep used to `touch baseline` right after `find -newer baseline`, so a
+# write landing between the find pass and that touch was never strictly newer
+# than the baseline and stayed invisible forever - the live cp into
+# /var/cache/shared-write was seen by the GC-FSW-003 sampler (delta=4KiB) yet
+# produced no gc_fs_detect decision, no GC-SHR-001 deny, and no trip. The
+# baseline must move BACK one second after each find so same-second writes
+# stay strictly newer at the next sweep. Cost: one re-scan of the previous
+# second (duplicate denies only add pressure; HIGH rules trip immediately).
+gc_baseline_retreat() { # path
+  local p=$1 now ts
+  now=$(date +%s) || { touch "$p"; return 0; }
+  ts=$((now - 1))
+  if ! touch -d "@$ts" "$p" 2>/dev/null; then
+    if ! touch -t "$(date -v-1S +%Y%m%d%H%M.%S 2>/dev/null)" "$p" 2>/dev/null; then
+      touch "$p"
+    fi
+  fi
+}
+
 # net-watcher detection: any socket row is a violation (GC-NET-001).
 gc_net_detect() { # state_dir socket_entry
   local state_dir=$1 entry=$2
@@ -633,6 +653,7 @@ if [ "${1:-}" = "--gc-log" ]; then shift; gc_log_event "$@"; exit $?; fi
 if [ "${1:-}" = "--gc-shim" ]; then shift; gc_shim_allow "$@"; exit $?; fi
 if [ "${1:-}" = "--gc-fs-detect" ]; then shift; gc_fs_detect "$@"; exit $?; fi
 if [ "${1:-}" = "--gc-fs-sweep" ]; then shift; gc_fs_sweep "$@"; exit $?; fi
+if [ "${1:-}" = "--gc-baseline-retreat" ]; then shift; gc_baseline_retreat "$@"; exit $?; fi
 if [ "${1:-}" = "--gc-cache-growth" ]; then shift; gc_cache_growth_sample "$@"; exit $?; fi
 if [ "${1:-}" = "--gc-net-detect" ]; then shift; gc_net_detect "$@"; exit $?; fi
 if [ "${1:-}" = "--gc-proc-detect" ]; then shift; gc_proc_detect "$@"; exit $?; fi
@@ -1061,6 +1082,26 @@ gc_fs_sweep() { # state_dir path...
   local state_dir=$1; shift
   local path
   for path in "$@"; do gc_fs_detect "$state_dir" "$path"; done
+}
+
+# Sweep-baseline retreat (live microvm-11d339266876dcfad3d3ac32, card R2):
+# the sweep used to `touch baseline` right after `find -newer baseline`, so a
+# write landing between the find pass and that touch was never strictly newer
+# than the baseline and stayed invisible forever - the live cp into
+# /var/cache/shared-write was seen by the GC-FSW-003 sampler (delta=4KiB) yet
+# produced no gc_fs_detect decision, no GC-SHR-001 deny, and no trip. The
+# baseline must move BACK one second after each find so same-second writes
+# stay strictly newer at the next sweep. Cost: one re-scan of the previous
+# second (duplicate denies only add pressure; HIGH rules trip immediately).
+gc_baseline_retreat() { # path
+  local p=$1 now ts
+  now=$(date +%s) || { touch "$p"; return 0; }
+  ts=$((now - 1))
+  if ! touch -d "@$ts" "$p" 2>/dev/null; then
+    if ! touch -t "$(date -v-1S +%Y%m%d%H%M.%S 2>/dev/null)" "$p" 2>/dev/null; then
+      touch "$p"
+    fi
+  fi
 }
 
 # net-watcher detection: any socket row is a violation (GC-NET-001).
@@ -2092,6 +2133,26 @@ gc_fs_sweep() { # state_dir path...
   for path in "$@"; do gc_fs_detect "$state_dir" "$path"; done
 }
 
+# Sweep-baseline retreat (live microvm-11d339266876dcfad3d3ac32, card R2):
+# the sweep used to `touch baseline` right after `find -newer baseline`, so a
+# write landing between the find pass and that touch was never strictly newer
+# than the baseline and stayed invisible forever - the live cp into
+# /var/cache/shared-write was seen by the GC-FSW-003 sampler (delta=4KiB) yet
+# produced no gc_fs_detect decision, no GC-SHR-001 deny, and no trip. The
+# baseline must move BACK one second after each find so same-second writes
+# stay strictly newer at the next sweep. Cost: one re-scan of the previous
+# second (duplicate denies only add pressure; HIGH rules trip immediately).
+gc_baseline_retreat() { # path
+  local p=$1 now ts
+  now=$(date +%s) || { touch "$p"; return 0; }
+  ts=$((now - 1))
+  if ! touch -d "@$ts" "$p" 2>/dev/null; then
+    if ! touch -t "$(date -v-1S +%Y%m%d%H%M.%S 2>/dev/null)" "$p" 2>/dev/null; then
+      touch "$p"
+    fi
+  fi
+}
+
 # net-watcher detection: any socket row is a violation (GC-NET-001).
 gc_net_detect() { # state_dir socket_entry
   local state_dir=$1 entry=$2
@@ -2449,7 +2510,9 @@ net_pid=\$!
       # Fail closed: a sampler error is logged, never silently blind.
       gc_log_event "\$session" "sweep" "GC-FSW-003" "sampler" "cache-growth sampling failed" "error" >/dev/null 2>&1 || true
     fi
-    touch "\$session/baseline"
+    # R2 (microvm-11d339266876dcfad3d3ac32): retreat, never plain-touch - a
+    # write in the same second as this touch would never be -newer again.
+    gc_baseline_retreat "\$session/baseline"
     sleep 1
   done
 ) &

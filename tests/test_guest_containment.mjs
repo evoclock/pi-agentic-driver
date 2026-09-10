@@ -2092,6 +2092,86 @@ test("FSW-003 live-wiring regression: pre-job baseline and final sample straddle
   }
 });
 
+test("SHR-001 live-signature regression: cp into a /var/cache child denied through the real sweep path", async () => {
+  // Reproduces the live failure signature (microvm-11d339266876dcfad3d3ac32,
+  // LIVE-2-R2): the sweep's `find -newer baseline` ran, then `touch baseline`
+  // fired in the SAME wall-clock second as the job's cp into
+  // /var/cache/shared-write — the write was never strictly newer than the
+  // baseline again, so the FSW-003 sampler saw the 4KiB growth while the
+  // fs-watcher produced no decision, no GC-SHR-001 deny, and no trip. This
+  // test runs the REAL core functions in the exact guest loop sequence.
+  const { sandbox } = await realDispatchSandbox();
+  const dir = await tempState();
+  try {
+    const tree = join(dir, "tree");
+    mkdirSync(join(tree, "tmp", "session"), { recursive: true });
+    mkdirSync(join(tree, "var", "cache"), { recursive: true });
+    const state = join(dir, "s");
+    const baseline = join(state, "baseline");
+    const sha256 = spawnSync("sh", ["-c", "command -v sha256sum || true"], { encoding: "utf8" }).stdout.trim();
+    assert.ok(sha256, "sha256sum must be resolvable for the real core");
+    const harness = join(dir, "sweep.sh");
+    // The exact guest sweep fragment and loop order: settle, baseline,
+    // find -newer (sweep 1), job write landing mid-iteration BEFORE the
+    // baseline refresh, refresh, find -newer (sweep 2).
+    writeFileSync(harness, [
+      "set -euo pipefail",
+      `PATH=${JSON.stringify(dirname(sha256))}:/usr/bin:/bin`,
+      `. ${JSON.stringify(join(sandbox, "gc", "core.sh"))}`,
+      `mkdir -p ${JSON.stringify(state)}`,
+      `printf seed > ${JSON.stringify(join(tree, "tmp", "session", "seed"))}`,
+      // Settle: the tree contents must predate the refreshed baseline by
+      // more than the 1s retreat so only the job write reappears in sweep 2.
+      "sleep 1.2",
+      `touch ${JSON.stringify(baseline)}`,
+      `sweep1=$(find ${JSON.stringify(tree)} -newer ${JSON.stringify(baseline)} 2>/dev/null | sed "s|^${tree}||" | while IFS= read -r p; do gc_fs_detect ${JSON.stringify(state)} "$p"; done)`,
+      // The live race: the job write lands between the find pass and the
+      // loop's baseline refresh, in the same wall-clock second.
+      `cp ${JSON.stringify(join(tree, "tmp", "session", "seed"))} ${JSON.stringify(join(tree, "var", "cache", "shared-write"))}`,
+      `gc_baseline_retreat ${JSON.stringify(baseline)}`,
+      `sweep2=$(find ${JSON.stringify(tree)} -newer ${JSON.stringify(baseline)} 2>/dev/null | sed "s|^${tree}||" | while IFS= read -r p; do gc_fs_detect ${JSON.stringify(state)} "$p"; done)`,
+      'printf "FIRST=[%s] SECOND=[%s]\\n" "$sweep1" "$sweep2"',
+    ].join("\n"));
+    const run = spawnSync("bash", [harness], { encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /FIRST=\[\]/, "the pre-write sweep must see nothing");
+    const second = /SECOND=\[([\s\S]*)\]/.exec(run.stdout)?.[1] ?? "";
+    const decisions = second.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
+    // cp updates the parent dir mtime too, so the sweep hands both
+    // /var/cache and /var/cache/shared-write to gc_fs_detect; the first
+    // SHR-001 deny trips immediately and later lines echo frozen.
+    const denies = decisions.filter((d) => d.decision === "deny");
+    assert.ok(
+      denies.some((d) => d.rule === "GC-SHR-001" && (d.path === "/var/cache" || d.path === "/var/cache/shared-write")),
+      "the post-write sweep must deny the /var/cache write as GC-SHR-001, got: " + JSON.stringify(decisions),
+    );
+    assert.ok(
+      decisions.some((d) => d.rule === "GC-SHR-001" || d.mode === "post-trip"),
+      "the shared-cache write must reach the GC-SHR-001 decision path",
+    );
+    // And the trip is immediate (HIGH), exactly as the card expects.
+    assert.ok(existsSync(join(state, "kill")), "GC-SHR-001 is HIGH and must trip immediately");
+  } finally {
+    await rm(sandbox, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true });
+  }
+  // Wiring: the rendered guest init must retreat the baseline in the sweep
+  // loop, never plain-touch it (the traced silent-miss mode).
+  const fixtureSource = await readFile(FIXTURE, "utf8");
+  const opener = 'cat >"$root/init" <<EOF\n';
+  const start = fixtureSource.indexOf(opener) + opener.length;
+  const end = fixtureSource.indexOf("\nEOF\n", start);
+  assert.ok(start > opener.length && end > start, "guest init heredoc not found");
+  const render = spawnSync("bash", ["-c",
+    'set -euo pipefail; marker="t"; fixture_id="t"; have_setsid=true; cat <<EOF\n' + fixtureSource.slice(start, end) + "\nEOF\n"],
+    { encoding: "utf8" });
+  assert.equal(render.status, 0, render.stderr || "init heredoc must render under set -u");
+  assert.ok(
+    render.stdout.includes('gc_baseline_retreat "$session/baseline"'),
+    "the sweep loop must refresh the baseline through gc_baseline_retreat",
+  );
+});
+
 test("trip freeze: post-trip liveness collateral must not mask the aggregate trip", async () => {
   const dir = await tempState();
   const state = join(dir, "s");
