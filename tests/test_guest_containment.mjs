@@ -881,9 +881,10 @@ test("R2: every BusyBox applet is shimmed and the dispatcher is recursion-safe",
 
 // Builds the REAL guest dispatch sandbox (heredocs extracted from the
 // fixture, absolute paths rebound to the sandbox; classification, killswitch,
-// and deny-kill logic byte-for-byte the shipped guest code) with shims/wget
-// installed. Shared by the R4/R5 execution regressions.
-async function realDispatchSandbox() {
+// and deny-kill logic byte-for-byte the shipped guest code) with dispatcher
+// symlinks for the requested tool shims installed (default wget). Shared by
+// the R4/R5 and S1 execution regressions.
+async function realDispatchSandbox(tools = ["wget"]) {
   const fixtureSource = await readFile(FIXTURE, "utf8");
   const dispatchOpener = "cat >\"$root/gc/dispatch\" <<'GC_DISPATCH_EOF'\n";
   const dStart = fixtureSource.indexOf(dispatchOpener);
@@ -922,7 +923,9 @@ async function realDispatchSandbox() {
     dispatch.includes('[ -f "$session/kill" ]') && dispatch.includes('if [ "$PPID" != "1" ]'),
     "dispatch deny-kill branch (with PID-1 guard) must survive path rebinding",
   );
-  writeFileSync(join(sandbox, "shims", "wget"), dispatch, { mode: 0o755 });
+  for (const tool of tools) {
+    writeFileSync(join(sandbox, "shims", tool), dispatch, { mode: 0o755 });
+  }
   return { sandbox, sessionDir, shimsPath: join(sandbox, "shims") };
 }
 
@@ -943,6 +946,87 @@ function runJobDetached(jobPath, shimsPath) {
     child.on("close", (status, signal) => resolve({ stdout, status, signal }));
   });
 }
+
+test("S1: classified non-applet tools get stub shims so PATH lookup reaches the dispatcher", async () => {
+  const fixtureSource = await readFile(FIXTURE, "utf8");
+  // Live fixture S1: npm/pip/... are classified by GC-PKG-001/GC-NET-002 but
+  // are not busybox applets, so the applet-only shim tree left the job
+  // shell's PATH lookup dead (dash: not-found, continue) and the classified
+  // command never reached the dispatcher — zero denials, no kill report.
+  const expected = ["npm", "pip", "pip3", "yarn", "pnpm", "gem", "cargo", "apk", "apt", "apt-get", "telnet"];
+  const opener = "for name in npm pip pip3 yarn pnpm gem cargo apk apt apt-get telnet; do\n";
+  const start = fixtureSource.indexOf(opener);
+  assert.ok(start > 0, "non-applet stub shim loop not found in the fixture build");
+  const block = fixtureSource.slice(start, fixtureSource.indexOf("\ndone\n", start));
+  assert.ok(
+    block.includes('grep -qx "$name" <<<"$applet_list" && continue'),
+    "the stub loop must skip names busybox already provides as applets",
+  );
+  assert.ok(
+    block.includes('ln -s ../gc/dispatch "$root/shims/$name"'),
+    "every stub must be a dispatcher symlink, never a copy",
+  );
+  // Taxonomy relevance: every stubbed name is either named by a shim-argv
+  // rule match string (GC-PKG-001/002, GC-NET-002) or a direct variant of
+  // one (pip3 of pip, apt-get of apt) — the classifier denies variants via
+  // the unknown-class residual, which still requires the shim to exist.
+  const taxonomy = JSON.parse(await readFile(TAXONOMY_FILE, "utf8"));
+  const named = new Set(
+    taxonomy.rules
+      .filter((r) => ["GC-PKG-001", "GC-PKG-002", "GC-NET-002"].includes(r.id))
+      .flatMap((r) => r.match.match(/[a-z][a-z0-9-]*/g) ?? []),
+  );
+  const variants = new Set(["pip3", "apt-get"]);
+  for (const name of expected) {
+    assert.ok(
+      named.has(name) || variants.has(name),
+      `stub ${name} must be taxonomy-relevant (named by a shim-argv rule or a variant of a named tool)`,
+    );
+  }
+});
+
+test("S1: job-shell npm install trips GC-PKG-001 through the real dispatch and the fifth command kills the job", async () => {
+  const { sandbox, sessionDir, shimsPath } = await realDispatchSandbox(["npm"]);
+  try {
+    writeFileSync(
+      join(sandbox, "job.sh"),
+      "echo pkg-job-start\nnpm install left-pad-1\nnpm install left-pad-2\nnpm install left-pad-3\nnpm install left-pad-4\necho four-denies-survived\nnpm install left-pad-5\necho after-fifth-never-runs\n",
+      { mode: 0o755 },
+    );
+    // Run the real chain: job shell -> PATH lookup -> /shims/npm -> real
+    // dispatch -> real core -> four ELEVATED GC-PKG-001 denies (no trip at
+    // <=4) -> the fifth trips the aggregate killswitch -> synchronous kill.
+    const run = await runJobDetached(join(sandbox, "job.sh"), shimsPath);
+    assert.ok(run.stdout.includes("pkg-job-start"), "payload prefix must run under the shim PATH");
+    assert.ok(
+      run.stdout.includes("four-denies-survived"),
+      "four ELEVATED denials must not trip the killswitch (threshold 5)",
+    );
+    assert.ok(
+      !run.stdout.includes("after-fifth-never-runs"),
+      "the command after the aggregate trip must never run",
+    );
+    assert.equal(run.signal, "SIGKILL", "the dispatcher must kill the job shell synchronously (not via the 1s supervisor poll)");
+    const killFlag = await readFile(join(sessionDir, "kill"), "utf8");
+    assert.equal(killFlag.trim(), "aggregate", "the ELEVATED aggregate trip must write the mode string as the kill flag");
+    const log = await readFile(join(sessionDir, "containment.log.jsonl"), "utf8");
+    const denyEvents = log.split("\n").filter((l) => l.includes('"class":"GC-PKG"') && l.includes('"action":"deny"'));
+    assert.equal(denyEvents.length, 5, "five npm installs must each produce one GC-PKG deny decision");
+    assert.ok(
+      denyEvents.every((l) => l.includes('"subject":{"type":"exec","value":"npm install left-pad')),
+      "deny decisions must carry the redacted npm install command line",
+    );
+    const ks = JSON.parse(log.trim().split("\n").at(-1));
+    assert.equal(ks.trigger.rule, "GC-PKG-001");
+    assert.equal(ks.trigger.mode, "aggregate");
+    assert.equal(ks.trigger.pressure, 5);
+    assert.equal(ks.trigger.threshold, 5);
+    assert.equal(ks.trigger.tier, "ELEVATED");
+    assert.equal(ks.final, true, "a terminal aggregate killswitch event must be logged");
+  } finally {
+    await rm(sandbox, { recursive: true, force: true });
+  }
+});
 
 test("R4: job-shell wget trips GC-NET-002 through the real dispatch and the next command never runs", async () => {
   const { sandbox, sessionDir, shimsPath } = await realDispatchSandbox();
