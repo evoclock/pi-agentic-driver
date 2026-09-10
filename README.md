@@ -323,7 +323,9 @@ Every denial goes into a tamper-evident, digest-chained log that outlives the
 session. Every trip produces a durable kill report that names what happened
 and proves the cleanup. The repository carries an acceptance matrix of 79
 scenarios, one executable test per row, covering every rule, every way a
-command can be invoked, and every threshold boundary. These will of course be expanded as more scenarios are considered/come to light.
+command can be invoked, and every threshold boundary. The matrix grows as new
+scenarios come to light, and every scenario is proven against a live run
+before it counts.
 
 ### A note on review quality
 
