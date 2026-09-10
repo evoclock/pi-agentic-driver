@@ -2351,6 +2351,19 @@ for name in $applet_list; do
   shim_links=$((shim_links + 1))
 done
 if [ "$shim_links" -lt 1 ]; then fixture_fail 6 'no BusyBox applets available for the shim layer'; fi
+# Classified tool names that busybox --list does not ship (live fixture S1:
+# five `npm install` commands produced zero denials, the payload ran to
+# completion, and no kill report existed — dash resolved npm through PATH,
+# found nothing under /shims or /bin, reported not-found, and continued, so
+# the classified command never reached the dispatcher). Stub each name with
+# a dispatcher symlink so PATH lookup reaches the classifier and the deny
+# decision happens before any real tool could; names busybox already
+# provides as applets keep their applet shim.
+for name in npm pip pip3 yarn pnpm gem cargo apk apt apt-get telnet; do
+  grep -qx "$name" <<<"$applet_list" && continue
+  if ! ln -s ../gc/dispatch "$root/shims/$name"; then fixture_fail 6 "shim link could not be created: $name"; fi
+  shim_links=$((shim_links + 1))
+done
 if ! cat >"$root/init" <<EOF
 #!/bin/busybox sh
 /bin/mount -t proc proc /proc
