@@ -2092,6 +2092,69 @@ test("FSW-003 live-wiring regression: pre-job baseline and final sample straddle
   }
 });
 
+test("trip freeze: post-trip liveness collateral must not mask the aggregate trip", async () => {
+  const dir = await tempState();
+  const state = join(dir, "s");
+  try {
+    // Aggregate trip exactly as the live run: five ELEVATED decisions.
+    for (let i = 0; i < 4; i++) {
+      const d = await decide(state, "GC-PKG-001", `npm install left-pad-${i}`);
+      assert.equal(d.tripped, false);
+    }
+    const trip = await decide(state, "GC-PKG-001", "npm install left-pad-5");
+    assert.equal(trip.tripped, true);
+    assert.equal(trip.pressure, 5);
+    const logAfterTrip = await readFile(join(state, "containment.log.jsonl"), "utf8");
+    assert.equal((logAfterTrip.match(/"logSha256"/g) ?? []).length, 1, "exactly one sealed terminal after the aggregate trip");
+    // Post-trip liveness with a dead monitor flag (live microvm-d7a15c47:
+    // the integrity terminal was appended after the trip and masked it).
+    await runFixture(["--gc-liveness", state, "1 0 1"]);
+    const logAfterLiveness = await readFile(join(state, "containment.log.jsonl"), "utf8");
+    assert.equal(logAfterLiveness, logAfterTrip, "the frozen log must not grow from post-trip liveness");
+    assert.equal((await readFile(join(state, "kill"), "utf8")).trim(), "aggregate", "the trip mode must not be overwritten");
+    // A direct second decision stays frozen.
+    const frozen = await decide(state, "GC-NET-002", "wget example.com");
+    assert.equal(frozen.frozen, true);
+    assert.equal(frozen.tripped, true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("FSW-003 diagnostics: sample lines log action observe and never count as denials", async () => {
+  const dir = await tempState();
+  const state = join(dir, "s");
+  try {
+    const watched = join(dir, "watch");
+    mkdirSync(watched, { recursive: true });
+    // Baseline + sub-threshold growth: observe-only sampling, no decision.
+    await runFixture(["--gc-cache-growth", state, watched]);
+    writeFileSync(join(watched, "small.bin"), Buffer.alloc(512 * 1024, 1));
+    await runFixture(["--gc-cache-growth", state, watched]);
+    let events = (await readFile(join(state, "containment.log.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    assert.ok(events.length >= 2, "baseline and sample lines must be present");
+    for (const e of events) {
+      assert.equal(e.event.class, "GC-FSW-003");
+      assert.equal(e.event.action, "observe", `sampler diagnostic lines must be action observe (got ${e.event.action})`);
+    }
+    // Threshold-crossing growth still produces exactly one genuine deny;
+    // observe diagnostics never inflate the deny count.
+    writeFileSync(join(watched, "big.bin"), Buffer.alloc(2 * 1024 * 1024, 1));
+    await runFixture(["--gc-cache-growth", state, watched]);
+    events = (await readFile(join(state, "containment.log.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    const denies = events.filter((e) => e.event.action === "deny");
+    const observes = events.filter((e) => e.event.action === "observe");
+    assert.equal(denies.length, 1, "the genuine threshold decision is the only deny");
+    // gc_decide logs the taxonomy CLASS (GC-FSW), while the observe
+    // diagnostics carry the rule id (GC-FSW-003) — the deny is the decision.
+    assert.equal(denies[0].event.class, "GC-FSW");
+    assert.ok(observes.length >= 2);
+    assert.equal(events.length, denies.length + observes.length, "no other action labels may appear");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 // --- M6 security repairs: shell-safe payload transport, argv-count guard ---
 
 test("M6/sec: a hostile multi-line payload travels shell-safe (base64, no whitespace or metacharacters)", async () => {
