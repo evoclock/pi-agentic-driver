@@ -95,7 +95,12 @@ gc_log_event() { # state_dir source class subject_type subject_value [action]
 }
 
 gc_killswitch_trip() { # state_dir rule_id class tier mode pressure threshold
+  # Trip freeze (live microvm-d7a15c47beaf94372f304da7): gc_decide gates on the
+  # kill flag, but gc_liveness calls this directly - after a session has
+  # tripped, a second terminal pair must never be appended (it would mask the
+  # real trip in the evidence extraction) and the flag must not be overwritten.
   local state_dir=$1 rule_id=$2 class=$3 tier=$4 mode=$5 pressure=${6:-null} threshold=${7:-null}
+  if [ -f "$state_dir/kill" ]; then return 0; fi
   local log="$state_dir/containment.log.jsonl"
   local ks event log_sha
   event=$(printf '{"schema":"%s","session":"%s","trigger":{"rule":"%s","class":"%s","tier":"%s","mode":"%s","pressure":%s,"threshold":%s},"final":true}' \
@@ -300,7 +305,7 @@ gc_cache_growth_sample() { # state_dir dir...
   done
   if [ ! -f "$baseline" ]; then
     if printf '%s\n' "$total" >"$baseline" 2>/dev/null; then
-      gc_log_event "$state_dir" "sweep" "GC-FSW-003" "sample" "baseline=${total}KiB" >/dev/null 2>&1 || true
+      gc_log_event "$state_dir" "sweep" "GC-FSW-003" "sample" "baseline=${total}KiB" "observe" >/dev/null 2>&1 || true
     fi
     return 0
   fi
@@ -311,7 +316,7 @@ gc_cache_growth_sample() { # state_dir dir...
   # Diagnostic observe (live microvm-b583fccb8abf8bccb0989e10): one compact
   # line per sample so the next live run shows total/prev/delta/threshold and
   # the decision path even when no event fires.
-  gc_log_event "$state_dir" "sweep" "GC-FSW-003" "sample" "total=${total}KiB prev=${prev:-none}KiB delta=${delta}KiB threshold=${GC_CACHE_GROWTH_KIB}KiB" >/dev/null 2>&1 || true
+  gc_log_event "$state_dir" "sweep" "GC-FSW-003" "sample" "total=${total}KiB prev=${prev:-none}KiB delta=${delta}KiB threshold=${GC_CACHE_GROWTH_KIB}KiB" "observe" >/dev/null 2>&1 || true
   if [ "$delta" -ge "$GC_CACHE_GROWTH_KIB" ]; then
     gc_decide "$state_dir" GC-FSW-003 "cache growth ${delta}KiB" >/dev/null || return 2
     printf '{"decision":"deny","rule":"GC-FSW-003","growthKiB":%s}\n' "$delta"
@@ -454,6 +459,9 @@ gc_proc_detect() { # state_dir process_identity
 # containment failure and trips the killswitch immediately.
 gc_liveness() { # state_dir alive_flags ("1 1 1"; any 0 is a dead loop)
   local state_dir=$1 flags=$2
+  # Post-trip the session is already dead; monitor collateral at teardown must
+  # not trip a masking containment-integrity terminal (see trip freeze above).
+  if [ -f "$state_dir/kill" ]; then return 0; fi
   case " $flags " in
     *" 0 "*)
       gc_log_event "$state_dir" "watcher:proc" containment-integrity proc "monitor loop dead" >/dev/null || return 2
@@ -730,7 +738,12 @@ gc_log_event() { # state_dir source class subject_type subject_value [action]
 }
 
 gc_killswitch_trip() { # state_dir rule_id class tier mode pressure threshold
+  # Trip freeze (live microvm-d7a15c47beaf94372f304da7): gc_decide gates on the
+  # kill flag, but gc_liveness calls this directly - after a session has
+  # tripped, a second terminal pair must never be appended (it would mask the
+  # real trip in the evidence extraction) and the flag must not be overwritten.
   local state_dir=$1 rule_id=$2 class=$3 tier=$4 mode=$5 pressure=${6:-null} threshold=${7:-null}
+  if [ -f "$state_dir/kill" ]; then return 0; fi
   local log="$state_dir/containment.log.jsonl"
   local ks event log_sha
   event=$(printf '{"schema":"%s","session":"%s","trigger":{"rule":"%s","class":"%s","tier":"%s","mode":"%s","pressure":%s,"threshold":%s},"final":true}' \
@@ -935,7 +948,7 @@ gc_cache_growth_sample() { # state_dir dir...
   done
   if [ ! -f "$baseline" ]; then
     if printf '%s\n' "$total" >"$baseline" 2>/dev/null; then
-      gc_log_event "$state_dir" "sweep" "GC-FSW-003" "sample" "baseline=${total}KiB" >/dev/null 2>&1 || true
+      gc_log_event "$state_dir" "sweep" "GC-FSW-003" "sample" "baseline=${total}KiB" "observe" >/dev/null 2>&1 || true
     fi
     return 0
   fi
@@ -946,7 +959,7 @@ gc_cache_growth_sample() { # state_dir dir...
   # Diagnostic observe (live microvm-b583fccb8abf8bccb0989e10): one compact
   # line per sample so the next live run shows total/prev/delta/threshold and
   # the decision path even when no event fires.
-  gc_log_event "$state_dir" "sweep" "GC-FSW-003" "sample" "total=${total}KiB prev=${prev:-none}KiB delta=${delta}KiB threshold=${GC_CACHE_GROWTH_KIB}KiB" >/dev/null 2>&1 || true
+  gc_log_event "$state_dir" "sweep" "GC-FSW-003" "sample" "total=${total}KiB prev=${prev:-none}KiB delta=${delta}KiB threshold=${GC_CACHE_GROWTH_KIB}KiB" "observe" >/dev/null 2>&1 || true
   if [ "$delta" -ge "$GC_CACHE_GROWTH_KIB" ]; then
     gc_decide "$state_dir" GC-FSW-003 "cache growth ${delta}KiB" >/dev/null || return 2
     printf '{"decision":"deny","rule":"GC-FSW-003","growthKiB":%s}\n' "$delta"
@@ -1089,6 +1102,9 @@ gc_proc_detect() { # state_dir process_identity
 # containment failure and trips the killswitch immediately.
 gc_liveness() { # state_dir alive_flags ("1 1 1"; any 0 is a dead loop)
   local state_dir=$1 flags=$2
+  # Post-trip the session is already dead; monitor collateral at teardown must
+  # not trip a masking containment-integrity terminal (see trip freeze above).
+  if [ -f "$state_dir/kill" ]; then return 0; fi
   case " $flags " in
     *" 0 "*)
       gc_log_event "$state_dir" "watcher:proc" containment-integrity proc "monitor loop dead" >/dev/null || return 2
@@ -1751,7 +1767,12 @@ gc_log_event() { # state_dir source class subject_type subject_value [action]
 }
 
 gc_killswitch_trip() { # state_dir rule_id class tier mode pressure threshold
+  # Trip freeze (live microvm-d7a15c47beaf94372f304da7): gc_decide gates on the
+  # kill flag, but gc_liveness calls this directly - after a session has
+  # tripped, a second terminal pair must never be appended (it would mask the
+  # real trip in the evidence extraction) and the flag must not be overwritten.
   local state_dir=$1 rule_id=$2 class=$3 tier=$4 mode=$5 pressure=${6:-null} threshold=${7:-null}
+  if [ -f "$state_dir/kill" ]; then return 0; fi
   local log="$state_dir/containment.log.jsonl"
   local ks event log_sha
   event=$(printf '{"schema":"%s","session":"%s","trigger":{"rule":"%s","class":"%s","tier":"%s","mode":"%s","pressure":%s,"threshold":%s},"final":true}' \
@@ -1956,7 +1977,7 @@ gc_cache_growth_sample() { # state_dir dir...
   done
   if [ ! -f "$baseline" ]; then
     if printf '%s\n' "$total" >"$baseline" 2>/dev/null; then
-      gc_log_event "$state_dir" "sweep" "GC-FSW-003" "sample" "baseline=${total}KiB" >/dev/null 2>&1 || true
+      gc_log_event "$state_dir" "sweep" "GC-FSW-003" "sample" "baseline=${total}KiB" "observe" >/dev/null 2>&1 || true
     fi
     return 0
   fi
@@ -1967,7 +1988,7 @@ gc_cache_growth_sample() { # state_dir dir...
   # Diagnostic observe (live microvm-b583fccb8abf8bccb0989e10): one compact
   # line per sample so the next live run shows total/prev/delta/threshold and
   # the decision path even when no event fires.
-  gc_log_event "$state_dir" "sweep" "GC-FSW-003" "sample" "total=${total}KiB prev=${prev:-none}KiB delta=${delta}KiB threshold=${GC_CACHE_GROWTH_KIB}KiB" >/dev/null 2>&1 || true
+  gc_log_event "$state_dir" "sweep" "GC-FSW-003" "sample" "total=${total}KiB prev=${prev:-none}KiB delta=${delta}KiB threshold=${GC_CACHE_GROWTH_KIB}KiB" "observe" >/dev/null 2>&1 || true
   if [ "$delta" -ge "$GC_CACHE_GROWTH_KIB" ]; then
     gc_decide "$state_dir" GC-FSW-003 "cache growth ${delta}KiB" >/dev/null || return 2
     printf '{"decision":"deny","rule":"GC-FSW-003","growthKiB":%s}\n' "$delta"
@@ -2110,6 +2131,9 @@ gc_proc_detect() { # state_dir process_identity
 # containment failure and trips the killswitch immediately.
 gc_liveness() { # state_dir alive_flags ("1 1 1"; any 0 is a dead loop)
   local state_dir=$1 flags=$2
+  # Post-trip the session is already dead; monitor collateral at teardown must
+  # not trip a masking containment-integrity terminal (see trip freeze above).
+  if [ -f "$state_dir/kill" ]; then return 0; fi
   case " $flags " in
     *" 0 "*)
       gc_log_event "$state_dir" "watcher:proc" containment-integrity proc "monitor loop dead" >/dev/null || return 2
