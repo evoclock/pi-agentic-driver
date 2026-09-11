@@ -274,44 +274,46 @@ exists. A failed check denies the run before anything happens. The shipped
 fixture guest is x86_64-built, so the full proof currently needs an x86_64
 KVM host.
 
-### What an example test looks like
+### What example tests look like
 
-We ran a containment job whose payload printed a greeting, then invoked a
-network tool. This is what happened:
+I started with one payload: print a greeting, then call a network tool. The
+greeting printed, the tool tripped the killswitch at the HIGH tier, and the
+line after it never ran. A kill report landed in the state directory naming
+the rule and tier, and the teardown proof showed the machine was gone with
+nothing left behind.
 
-- The greeting printed.
-- The network tool tripped the killswitch at the HIGH tier, immediately.
-- The line after the denied command never ran.
-- The session log recorded one denial and a clean evidence digest.
-- A durable kill report was written to the state directory, naming the rule,
-  class, and tier, with teardown proof: the machine was gone, the temporary
-  access grants were restored byte-for-byte, and nothing persisted.
+From there I wrote a payload for every rule in the taxonomy: credential
+probing behind chained commands, secret dumping inside subshells, package
+installs, coordination files reaching for other agents, a forged receipt, a
+write to the evidence channel, and ten unclassified commands in a row to push
+the anomaly threshold to its limit.
 
 The guest had no disk, no network, no host share, no credentials, and no GPU.
-It could mount nothing beyond the kernel's virtual filesystems. It tried to
-reach the network anyway. It died for it, and the record of why survived.
+Nothing outside the kernel's virtual filesystems could be mounted. Every
+attempt was denied and written to a log that survived the machine.
 
-While this is a toy test of sorts my own personal work will be running on these as well.
+While this is a toy test of sorts my own personal work will be running on
+these as well.
 
 ### What the containment layer defends against
 
-Agent escape attempts follow a pattern. The published incidents from frontier labs, including
-the HuggingFace agent incident, read like a playbook: grab credentials, phone
-home, install something persistent, rewrite your own tools, stage payloads in
-caches, look for other agents to recruit, and clean up the evidence. The
-containment layer denies each stage of that playbook:
+Agent escapes tend to follow a playbook, and the published incidents from
+frontier labs (the HuggingFace incident among them) read like one: grab
+credentials, phone home, install something persistent, rewrite your tools,
+stage payloads in caches, look for other agents to recruit, clean up the
+evidence. The containment layer has a rule for each step:
 
 - **Credential theft.** Reading SSH, cloud, or token material, or dumping
   environment secrets, ends the session immediately.
 - **Exfiltration and remote control.** Any network tool, any socket, ends the
   session immediately.
 - **Persistence through dependencies.** Package installs, registry writes,
-  and manifest tampering are denied and counted. Repeat attempts end the
-  session.
+  and manifest tampering are denied and counted. Repeat the attempt and the
+  session ends.
 - **Self-modification.** Rewriting the agent's own tools or the monitoring
   layer is denied and counted.
-- **Payload staging.** Sudden growth in cache and package directories is
-  sampled by size. Repeated growth ends the session.
+- **Payload staging.** Growth in cache and package directories is sampled by
+  size; repeated growth ends the session.
 - **Cross-agent escalation.** Coordination channels and shared paths used to
   reach other agents end the session immediately.
 - **Evidence tampering.** Editing logs, forging receipts, or writing to the
@@ -319,144 +321,26 @@ containment layer denies each stage of that playbook:
 - **Reconnaissance.** Probing the sandbox to learn whether it is watched is
   counted into a concealment index that ships in the run receipt.
 
-Every denial goes into a tamper-evident, digest-chained log that outlives the
-session. Every trip produces a durable kill report that names what happened
-and proves the cleanup. The repository carries an acceptance matrix of 79
-scenarios, one executable test per row, covering every rule, every way a
-command can be invoked, and every threshold boundary. The matrix grows as new
-scenarios come to light, and every scenario is proven against a live run
-before it counts.
+Denials are written to a tamper-evident, digest-chained log that outlives the
+session, and a trip produces a kill report naming what happened, with proof
+that the cleanup completed.
+
+### Proven against real machines
+
+Every rule above has been run against a real QEMU/KVM guest with a payload
+built to trigger it. The kill switches fired where they should, the denials
+stopped the jobs, and the cleanup held. One boundary is worth stating: two
+rules watch the same directories by design, and together they are stricter
+than either alone, so the growth-sampling trip is covered by automated tests
+rather than a live run.
+
+The repository carries an acceptance matrix of 79 scenarios, one executable
+test per row, covering every rule, every way a command can be invoked, and
+every threshold boundary. It grows as new scenarios come to light.
 
 ### A note on review quality
 
 A quantized GLM-5.3-Flash model running locally on an NVIDIA DGX Spark
 reviewed this work alongside two frontier reviews at high reasoning. The
 local model matched their coverage and found one issue they all missed.
-This is just to say that small models on your own desk are worth taking seriously as implementers/reviewers.
-
-</details>
-
-**Under development in this theme:**
-
-- **native macOS container proof.** The native Apple Container runtime has
-  passed a fixed local isolation qualification: read-only repository mount,
-  no network, automatic removal. The native Pi adapter is not yet part of the
-  released package.
-- **attended-authority guard.** The safety net between an agent and your
-  shell. When a model tries to delete, overwrite, or push, the guard stops it
-  and asks you. Safe commands pass through untouched. If you deny, you get a
-  clear reason and the session continues, and the agent does not retry behind
-  your back. In headless runs where no human can confirm, destructive
-  commands are refused rather than silently allowed.
-
-## Session continuity
-
-*Managing context pressure, compaction, and avoiding lossy handover.*
-
-**In development:**
-
-- **context-pressure handling.** Pressure detection, non-lossy handover,
-  compaction completion without cancellation loops, and continuation of the
-  latest user goal. Development-only until the full live journey passes.
-- **lossless session-reference compaction.** Selective, lossless retrieval of
-  exact pre-compaction content, addressing factual degradation across
-  repeated compactions. Designed as an optional add-on, not yet implemented.
-
-**Planned in this theme:**
-
-- **handover, checkpoint, and recovery.** Durable repository-local handover
-  notes, governed checkpoint mutation, watchdog handoff, and fresh-session
-  resumption that identifies goal, changed files, checks, and next step
-  without executing anything.
-- **evidence ledger.** Deterministic evidence indexing, lossless source
-  projection, universal checkpoint produce/store/recover, and run-ledger
-  records with crash and corruption vectors tested.
-- **offline multihost evidence.** Record run evidence on each host while
-  disconnected and reconcile it deterministically on reconnection, with no
-  host as sole authority.
-
-## Working with Git safely
-
-*Extensions that keep routine Git low-friction and consequential Git guarded.*
-
-**In development:**
-
-- **git workflow safeguards.** Design only; the package contains no Git
-  extension yet. The planned capability covers exact-file staging, native
-  confirmation, post-confirmation drift checks, and protected-operation
-  boundaries.
-- **assignment-aware Git journeys.** Merge and protected-push flows bound to
-  a verified assignment, so consequential Git operations carry their own
-  recorded provenance.
-
-## Package integrity
-
-*Extensions that keep the installed set honest and the record controlled.*
-
-- **security and integrity scanning.** Static scanning of MCP configs, agent
-  skills, and extension packages for hardcoded secrets, prompt and shell
-  injection, data-exfiltration endpoints, untrusted integrations, PII
-  leakage, and OWASP/MCP threat families, with accept/redact/reject
-  decisions. Built on the agent-scanner approach proven in Hillstar
-  Orchestrator and Testudo.
-- **checkpoint storage lifecycle.** Compression, deduplication, retention,
-  and purging rules for capsule and index stores once a product ships, so
-  session evidence has a managed lifetime instead of growing without bound.
-- **product knowledge graph.** Semantic graph projection of a shipped
-  product's checkpoints, decisions, and artifacts, so the record of what was
-  built stays queryable after active development ends.
-
-Each item lands here as its own extension when its scenario passes
-acceptance with all prohibited effects absent.
-
-### Portable repository contract
-
-`templates/AGENTS.md` is a starting contract you can copy into any repository
-that uses Pi agents. It asks for controlled tasks and realistic tests, and
-treats agent reports as untrusted evidence. It never overwrites an existing
-`AGENTS.md`; add your project rules below it.
-
-## Install
-
-From npm:
-
-```sh
-pi install npm:@evoclock/pi-agentic-driver
-```
-
-Or from Git at a pinned tag:
-
-```sh
-pi install git:github.com/evoclock/pi-agentic-driver@v0.5.0
-```
-
-Released extensions load standalone; neither requires the other.
-
-### Choose which extensions load
-
-A normal install loads all six extensions by default. You can load only the
-extensions you want with the object form in your Pi settings:
-
-```json
-{
-  "packages": [
-    {
-      "source": "npm:@evoclock/pi-agentic-driver@0.5.0",
-      "extensions": [
-        "extensions/aidr.ts",
-        "extensions/code-phage.js"
-      ]
-    }
-  ]
-}
-```
-
-The package also includes `herdr-communication.ts`, `herdr-lifecycle.ts`,
-`herdr-dispatch.ts`, and `linux-microvm.ts`. Use `pi config` to enable or
-disable individual resources from an installed package. You are not required
-to use every extension.
-
-## License
-
-AGPL-3.0-or-later with author-attribution additional terms (Section 7(b));
-see [LICENSE](LICENSE). A commercial licence is available on request.
+Small models on your own desk are worth taking seriously as reviewers.
