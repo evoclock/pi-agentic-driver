@@ -89,7 +89,6 @@ only, not a runtime dependency).
 
 </details>
 
-**Under development in this theme:**
 
 - **prompted planning lifecycle.** Natural-language goals become complete
   semantic proposals with parent and scope choices at native boundaries. No
@@ -187,7 +186,6 @@ silently, and return results as untrusted evidence.
 
 </details>
 
-**Under development in this theme:**
 
 - **project status and state review.** Read-only projections of workspace Git
   state, formal records, and task-state health.
@@ -344,6 +342,8 @@ A quantized GLM-5.3-Flash model running locally on an NVIDIA DGX Spark
 reviewed this work alongside two frontier reviews at high reasoning. The
 local model matched their coverage and found one issue they all missed.
 Small models on your own desk are worth taking seriously as reviewers.
+
+</details>
 
 **Under development in this theme:**
 
