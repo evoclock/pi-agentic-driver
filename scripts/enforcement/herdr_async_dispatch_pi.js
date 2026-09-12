@@ -45,6 +45,18 @@ export const WORKER_DISPATCH_PARAMETERS = Object.freeze({
     maxSteps: { type: "integer", minimum: 1, maximum: MAX_JOURNEY_STEPS },
     stepPrompt: { type: "string", minLength: 1, maxLength: 8192 },
     model: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,63}(?:\\/[a-z0-9][a-z0-9._-]{0,127})*$", maxLength: 192 },
+    cast: {
+      type: "object",
+      properties: {
+        roles: { type: "array", items: { type: "string", pattern: "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$" }, maxItems: 8 },
+        models: {
+          type: "object",
+          patternProperties: { "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$": { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,63}(?:\\/[a-z0-9][a-z0-9._-]{0,127})*$", maxLength: 192 } },
+          additionalProperties: false,
+        },
+      },
+      additionalProperties: false,
+    },
   },
   required: ["action", "role"],
   allOf: [
@@ -332,6 +344,27 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   }
   if (!WORKER_DISPATCH_AUTONOMY_MODES.includes(autonomy)) {
     return failure("dispatch", dispatchError("autonomy-invalid", "autonomy must be confirmed-default or autonomous", "denied"));
+  }
+  if (params.cast) {
+    const castRoles = Array.isArray(params.cast)
+      ? params.cast.map((entry) => entry?.role).filter((role) => typeof role === "string")
+      : Array.isArray(params.cast.roles) ? params.cast.roles : [];
+    if (!castRoles.length) {
+      return failure("dispatch", dispatchError("cast-invalid", "the cast must include at least one role", "denied"));
+    }
+    for (const castRole of castRoles) {
+      if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(castRole) || castRole.length > 64) {
+        return failure("dispatch", dispatchError("cast-invalid", `invalid cast role name: ${castRole}`, "denied"));
+      }
+    }
+    const castModels = Array.isArray(params.cast)
+      ? Object.fromEntries(params.cast.map((entry) => [entry?.role, entry?.model]).filter(([role]) => typeof role === "string"))
+      : params.cast.models ?? {};
+    for (const [castRoleName, castModel] of Object.entries(castModels)) {
+      if (typeof castModel === "string" && !/^[a-z0-9][a-z0-9._-]{0,63}(?:\/[a-z0-9][a-z0-9._-]{0,127})*$/.test(castModel)) {
+        return failure("dispatch", dispatchError("cast-invalid", `invalid cast model for ${castRoleName}: ${castModel}`, "denied"));
+      }
+    }
   }
   if (autonomy === "autonomous") journey.cast = materializeFrozenCast(params, options);
   const castCheck = autonomy === "autonomous"
