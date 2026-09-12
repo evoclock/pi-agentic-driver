@@ -40,6 +40,18 @@ const STE_PHRASAL_GUIDANCE = Object.freeze({
   "look at": "examine",
   "set up": "configure or install",
 });
+// Project terminology rules (established in session guidance, encoded here so
+// AI;DR enforces them advisorially):
+// - "limited" for numeric limits; "controlled" or "authorised" for authority
+//   and behavior; "approved" or "authorised" for tasks.
+// - "fundamental" or "crucial" instead of the metaphor "load-bearing".
+// - Avoid "bounded" in prose entirely; use "limited" for numeric limits.
+//   (The boundedText identifier is a code name, not prose, and is flagged
+//   separately for a future rename.)
+const TERMINOLOGY_GUIDANCE = Object.freeze({
+  bounded: "use limited for numeric limits; avoid bounded in prose",
+  "load-bearing": "use fundamental or crucial",
+});
 const STE_MODAL_GUIDANCE = Object.freeze({
   should: "use must for a requirement, or state the recommendation directly",
   may: "use can for ability or must have permission language when needed",
@@ -153,6 +165,13 @@ function steFindings(prose, sentences, documentType) {
     kind: "ste-modal-meaning",
     message: "State requirement, ability, permission, or condition precisely; do not leave the modal meaning implicit.",
     examples: modalExamples,
+  });
+  const terminologyExamples = steTermExamples(prose, TERMINOLOGY_GUIDANCE);
+  if (terminologyExamples.length) findings.push({
+    rule: "STE-T1",
+    kind: "ste-project-terminology",
+    message: "Use the project terminology: limited for numeric limits, controlled or authorised for authority and behavior, approved or authorised for tasks, fundamental or crucial instead of load-bearing, and avoid bounded in prose.",
+    examples: terminologyExamples,
   });
   if (/\band\/or\b/i.test(prose)) findings.push({
     rule: "STE-C1",
