@@ -358,6 +358,11 @@ end" or "don't wait for me" and the journey runs in autonomous mode. Say
 "do these two things" and it runs in the normal mode, pausing for you
 between steps. The mode is recorded in the report either way.
 
+The journeys run work you dispatch in natural language: work that is real
+and authorized but not yet formally placed on a kanban board. A task board
+integration is planned, and once it ships, planned journeys will execute
+board-managed work with the same containment and safety guarantees.
+
 ### The cast
 
 You name the agents for the journey, and that list becomes the standing
