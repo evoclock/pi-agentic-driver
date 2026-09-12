@@ -37,6 +37,7 @@ test("package file list matches the public extension set", () => {
   const extensionEntries = pkg.files.filter((f) => f.startsWith("extensions/"));
   assert.deepEqual(extensionEntries.sort(), [
     "extensions/aidr.ts",
+    "extensions/attended-authority-guard.ts",
     "extensions/code-phage.js",
     "extensions/herdr-communication.ts",
     "extensions/herdr-dispatch.ts",
