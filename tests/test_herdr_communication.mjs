@@ -6,6 +6,22 @@ import {
   TRUSTED_HERDR_EXECUTABLE,
 } from "../scripts/enforcement/herdr_communication_pi.js";
 
+function info(role, status = "idle", seq = 1, type = "agent_info") {
+  return { code: 0, stdout: JSON.stringify({ type, agent: { name: role, agent: "pi", status, state_change_seq: seq, repository: root } }) };
+}
+function exchangeFixture({ role = "reviewer", pre = "history", report = "report-reviewer", statuses = ["idle", "idle"], promptFailure, recovery } = {}) {
+  const calls = []; let sent; let reads = 0; let gets = 0;
+  const runProcess = async ({ executable, argv, shell, spawnOptions }) => {
+    const action = argv[1]; calls.push({ action, argv: [...argv] });
+    if (action === "get") { const status = statuses[Math.min(gets++, statuses.length - 1)]; return recovery && gets > 2 ? recovery : info(role, status, 1); }
+    if (action === "prompt") { sent = argv[3]; return promptFailure || info(role, "done", 2, "agent_prompted"); }
+    if (action === "read") { reads += 1; return { code: 0, stdout: reads === 1 ? pre : `${pre}\n${sent}\n${markerPair(role)[0]}\n${report}\n${markerPair(role)[1]}` }; }
+    throw new Error(action);
+  };
+  return { calls, runProcess };
+}
+
+
 const root = process.cwd();
 const roles = ["reviewer", "reviewer-foo", "foo-reviewer"];
 
@@ -19,6 +35,7 @@ function concurrentFixture() {
   const calls = [];
   let active = 0;
   let maximumActive = 0;
+  const readsByRole = new Map();
   const runProcess = async ({ executable, argv, shell, spawnOptions }) => {
     assert.equal(executable, TRUSTED_HERDR_EXECUTABLE);
     assert.equal(shell, false);
@@ -40,8 +57,12 @@ function concurrentFixture() {
         return { code: 0, stdout: JSON.stringify({ type: "agent_prompted", agent: { name: role, agent: "pi", status: "done", repository: root } }) };
       }
       if (action === "read") {
+        const promptCount = calls.filter((call) => call.action === "prompt" && call.role === role).length;
         const [open, close] = markerPair(role);
-        return { code: 0, stdout: `${open}\nreport-${role}\n${close}` };
+        if (promptCount === 0) return { code: 0, stdout: "history" };
+        const lastPrompt = calls.filter((call) => call.action === "prompt" && call.role === role).at(-1);
+        const echoed = String(lastPrompt.argv?.[3] ?? "");
+        return { code: 0, stdout: `history\n${echoed}\n${open}\nfresh-${role}\n${close}` };
       }
       throw new Error(`unexpected action: ${action}`);
     } finally {
@@ -60,16 +81,16 @@ test("Herdr communication isolates concurrent marked exchanges", async () => {
   )));
 
   assert.ok(fixture.maximumActive > 1);
-  assert.equal(fixture.calls.length, roles.length * 3);
+  assert.equal(fixture.calls.length, roles.length * 5);
   for (const [index, role] of roles.entries()) {
     const result = results[index];
     assert.equal(result.ok, true);
     assert.equal(result.invocationCount, 1);
     assert.equal(result.waitCount, 1);
     assert.equal(result.readCount, 1);
-    assert.equal(result.report, `report-${role}`);
+    assert.equal(result.report, `fresh-${role}`);
     const calls = fixture.calls.filter((call) => call.role === role);
-    assert.deepEqual(calls.map((call) => call.action).sort(), ["get", "prompt", "read"]);
+    assert.deepEqual(calls.map((call) => call.action), ["get", "read", "get", "prompt", "read"]);
     assert.deepEqual(calls.find((call) => call.action === "get").argv, ["agent", "get", role]);
     assert.deepEqual(calls.find((call) => call.action === "read").argv, [
       "agent", "read", role, "--source", "recent-unwrapped", "--lines", "400", "--format", "text",
@@ -127,4 +148,31 @@ test("Herdr extraction ignores echoed contract markers but rejects nested marker
     () => extractLatestHerdrReport(nested, "reviewer"),
     (error) => error.code === "report_nested",
   );
+});
+
+test("stalled-before-delivery", async () => {
+  const f = exchangeFixture({ promptFailure: { code: 2, stdout: JSON.stringify({ error: { code: "agent_prompt_stalled" } }) } });
+  const r = await executeHerdrCommunication({ action: "prompt", role: "reviewer", prompt: "x", timeoutMs: 100 }, { cwd: root }, { runProcess: f.runProcess });
+});
+
+test("exact-once-invocation", async () => {
+  for (const failure of [{ code: 2, stdout: JSON.stringify({ error: { code: "agent_prompt_stalled" } }) }, { code: 2, stderr: "bad" }, { code: 0, stdout: "{" }]) { const f = exchangeFixture({ promptFailure: failure }); await executeHerdrCommunication({ action: "prompt", role: "reviewer", prompt: "x", timeoutMs: 100 }, { cwd: root }, { runProcess: f.runProcess }); assert.equal(f.calls.filter(c => c.action === "prompt").length, 1); }
+});
+
+test("stalled-tocou-unknown", async () => {
+  const f = exchangeFixture({ promptFailure: { code: 2, stdout: JSON.stringify({ error: { code: "agent_prompt_stalled" } }) }, recovery: info("reviewer", "idle", undefined) });
+  const r = await executeHerdrCommunication({ action: "prompt", role: "reviewer", prompt: "x", timeoutMs: 100 }, { cwd: root }, { runProcess: f.runProcess });
+  assert.equal(r.code, "prompt_delivery_unknown"); assert.doesNotMatch(r.reason, /undelivered/);
+});
+
+test("snapshot-fail-closed-and-revalidation", async () => {
+  let calls = [];
+  let r = await executeHerdrCommunication({ action: "prompt", role: "reviewer", prompt: "x", timeoutMs: 100 }, { cwd: root }, { runProcess: async ({ argv }) => { calls.push(argv[1]); return argv[1] === "get" ? info("reviewer") : { code: 2, stderr: "read failed" }; } });
+  assert.equal(r.code, "report_scope_unavailable"); assert.equal(calls.filter(x => x === "prompt").length, 0);
+  const f = exchangeFixture({ statuses: ["idle", "working"] }); r = await executeHerdrCommunication({ action: "prompt", role: "reviewer", prompt: "x", timeoutMs: 100 }, { cwd: root }, { runProcess: f.runProcess }); assert.equal(r.code, "role_not_promptable"); assert.equal(f.calls.filter(c => c.action === "prompt").length, 0);
+});
+
+test("two-read-latency-contract", async () => {
+  const f = exchangeFixture(); const r = await executeHerdrCommunication({ action: "prompt", role: "reviewer", prompt: "x", timeoutMs: 100 }, { cwd: root }, { runProcess: f.runProcess });
+  assert.equal(r.ok, true); assert.deepEqual(f.calls.map(c => c.action), ["get", "read", "get", "prompt", "read"]);
 });

@@ -4,6 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+
   registerWorkerDispatchInterface,
   runWorkerJourney,
   workerPulse,
@@ -13,11 +14,18 @@ import {
   WORKER_DISPATCH_MODES,
 } from "../scripts/enforcement/herdr_async_dispatch_pi.js";
 
+function markerPairFor(role) {
+  if (role === "reviewer") return ["[REVIEW_REPORT_BEGIN]", "[REVIEW_REPORT_END]"];
+  const label = role.toUpperCase().replaceAll("-", "_");
+  return [`[${label}_REPORT_BEGIN]`, `[${label}_REPORT_END]`];
+}
+
 const root = process.cwd();
 const tuiContext = () => ({ mode: "tui", hasUI: true, cwd: root, ui: { confirm: async () => true } });
 
 function herdrFixture({ statuses = {}, reportFor = () => "step report" } = {}) {
   const calls = [];
+  let reads = 0;
   const runProcess = async ({ argv }) => {
     const [action, role] = [argv[1], argv[2]];
     calls.push({ action, role, argv: [...argv] });
@@ -28,7 +36,12 @@ function herdrFixture({ statuses = {}, reportFor = () => "step report" } = {}) {
       return { code: 0, stdout: JSON.stringify({ type: "agent_prompted", agent: { name: role, agent: "pi", status: "done", repository: root } }) };
     }
     if (action === "read") {
-      return { code: 0, stdout: `[WORKER_REPORT_BEGIN]\n${reportFor(role)}\n[WORKER_REPORT_END]` };
+      reads += 1;
+      const report = `[WORKER_REPORT_BEGIN]\n${reportFor(role)}\n[WORKER_REPORT_END]`;
+      if (reads === 1) return { code: 0, stdout: "history" };
+      const lastPrompt = calls.filter((call) => call.action === "prompt").at(-1);
+      const echoed = lastPrompt ? String(lastPrompt.argv?.[3] ?? "") : "";
+      return { code: 0, stdout: `history\n${echoed}\n${report}` };
     }
     throw new Error(`unexpected action: ${action}`);
   };
