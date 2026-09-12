@@ -595,3 +595,37 @@ test("AJ-4: confirmed-default keeps the existing handoff path", async () => {
   );
   assert.equal(journey.status, "worker-unresponsive");
 });
+
+test("AJ-cast: cast parameter validates and materializes the frozen cast", async () => {
+  const fixture = herdrFixture({ statuses: { worker: "idle" } });
+  const journey = await runWorkerJourney(
+    { action: "dispatch", role: "worker", stepPrompt: "x", autonomy: "autonomous", model: "test-model",
+      cast: { roles: ["worker", "reviewer"], models: { worker: "test-model", reviewer: "review-model" } } },
+    tuiContext(),
+    { runProcess: fixture.runProcess, taskStore: taskStore([{ id: "1", status: "pending" }]), spawnReplacement: async ({ role }) => ({ ok: true, role, repository: root }) },
+  );
+  assert.ok(journey.cast, "the cast is materialized");
+  assert.deepEqual(journey.cast.roles, ["worker", "reviewer"]);
+  assert.deepEqual(journey.cast.models.reviewer, ["review-model"]);
+});
+
+test("AJ-cast: invalid role names in the cast are rejected", async () => {
+  const journey = await runWorkerJourney(
+    { action: "dispatch", role: "worker", stepPrompt: "x", autonomy: "autonomous",
+      cast: { roles: ["Invalid Role!"], models: {} } },
+    tuiContext(),
+    { runProcess: herdrFixture().runProcess, taskStore: taskStore([{ id: "1", status: "pending" }]) },
+  );
+  assert.equal(journey.ok, false); assert.equal(journey.code, "cast-invalid");
+});
+
+test("AJ-cast: cast-less dispatch defaults to the dispatched role", async () => {
+  const fixture = herdrFixture({ statuses: { worker: "idle" } });
+  const journey = await runWorkerJourney(
+    { action: "dispatch", role: "worker", stepPrompt: "x", autonomy: "autonomous", model: "test-model" },
+    tuiContext(),
+    { runProcess: fixture.runProcess, taskStore: taskStore([{ id: "1", status: "pending" }]) },
+  );
+  assert.ok(journey.cast, "the default cast is materialized");
+  assert.deepEqual(journey.cast.roles, ["worker"]);
+});
