@@ -375,6 +375,75 @@ test("unresponsive-session replacement handoff records the handoff and reuses ta
   assert.equal(stalled.stepCount, 0, "the stuck exchange is never retried on the same worker");
 });
 
+test("autonomous in-cast replacement skips interactive confirmation", async () => {
+  let confirmations = 0;
+  let replacement;
+  const journey = await runWorkerJourney(
+    { action: "dispatch", role: "worker", model: "test-model", autonomy: "autonomous", stepPrompt: "x" },
+    {
+      mode: "tui",
+      hasUI: true,
+      cwd: root,
+      ui: { confirm: async () => { confirmations += 1; return false; } },
+    },
+    {
+      model: "test-model",
+      taskStore: taskStore([{ id: "1", status: "pending" }]),
+      runProcess: async ({ argv }) => argv[1] === "get"
+        ? { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: "worker", agent: "pi", status: "working", repository: root } }) }
+        : { code: 0, stdout: "{}" },
+      spawnReplacement: async (request) => {
+        replacement = request;
+        return { ok: true, role: request.role, repository: root };
+      },
+    },
+  );
+  assert.equal(journey.status, "worker-unresponsive");
+  assert.equal(confirmations, 0);
+  assert.equal(replacement.castCheck.authorized, true);
+  assert.deepEqual(journey.cast.roles, ["worker"]);
+  assert.deepEqual(journey.cast.models.worker, ["test-model"]);
+  assert.equal(Object.isFrozen(journey.cast), true);
+  assert.equal(Object.isFrozen(journey.cast.roles), true);
+  assert.equal(Object.isFrozen(journey.cast.models.worker), true);
+});
+
+test("autonomous out-of-cast replacement is recorded and refused without spawning", async () => {
+  let spawnAttempts = 0;
+  const journey = await runWorkerJourney(
+    {
+      action: "dispatch",
+      role: "worker",
+      model: "test-model",
+      autonomy: "autonomous",
+      cast: [{ role: "worker", model: "test-model" }],
+      stepPrompt: "x",
+    },
+    tuiContext(),
+    {
+      taskStore: taskStore([{ id: "1", status: "pending" }]),
+      replacementRole: "reviewer",
+      replacementModel: "other-model",
+      runProcess: async ({ argv }) => argv[1] === "get"
+        ? { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: "worker", agent: "pi", status: "working", repository: root } }) }
+        : { code: 0, stdout: "{}" },
+      spawnReplacement: async () => {
+        spawnAttempts += 1;
+        throw new Error("must not be called");
+      },
+    },
+  );
+  assert.equal(spawnAttempts, 0);
+  assert.equal(journey.status, "worker-unresponsive");
+  assert.equal(journey.handoff.attempted, true);
+  assert.equal(journey.handoff.spawned, false);
+  assert.equal(journey.handoff.role, "reviewer");
+  assert.equal(journey.handoff.model, "other-model");
+  assert.equal(journey.handoff.reason, "outside-cast");
+  assert.equal(journey.handoff.castCheck.authorized, false);
+  assert.match(journey.report, /handoff: attempted=true ok=false role=reviewer reason=outside-cast/);
+});
+
 test("prohibited effects unchanged: handoff spawns through the lifecycle boundary only", () => {
   // The dispatch module exposes no pane/agent management commands: its only
   // registration is the single dispatch/pulse tool.

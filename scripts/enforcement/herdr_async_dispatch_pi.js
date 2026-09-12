@@ -20,7 +20,9 @@ import { isNativeTuiContext } from "./native_tui_context.js";
 export const WORKER_DISPATCH_TOOL = "agentic_worker_dispatch";
 export const WORKER_DISPATCH_SCHEMA = "agentic-driver.worker-dispatch.v1";
 export const WORKER_DISPATCH_MODES = Object.freeze(["continuous", "turn-by-turn"]);
+export const WORKER_DISPATCH_AUTONOMY_MODES = Object.freeze(["confirmed-default", "autonomous"]);
 export const DEFAULT_MODE = "continuous";
+export const DEFAULT_AUTONOMY = "confirmed-default";
 const DEFAULT_JOURNEY_STEPS = 50;
 const MAX_JOURNEY_STEPS = 200;
 const MAX_REPORT_BYTES = 32 * 1024;
@@ -39,6 +41,7 @@ export const WORKER_DISPATCH_PARAMETERS = Object.freeze({
     action: { type: "string", enum: ["dispatch", "pulse"] },
     role: { type: "string", pattern: "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", maxLength: 64 },
     mode: { type: "string", enum: WORKER_DISPATCH_MODES },
+    autonomy: { type: "string", enum: WORKER_DISPATCH_AUTONOMY_MODES },
     maxSteps: { type: "integer", minimum: 1, maximum: MAX_JOURNEY_STEPS },
     stepPrompt: { type: "string", minLength: 1, maxLength: 8192 },
     model: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,63}(?:\\/[a-z0-9][a-z0-9._-]{0,127})*$", maxLength: 192 },
@@ -81,6 +84,53 @@ function failure(action, error) {
     nonAuthorizing: true,
     persisted: false,
   };
+}
+
+function frozenCastEntries(source) {
+  if (Array.isArray(source)) {
+    return source.map((entry) => ({
+      role: entry?.role,
+      models: Array.isArray(entry?.models) ? entry.models : [entry?.model],
+    }));
+  }
+  if (source && typeof source === "object" && Array.isArray(source.roles)) {
+    return source.roles.map((role) => ({
+      role,
+      models: Array.isArray(source.models?.[role])
+        ? source.models[role]
+        : [source.models?.[role]],
+    }));
+  }
+  return [];
+}
+
+function materializeFrozenCast(params, options) {
+  const source = params.cast ?? options.cast;
+  const entries = source === undefined
+    ? [{ role: params.role, models: [params.model ?? options.model] }]
+    : frozenCastEntries(source);
+  const roles = [];
+  const models = {};
+  for (const entry of entries) {
+    if (typeof entry.role !== "string" || roles.includes(entry.role)) continue;
+    roles.push(entry.role);
+    models[entry.role] = Object.freeze(
+      entry.models.filter((model, index, values) => typeof model === "string" && values.indexOf(model) === index),
+    );
+  }
+  return Object.freeze({ roles: Object.freeze(roles), models: Object.freeze(models) });
+}
+
+function checkFrozenCast(cast, role, model) {
+  const roleAuthorized = Array.isArray(cast?.roles) && cast.roles.includes(role);
+  const modelSet = roleAuthorized ? cast.models?.[role] : undefined;
+  const modelAuthorized = roleAuthorized && Array.isArray(modelSet) && modelSet.some((candidate) => candidate === model);
+  return Object.freeze({
+    authorized: modelAuthorized,
+    role,
+    model,
+    reason: modelAuthorized ? "in-cast" : "outside-cast",
+  });
 }
 
 // Worker pulse: liveness, current state, and dispatch eligibility, observed
@@ -146,6 +196,8 @@ function journeyReceipt(journey) {
   const body = [
     "[WORKER_JOURNEY_REPORT_BEGIN]",
     `mode: ${journey.mode}`,
+    `autonomy: ${journey.autonomy}`,
+    ...(journey.cast ? [`cast: ${JSON.stringify(journey.cast)}`] : []),
     `role: ${journey.role}`,
     `steps: ${journey.steps.length}`,
     `status: ${journey.status}`,
@@ -167,6 +219,7 @@ function journeyReceipt(journey) {
 // dispatch purposes and ends the journey explicitly as worker-unresponsive.
 export async function runWorkerJourney(params, context, options = {}, signal) {
   const mode = params.mode ?? DEFAULT_MODE;
+  const autonomy = params.autonomy ?? DEFAULT_AUTONOMY;
   const maxSteps = params.maxSteps ?? DEFAULT_JOURNEY_STEPS;
   if (!Number.isInteger(maxSteps) || maxSteps < 1 || maxSteps > MAX_JOURNEY_STEPS) {
     return failure("dispatch", dispatchError("max-steps-invalid",
@@ -176,7 +229,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   const stepPrompt = params.stepPrompt;
   const taskStore = options.taskStore;
   const spawnReplacement = typeof options.spawnReplacement === "function" ? options.spawnReplacement : null;
-  const journey = { mode, role, steps: [], status: "failed", code: null, handoff: null };
+  const journey = { mode, autonomy, role, steps: [], status: "failed", code: null, handoff: null };
   const dispatched = new Set();
   const communicationOptions = options.communication ?? options;
 
@@ -185,6 +238,8 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
     ok: status === "completed" || status === "exhausted" || status === "waiting-approval",
     action: "dispatch",
     mode,
+    autonomy,
+    ...(journey.cast ? { cast: journey.cast } : {}),
     role,
     status,
     steps: journey.steps,
@@ -209,28 +264,54 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       journey.handoff = { attempted: false, reason: "replacement spawn is not available in this context" };
       return finish("worker-unresponsive");
     }
-    if (!isNativeTuiContext(context) || typeof context?.ui?.confirm !== "function") {
-      journey.handoff = { attempted: false, reason: "native TUI confirmation unavailable for replacement spawn" };
+    const replacementRole = options.replacementRole ?? role;
+    const replacementModel = options.replacementModel ?? options.model ?? params.model;
+    const castCheck = autonomy === "autonomous"
+      ? checkFrozenCast(journey.cast, replacementRole, replacementModel)
+      : null;
+    if (autonomy === "autonomous" && castCheck.authorized !== true) {
+      journey.handoff = {
+        attempted: true,
+        ok: false,
+        spawned: false,
+        role: replacementRole,
+        model: replacementModel,
+        reason: "outside-cast",
+        castCheck,
+      };
       return finish("worker-unresponsive");
     }
-    let confirmed;
-    try {
-      confirmed = await context.ui.confirm("Spin up replacement worker", [
-        `Agent session for role ${role} became unresponsive (${reason}).`,
-        "Spin up one replacement worker through the guarded herdr-lifecycle spawn boundary?",
-        "The replacement resumes the same pending task sequence; existing task cards are reused, never duplicated.",
-      ].join("\n"));
-    } catch (error) {
-      journey.handoff = { attempted: false, reason: `confirmation failed: ${error.message}` };
-      return finish("worker-unresponsive");
-    }
-    if (confirmed !== true) {
-      journey.handoff = { attempted: false, reason: "native confirmation was not granted for the replacement spawn" };
-      return finish("worker-unresponsive");
+    if (autonomy !== "autonomous") {
+      if (!isNativeTuiContext(context) || typeof context?.ui?.confirm !== "function") {
+        journey.handoff = { attempted: false, reason: "native TUI confirmation unavailable for replacement spawn" };
+        return finish("worker-unresponsive");
+      }
+      let confirmed;
+      try {
+        confirmed = await context.ui.confirm("Spin up replacement worker", [
+          `Agent session for role ${replacementRole} became unresponsive (${reason}).`,
+          "Spin up one replacement worker through the guarded herdr-lifecycle spawn boundary?",
+          "The replacement resumes the same pending task sequence; existing task cards are reused, never duplicated.",
+        ].join("\n"));
+      } catch (error) {
+        journey.handoff = { attempted: false, reason: `confirmation failed: ${error.message}` };
+        return finish("worker-unresponsive");
+      }
+      if (confirmed !== true) {
+        journey.handoff = { attempted: false, reason: "native confirmation was not granted for the replacement spawn" };
+        return finish("worker-unresponsive");
+      }
     }
     let spawned;
     try {
-      spawned = await spawnReplacement({ role, repository: options.repository, model: options.model, context, signal });
+      spawned = await spawnReplacement({
+        role: replacementRole,
+        repository: options.repository,
+        model: replacementModel,
+        context,
+        signal,
+        castCheck,
+      });
     } catch (error) {
       journey.handoff = { attempted: true, ok: false, error: String(error?.message || error).slice(0, 256) };
       return finish("worker-unresponsive");
@@ -238,9 +319,10 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
     journey.handoff = {
       attempted: true,
       ok: spawned?.ok === true,
-      role: spawned?.role ?? role,
+      role: spawned?.role ?? replacementRole,
       repository: spawned?.repository,
       modelArgv: spawned?.modelArgv,
+      castCheck,
       nonAuthorizing: true,
     };
     return finish("worker-unresponsive");
@@ -250,6 +332,10 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   if (mode !== "continuous" && mode !== "turn-by-turn") {
     return failure("dispatch", dispatchError("mode-invalid", "dispatch mode must be continuous or turn-by-turn", "denied"));
   }
+  if (!WORKER_DISPATCH_AUTONOMY_MODES.includes(autonomy)) {
+    return failure("dispatch", dispatchError("autonomy-invalid", "autonomy must be confirmed-default or autonomous", "denied"));
+  }
+  if (autonomy === "autonomous") journey.cast = materializeFrozenCast(params, options);
   if (!taskStore || typeof taskStore.list !== "function") {
     return failure("dispatch", dispatchError("task-store-invalid", "a read-only task store is required", "denied"));
   }
@@ -304,29 +390,32 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       return finish("waiting-approval");
     }
 
-    // Consequential dispatch requires native confirmation, once per step.
-    if (!isNativeTuiContext(context) || typeof context?.ui?.confirm !== "function") {
-      journey.status = "failed";
-      journey.steps.push({ step: stepIndex, taskId: task.id, status: "failed", error: "native TUI confirmation unavailable" });
-      return finish("failed");
-    }
-    let confirmed;
-    try {
-      confirmed = await context.ui.confirm("Dispatch task to worker", [
-        `Dispatch one bounded step to role ${role}?`,
-        `Task: ${task.id}${task.subject ? ` — ${task.subject}` : ""}`,
-        `Mode: ${mode} (step ${stepIndex} of at most ${maxSteps})`,
-        "One prompt exchange, no retries; the worker returns one marked report.",
-      ].join("\n"));
-    } catch (error) {
-      journey.status = "failed";
-      journey.steps.push({ step: stepIndex, taskId: task.id, status: "failed", error: `confirmation failed: ${error.message}` });
-      return finish("failed");
-    }
-    if (confirmed !== true) {
-      journey.status = "cancelled";
-      journey.steps.push({ step: stepIndex, taskId: task.id, status: "cancelled", error: "native confirmation was not granted" });
-      return finish("cancelled");
+    // Consequential dispatch requires native confirmation, once per step,
+    // unless the initial dispatch explicitly authorized autonomous progression.
+    if (autonomy !== "autonomous") {
+      if (!isNativeTuiContext(context) || typeof context?.ui?.confirm !== "function") {
+        journey.status = "failed";
+        journey.steps.push({ step: stepIndex, taskId: task.id, status: "failed", error: "native TUI confirmation unavailable" });
+        return finish("failed");
+      }
+      let confirmed;
+      try {
+        confirmed = await context.ui.confirm("Dispatch task to worker", [
+          `Dispatch one bounded step to role ${role}?`,
+          `Task: ${task.id}${task.subject ? ` — ${task.subject}` : ""}`,
+          `Mode: ${mode} (step ${stepIndex} of at most ${maxSteps})`,
+          "One prompt exchange, no retries; the worker returns one marked report.",
+        ].join("\n"));
+      } catch (error) {
+        journey.status = "failed";
+        journey.steps.push({ step: stepIndex, taskId: task.id, status: "failed", error: `confirmation failed: ${error.message}` });
+        return finish("failed");
+      }
+      if (confirmed !== true) {
+        journey.status = "cancelled";
+        journey.steps.push({ step: stepIndex, taskId: task.id, status: "cancelled", error: "native confirmation was not granted" });
+        return finish("cancelled");
+      }
     }
 
     // One prompt exchange. Any failure is terminal for the journey; there is
