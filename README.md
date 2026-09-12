@@ -515,7 +515,7 @@ extensions you want with the object form in your Pi settings:
 ```
 
 The package also includes `herdr-communication.ts`, `herdr-lifecycle.ts`,
-`herdr-dispatch.ts`, and `linux-microvm.ts`. Use `pi config` to enable or
+`herdr-dispatch.ts`, `task-board.ts`, and `linux-microvm.ts`. Use `pi config` to enable or
 disable individual resources from an installed package. You are not required
 to use every extension.
 
