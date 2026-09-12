@@ -68,6 +68,19 @@ test("a destructive payload cannot hide behind a safe prefix", () => {
   assert.equal(classifyBashCommand("cat f | rm -rf x").destructive, true);
 });
 
+test("quoted destructive tokens are still classified (F1 regression)", () => {
+  assert.equal(classifyBashCommand("rm '-rf' build/").destructive, true);
+  assert.equal(classifyBashCommand('git "push" origin main').destructive, true);
+  assert.equal(classifyBashCommand("rm '-rf' build/").kind, "recursive or forced file deletion");
+  assert.equal(classifyBashCommand('git "push" origin main').kind, "Git push");
+});
+
+test("arbitrary-code interpreters are no longer safe prefixes (F1 regression)", () => {
+  assert.equal(classifyBashCommand("node -e 'require(\"fs\").rmSync(\"x\", {recursive: true})'").destructive, true);
+  assert.equal(classifyBashCommand("python3 -c 'import shutil; shutil.rmtree(\"x\")'").destructive, true);
+  assert.equal(classifyBashCommand("npx some-unpublished-pkg").destructive, true);
+});
+
 test("write over an existing file is destructive; new file is not", () => {
   const exists = () => true;
   const missing = () => false;
