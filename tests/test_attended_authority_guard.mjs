@@ -75,6 +75,28 @@ test("quoted destructive tokens are still classified (F1 regression)", () => {
   assert.equal(classifyBashCommand('git "push" origin main').kind, "Git push");
 });
 
+test("embedded and split quoting cannot hide destructive tokens", () => {
+  assert.equal(classifyBashCommand("r'm' '-rf' build/").destructive, true);
+  assert.equal(classifyBashCommand('git pu"sh" origin main').destructive, true);
+  assert.equal(classifyBashCommand("\\rm -rf build/").destructive, true);
+});
+
+test("arbitrary-code interpreter forms are classified even when quoted (F1 regression)", () => {
+  assert.equal(classifyBashCommand("node '-e' 'process.exit(1)'").destructive, true);
+  assert.equal(classifyBashCommand('node --eval "1+1"').destructive, true);
+  assert.equal(classifyBashCommand("python3 '-c' 'print(1)'").destructive, true);
+  assert.equal(classifyBashCommand("npx some-unpublished-pkg").destructive, true);
+});
+
+test("scope: plain rm and non-push git reads are not guard targets", () => {
+  // Plain `rm file` (no -r/-f) is intentionally outside the guard's scope:
+  // the guard targets recursive/forced deletion and irreversible operations.
+  assert.equal(classifyBashCommand("rm build/log.txt").destructive, false);
+  // Conservative git-push policy: every push, forced or not, is destructive.
+  assert.equal(classifyBashCommand("git push origin main").kind, "Git push");
+  assert.equal(classifyBashCommand("git push --force origin main").kind, "forced Git push");
+});
+
 test("arbitrary-code interpreters are no longer safe prefixes (F1 regression)", () => {
   assert.equal(classifyBashCommand("node -e 'require(\"fs\").rmSync(\"x\", {recursive: true})'").destructive, true);
   assert.equal(classifyBashCommand("python3 -c 'import shutil; shutil.rmtree(\"x\")'").destructive, true);

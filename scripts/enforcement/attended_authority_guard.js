@@ -48,6 +48,11 @@ const DESTRUCTIVE_SHELL_PATTERNS = [
   { pattern: /\bnpx\b/, kind: "arbitrary package execution via npx" },
 ];
 
+// Scope note: plain `rm file` (no -r/-f) is intentionally NOT classified
+// destructive here; the guard targets recursive/forced deletion and
+// irreversible operations. Any `git push`, forced or not, is treated
+// conservatively as destructive because pushes publish history to remotes.
+
 // Destructive Git operations.
 const DESTRUCTIVE_GIT_PATTERNS = [
   { pattern: /\bgit\s+push\b[^|;&]*(--force|-f\b)/, kind: "forced Git push" },
@@ -73,21 +78,20 @@ const PROTECTED_PATHS = [
   "package-lock.json", "pnpm-lock.yaml", "Cargo.lock", "poetry.lock",
 ];
 
-// Quote-aware tokenization: strips shell quoting so `rm '-rf'` or
-// `git "push"` still expose their destructive tokens to the patterns.
+// Quote-aware tokenization: normalizes shell quoting so `rm '-rf'`,
+// `git "push"`, and split/embedded quoting such as `r'm' '-rf'` still
+// expose their destructive tokens to the patterns. Escapes are also
+// stripped (`\rm` -> `rm`) so an escaped destructive token cannot dodge
+// classification. Normalization is only used for the destructive
+// patterns, never to widen the safe-prefix list.
 function unquoteTokens(text) {
   return String(text ?? "")
     .split(/[\s\n]+/)
-    .map((token) => {
-      if (token.length >= 2) {
-        const first = token[0];
-        const last = token[token.length - 1];
-        if ((first === "\"" && last === "\"") || (first === "'" && last === "'")) {
-          return token.slice(1, -1);
-        }
-      }
-      return token;
-    })
+    .map((token) => token
+      .replace(/^"/, "").replace(/"$/, "")
+      .replace(/^'/, "").replace(/'$/, "")
+      .replace(/["']/g, "")
+      .replace(/\\(.)/g, "$1"))
     .join(" ");
 }
 
