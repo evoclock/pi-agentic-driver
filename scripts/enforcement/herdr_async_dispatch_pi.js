@@ -232,7 +232,8 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   const journey = { mode, autonomy, role, steps: [], status: "failed", code: null, handoff: null };
   const dispatched = new Set();
   const communicationOptions = options.communication ?? options;
-
+  const replacementRole = options.replacementRole ?? role;
+  const replacementModel = options.replacementModel ?? options.model ?? params.model;
   const finish = (status) => ({
     schema: WORKER_DISPATCH_SCHEMA,
     ok: status === "completed" || status === "exhausted" || status === "waiting-approval",
@@ -266,9 +267,6 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
     }
     const replacementRole = options.replacementRole ?? role;
     const replacementModel = options.replacementModel ?? options.model ?? params.model;
-    const castCheck = autonomy === "autonomous"
-      ? checkFrozenCast(journey.cast, replacementRole, replacementModel)
-      : null;
     if (autonomy === "autonomous" && castCheck.authorized !== true) {
       journey.handoff = {
         attempted: true,
@@ -336,6 +334,9 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
     return failure("dispatch", dispatchError("autonomy-invalid", "autonomy must be confirmed-default or autonomous", "denied"));
   }
   if (autonomy === "autonomous") journey.cast = materializeFrozenCast(params, options);
+  const castCheck = autonomy === "autonomous"
+    ? checkFrozenCast(journey.cast, replacementRole, replacementModel)
+    : null;
   if (!taskStore || typeof taskStore.list !== "function") {
     return failure("dispatch", dispatchError("task-store-invalid", "a read-only task store is required", "denied"));
   }
@@ -429,6 +430,48 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
     if (exchange.ok !== true) {
       const unresponsive = exchange.code === "prompt_stalled" || exchange.code === "prompt_delivery_unknown" || exchange.code === "process_timeout";
       if (unresponsive) {
+        if (autonomy === "autonomous" && castCheck?.authorized) {
+          // Autonomous replacement spawn: in-cast roles are replaced
+          // automatically through the guarded seam. The replacement's first
+          // prompt includes the mandatory gap-analysis instruction.
+          const replacementPrompt = `${stepPrompt}\n\nMANDATORY GAP-ANALYSIS PHASE: you are a replacement agent. Before resuming implementation work: (1) read the task spec; (2) inspect the repository state (code, tests, working tree) — not what prior reports claim; (3) consult the journey history for prior step reports, handoffs, and progress judgments; (4) produce a gap analysis: remaining work and the next concrete sub-step you will execute. You may not resume implementation until this phase is complete.`;
+          const replacement = await executeHerdrCommunication(
+            { action: "prompt", role, prompt: replacementPrompt, timeoutMs: 120000 },
+            context,
+            communicationOptions,
+            signal,
+          );
+          const gapAnalysis = replacement.ok === true
+            ? String(replacement.report ?? "").slice(0, 512)
+            : undefined;
+          const previousScope = journey.steps.filter(s => s.gapAnalysis).at(-1)?.gapAnalysis;
+          const progressCredited = replacement.ok === true && (!previousScope || gapAnalysis !== previousScope);
+          journey.steps.push({
+            step: journey.steps.length + 1,
+            taskId: task.id,
+            status: replacement.ok === true ? "replaced" : "worker-unresponsive",
+            error: replacement.ok === true ? undefined : String(replacement.code),
+            gapAnalysis,
+            progressCredited,
+            handoff: {
+              timestamp: new Date().toISOString(),
+              role,
+              triggerCode: exchange.code,
+              gapOutcome: gapAnalysis ? "produced" : "failed",
+              progressJudgment: progressCredited ? "credited" : "not-credited",
+            },
+          });
+          if (!progressCredited) {
+            journey.status = "worker-unresponsive-exhausted";
+            return finish("worker-unresponsive-exhausted");
+          }
+          // The replacement demonstrated progress: continue the journey with
+          // the next task instead of finishing. The replacement's exchange
+          // outcome determines whether the current task is retried or skipped.
+          if (replacement.ok !== true) {
+            return finish("worker-unresponsive");
+          }
+        }
         return handoffToReplacement(`exchange ended with ${exchange.code}`, task.id);
       }
       journey.status = exchange.code === "role_blocked" ? "role-blocked" : "failed";
