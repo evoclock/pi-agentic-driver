@@ -2587,6 +2587,14 @@ if ! gc_cache_growth_sample "\$session" /root/.npm /root/.cache /var/cache >/dev
   gc_log_event "\$session" "sweep" "GC-FSW-003" "sampler" "cache-growth sampling failed" "error" >/dev/null 2>&1 || true
 fi
 if [ ! -f "\$session/kill" ]; then gc_session_end "\$session" || :; fi
+# Session outcome (compliance-gap harness): the job's outcome marker, bounded
+# and redacted, appended to the containment log before the envelope. The job
+# may write /tmp/session/result; a missing file means the job ended without
+# an outcome.
+if [ -f "/tmp/session/result" ]; then
+  outcome=\$(head -c 256 "/tmp/session/result" | tr '\r\n' '  ' | sed 's/[[:cntrl:]]//g')
+  gc_log_event "\$session" "supervisor" "session-outcome" "outcome" "\$outcome" >/dev/null 2>&1 || :
+fi
 # Denial-evidence transport (design section 5): framed base64 envelope on the
 # console channel, UTF-8, LF-only, fixed key order; pty-safe alphabet.
 if [ -f "\$session/containment.log.jsonl" ]; then
