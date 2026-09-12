@@ -131,6 +131,7 @@ function errorResult(operation, error) {
     code: known.code,
     reason: known.message,
     ...(known.diagnostic ? { diagnostic: known.diagnostic } : {}),
+    ...(known.deliveryState ? { deliveryState: known.deliveryState } : {}),
     nonAuthorizing: true,
     authorityCreated: false,
   };
@@ -676,7 +677,7 @@ async function invokeHerdr(action, params, context, options = {}, signal) {
         timeoutMs: processTimeout,
         maxOutputBytes: MAX_PROCESS_OUTPUT_BYTES,
       });
-    } catch {
+    } catch (error) {
       return { internalFailure: "spawn_error" };
     }
     raw = await awaitBounded(pending, processTimeout, signal);
@@ -992,15 +993,15 @@ function allMarkerOccurrences(text, standaloneOnly = false, additionalPair = und
   return occurrences.sort((left, right) => left.index - right.index || left.end - right.end);
 }
 
-function promptContractRange(text, marker, occurrenceIndex) {
+function promptContractRange(text, marker, occurrenceIndex, { boundEnd = false } = {}) {
   const anchor = text.lastIndexOf(REPORT_CONTRACT_LINE, occurrenceIndex);
   if (anchor < 0) return undefined;
   const markerStart = anchor + REPORT_CONTRACT_LINE.length;
   const open = text.indexOf(marker.open, markerStart);
   if (open < 0 || open > occurrenceIndex) return undefined;
   const close = text.indexOf(marker.close, open + marker.open.length);
-  if (close < occurrenceIndex) return undefined;
   const end = close + marker.close.length;
+  if (boundEnd && end > occurrenceIndex) return undefined;
   if (Buffer.byteLength(text.slice(anchor, end), "utf8") > MAX_PROMPT_CONTRACT_ECHO_BYTES) return undefined;
   if (!/^\s*$/.test(text.slice(markerStart, open)) || !/^\s*$/.test(text.slice(open + marker.open.length, close))) return undefined;
   const otherMarkers = [...new Set(Object.values(REPORT_MARKERS)
@@ -1053,16 +1054,11 @@ function extractLatestReport(text, role) {
   }
   const prior = relevant.at(-3);
   if (prior?.marker === marker.open) {
-    // `recent-unwrapped` can retain one older unmatched opening before the
-    // newer pair. Ignore that prefix only when it is preceded by terminal
-    // history; an opening at the window boundary remains fail-closed so a
-    // nested/duplicate opening cannot be reclassified as stale history.
-    const prefixOpenCount = relevant.slice(0, -2).filter((item) => item.marker === marker.open).length;
-    const historicalPrefix = prefixOpenCount === 1
-      && text.slice(0, prior.index).trim().length > 0;
-    if (!historicalPrefix) {
-      throw communicationError("report_duplicate_open", "the latest role report contains a duplicate or nested opening marker");
-    }
+    // A duplicate or nested opening before the latest pair is never
+    // reclassified as stale history: stale unmatched opens are surfaced as
+    // bounded evidence in the prompt flow only, and a plain read stays
+    // fail-closed.
+    throw communicationError("report_duplicate_open", "the latest role report contains a duplicate or nested opening marker");
   }
   const rawBody = text.slice(open.end, close.index);
   const nestedMarkers = allMarkerOccurrences(rawBody, false, marker)
@@ -1073,6 +1069,76 @@ function extractLatestReport(text, role) {
   // `recent-unwrapped` is a bounded terminal window and can begin inside an
   // older report. Remove only the exact echoed prompt contract; all other
   // marker text remains a report-integrity failure.
+  const body = removePromptContractEchoes(rawBody, marker)
+    .replace(/^[ \t]*\r?\n/, "")
+    .replace(/\r?\n[ \t]*$/, "");
+  if (!body.trim()) throw communicationError("report_empty", "the latest role report is empty");
+  if (Buffer.byteLength(body, "utf8") > MAX_REPORT_BYTES) {
+    throw communicationError("report_oversized", "the latest role report exceeds the bounded report size");
+  }
+  return body;
+}
+
+function lineStarts(text) {
+  const starts = [0];
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] === "\n") starts.push(index + 1);
+  }
+  return starts;
+}
+
+function provenancedReportSegment(pre, post, sentPrompt, role) {
+  const marker = reportMarkersForRole(role);
+  const preLines = pre.split("\n");
+  const starts = lineStarts(post);
+  const candidates = [];
+  let from = 0;
+  while (from <= post.length) {
+    const start = post.indexOf(sentPrompt, from);
+    if (start < 0) break;
+    from = start + 1;
+    if (!starts.includes(start)) continue;
+    const range = marker && promptContractRange(post, marker, start + sentPrompt.length, { boundEnd: true });
+    if (!range || range.end !== start + sentPrompt.length) continue;
+    const prefix = post.slice(0, start);
+    const prefixLines = prefix.endsWith("\n") ? prefix.slice(0, -1).split("\n") : prefix.split("\n");
+    const shared = Math.min(prefixLines.length, preLines.length);
+    if (shared < 1) continue;
+    const preFirstLine = preLines[0];
+    const prefixContainsPreSnapshot = prefixLines.some((line) => line === preFirstLine);
+    const preTailMatchesPrefix = preLines.slice(-shared).every((line, index) => line === prefixLines[prefixLines.length - shared + index]);
+    if (prefixContainsPreSnapshot || preTailMatchesPrefix) {
+      candidates.push({ start, end: range.end, aligned: shared });
+    }
+  }
+  if (!candidates.length) throw communicationError("report_scope_unavailable", "the prompted exchange could not be proven from terminal history");
+  const max = Math.max(...candidates.map((candidate) => candidate.aligned));
+  const winners = candidates.filter((candidate) => candidate.aligned === max);
+  if (winners.length !== 1) throw communicationError("report_scope_unavailable", "the prompted exchange boundary is ambiguous");
+  return winners[0];
+}
+
+function extractReportFromSegment(text, role, fromIndex = 0, fullText = text) {
+  const marker = reportMarkersForRole(role);
+  const segment = text.slice(fromIndex);
+  const relevant = allMarkerOccurrences(segment, true, marker)
+    .filter((item) => (item.marker === marker.open || item.marker === marker.close)
+      && !isPromptContractMarker(fullText, { index: item.index + fromIndex, end: item.end + fromIndex }, marker));
+  if (!relevant.length) throw communicationError("report_missing", "no complete role-specific report was observed");
+  const close = relevant.at(-1);
+  if (close.marker === marker.open) {
+    throw communicationError("report_truncated", "the latest role report has no closing marker");
+  }
+  const open = relevant.at(-2);
+  if (!open || open.marker !== marker.open) {
+    throw communicationError("report_reversed", "the latest role report has no matching opening marker");
+  }
+  const rawBody = segment.slice(open.end, close.index);
+  const nestedMarkers = allMarkerOccurrences(rawBody, false, marker)
+    .filter((item) => !isPromptContractMarker(fullText, { index: open.end + item.index, end: open.end + item.end }, marker));
+  if (nestedMarkers.length) {
+    throw communicationError("report_nested", "the latest role report contains a nested report marker");
+  }
   const body = removePromptContractEchoes(rawBody, marker)
     .replace(/^[ \t]*\r?\n/, "")
     .replace(/\r?\n[ \t]*$/, "");
@@ -1119,7 +1185,36 @@ export async function executeHerdrCommunication(params, context, options = {}, s
       // change before it accepts settlement. A separate wait command can race
       // and match the role's pre-existing idle state, reading the empty marker
       // template before the new response exists.
-      const prompted = await invokeHerdr(operation, request, context, options, signal);
+      let pre;
+      try {
+        pre = readText(await invokeHerdr("read", { action: "read", role }, context, options, signal));
+      } catch {
+        throw communicationError("report_scope_unavailable", "the pre-prompt terminal snapshot is unavailable");
+      }
+      const revalidated = await invokeHerdr("get", { action: "get", role }, context, options, signal);
+      publicAgentObservation(extractAgent(revalidated, "agent_info"), role, repositories, { requirePromptable: true });
+      let prompted;
+      try {
+        prompted = await invokeHerdr(operation, request, context, options, signal);
+      } catch (error) {
+        if (!(error instanceof HerdrCommunicationError) || error.code !== "prompt_stalled") throw error;
+        try {
+          const recovered = await invokeHerdr("get", { action: "get", role }, context, options, signal);
+          const recovery = publicAgentObservation(extractAgent(recovered, "agent_info"), role, repositories);
+          const recoveredSeq = stateChangeSeq(recovered);
+          const initialSeq = stateChangeSeq(current);
+          if (recovery.status === "idle" && initialSeq !== undefined && recoveredSeq !== undefined && recoveredSeq !== initialSeq) throw error;
+          const unknown = communicationError("prompt_delivery_unknown", "prompt delivery is unknown; the adapter did not retry, and only the caller may issue a new explicit prompt");
+          unknown.deliveryState = "unknown";
+          throw unknown;
+        } catch (recoveryError) {
+          if (recoveryError instanceof HerdrCommunicationError && ["prompt_stalled", "prompt_delivery_unknown"].includes(recoveryError.code)) throw recoveryError;
+          const unknown = communicationError("prompt_delivery_unknown", "prompt delivery is unknown; the adapter did not retry, and only the caller may issue a new explicit prompt");
+          unknown.deliveryState = "unknown";
+          unknown.diagnostic = boundedFailureDiagnostic(recoveryError?.message);
+          throw unknown;
+        }
+      }
       const observation = publicAgentObservation(extractAgent(prompted, "agent_prompted"), role, repositories);
       const waitedStatus = observation.status;
       if (!WAIT_STATUSES.has(waitedStatus)) {
@@ -1129,7 +1224,10 @@ export async function executeHerdrCommunication(params, context, options = {}, s
         return errorResult(operation, communicationError("role_blocked", "the prompted role reached blocked state", "blocked"));
       }
       const rawReport = await invokeHerdr("read", { action: "read", role }, context, options, signal);
-      const report = extractLatestHerdrReport(readText(rawReport), role);
+      const post = readText(rawReport);
+      const sentPrompt = promptWithReportRequirement(role, request.prompt);
+      const boundary = provenancedReportSegment(pre, post, sentPrompt, role);
+      const report = extractReportFromSegment(post, role, boundary.end);
       return successResult(operation, {
         status: "complete",
         role,
