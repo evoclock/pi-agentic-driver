@@ -393,18 +393,24 @@ stand.
 
 </details>
 
+<details>
+<summary><strong>attended-authority guard</strong> <em>(released, 0.7.0)</em></summary>
+
+The safety net between an agent and your shell. When a model tries to
+delete, overwrite, or push, the guard stops it and asks you. Safe commands
+pass through untouched. If you deny, you get a clear reason and the session
+continues, and the agent does not retry behind your back. In headless runs
+where no human can confirm, destructive commands are refused rather than
+silently allowed.
+
+</details>
+
 **Under development in this theme:**
 
 - **native macOS container proof.** The native Apple Container runtime has
   passed a fixed local isolation qualification: read-only repository mount,
   no network, automatic removal. The native Pi adapter is not yet part of the
   released package.
-- **attended-authority guard.** The safety net between an agent and your
-  shell. When a model tries to delete, overwrite, or push, the guard stops it
-  and asks you. Safe commands pass through untouched. If you deny, you get a
-  clear reason and the session continues, and the agent does not retry behind
-  your back. In headless runs where no human can confirm, destructive
-  commands are refused rather than silently allowed.
 
 ## Session continuity
 
