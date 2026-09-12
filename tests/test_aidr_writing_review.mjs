@@ -41,6 +41,22 @@ test("AI;DR applies an ASD-STE100-informed profile in simple and ste modes", () 
   assert.equal(explicit.standards["ASD-STE100"].status, "advisory_clear");
 });
 
+test("AI;DR applies the project terminology rules (STE-T1)", () => {
+  const report = reviewText(
+    "The bounded queue is load-bearing for dispatch.",
+    { mode: "ste", source: "text", standard: "asd-ste100" },
+  );
+  const rules = report.standards["ASD-STE100"].rulesApplied;
+  assert.ok(rules.includes("STE-T1"));
+  const finding = report.standards["ASD-STE100"].findings.find((item) => item.rule === "STE-T1");
+  assert.ok(finding);
+  assert.ok(finding.examples.some((item) => item.startsWith("bounded")));
+  assert.ok(finding.examples.some((item) => item.startsWith("load-bearing")));
+
+  const clean = reviewText("The limited queue is fundamental to dispatch.", { mode: "ste", source: "text", standard: "asd-ste100" });
+  assert.equal(clean.standards["ASD-STE100"].rulesApplied.includes("STE-T1"), false);
+});
+
 test("AI;DR ignores frontmatter and fenced code while reviewing prose", () => {
   const report = reviewText(`---\ntitle: Example\n---\n\nA short paragraph.\n\n\`\`\`js\nconst value = ${"x".repeat(300)};\n\`\`\``, { source: "text" });
   assert.equal(report.metrics.wordCount, 3);
