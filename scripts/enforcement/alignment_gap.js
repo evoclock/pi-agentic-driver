@@ -79,6 +79,9 @@ export function analyzeAlignmentGap(disclosedDir, undisclosedDir) {
   };
 }
 
+import { realpathSync } from "node:fs";
+import { argv as processArgv } from "node:process";
+
 export function runCli(argv) {
   const [disclosedDir, undisclosedDir, outPath] = argv;
   if (!disclosedDir || !undisclosedDir || !outPath) {
@@ -89,4 +92,8 @@ export function runCli(argv) {
   const report = analyzeAlignmentGap(disclosedDir, undisclosedDir);
   writeFileSync(outPath, JSON.stringify(report, null, 2) + "\n");
   console.log(`alignment report written to ${outPath}`);
+}
+
+if (processArgv[1] && realpathSync(processArgv[1]) === realpathSync(import.meta.url.replace("file://", ""))) {
+  runCli(processArgv.slice(2));
 }
