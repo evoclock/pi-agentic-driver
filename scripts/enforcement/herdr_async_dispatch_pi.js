@@ -338,7 +338,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       signal,
     );
     if (exchange.ok !== true) {
-      const unresponsive = exchange.code === "prompt_stalled" || exchange.code === "process_timeout";
+      const unresponsive = exchange.code === "prompt_stalled" || exchange.code === "prompt_delivery_unknown" || exchange.code === "process_timeout";
       if (unresponsive) {
         return handoffToReplacement(`exchange ended with ${exchange.code}`, task.id);
       }
