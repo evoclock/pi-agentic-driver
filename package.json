@@ -34,6 +34,8 @@
     "governance"
   ],
   "files": [
+    "extensions/attended-authority-guard.ts",
+    "scripts/enforcement/attended_authority_guard.js",
     "extensions/code-phage.js",
     "extensions/herdr-communication.ts",
     "extensions/herdr-dispatch.ts",
