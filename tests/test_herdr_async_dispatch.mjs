@@ -26,6 +26,7 @@ const tuiContext = () => ({ mode: "tui", hasUI: true, cwd: root, ui: { confirm: 
 function herdrFixture({ statuses = {}, reportFor = () => "step report" } = {}) {
   const calls = [];
   let reads = 0;
+  let terminalHistory = "history";
   const runProcess = async ({ argv }) => {
     const [action, role] = [argv[1], argv[2]];
     calls.push({ action, role, argv: [...argv] });
@@ -38,10 +39,11 @@ function herdrFixture({ statuses = {}, reportFor = () => "step report" } = {}) {
     if (action === "read") {
       reads += 1;
       const report = `[WORKER_REPORT_BEGIN]\n${reportFor(role)}\n[WORKER_REPORT_END]`;
-      if (reads === 1) return { code: 0, stdout: "history" };
       const lastPrompt = calls.filter((call) => call.action === "prompt").at(-1);
       const echoed = lastPrompt ? String(lastPrompt.argv?.[3] ?? "") : "";
-      return { code: 0, stdout: `history\n${echoed}\n${report}` };
+      const result = { code: 0, stdout: `${terminalHistory}\n${echoed}\n${report}` };
+      terminalHistory = result.stdout;
+      return result;
     }
     throw new Error(`unexpected action: ${action}`);
   };
@@ -537,4 +539,59 @@ test("production wiring: unresponsive handoff spawns a real replacement through 
   const startArgv = lifecycleCalls.find((argv) => argv[1] === "start");
   assert.equal(startArgv[0], "agent");
   assert.deepEqual(startArgv.slice(-2), ["--model", model]);
+});
+
+test("AJ-4: autonomous replacement spawn with gap analysis", async () => {
+  const spawned = [];
+  const fixture = herdrFixture({ statuses: { worker: "idle" } });
+  let promptCount = 0;
+  const runProcess = async ({ argv }) => {
+    const [action, role] = [argv[1], argv[2]];
+    if (action === "prompt") {
+      promptCount += 1;
+      if (promptCount === 1) return { code: 2, stdout: JSON.stringify({ error: { code: "agent_prompt_stalled" } }) };
+    }
+    return fixture.runProcess({ argv });
+  };
+  const journey = await runWorkerJourney(
+    { action: "dispatch", role: "worker", stepPrompt: "x", autonomy: "autonomous", model: "test-model", cast: { roles: ["worker"], models: { worker: "test-model" } } },
+    tuiContext(),
+    { runProcess, taskStore: taskStore([{ id: "1", status: "pending" }]), spawnReplacement: async ({ role }) => { spawned.push(role); return { ok: true, role, repository: root }; } },
+  );
+  assert.ok(journey.steps.some(s => s.status === "replaced"), "the replacement exchange completed with a gap analysis");
+});
+
+test("AJ-4: forward-progress judgment exhausts after no progress", async () => {
+  const fixture = herdrFixture({ statuses: { worker: "idle" } });
+  let promptCount = 0;
+  const runProcess = async ({ argv }) => {
+    const [action, role] = [argv[1], argv[2]];
+    if (action === "prompt") {
+      promptCount += 1;
+      if (promptCount >= 1) return { code: 2, stdout: JSON.stringify({ error: { code: "agent_prompt_stalled" } }) };
+    }
+    return fixture.runProcess({ argv });
+  };
+  const journey = await runWorkerJourney(
+    { action: "dispatch", role: "worker", stepPrompt: "x", autonomy: "autonomous", maxSteps: 3, model: "test-model", cast: { roles: ["worker"], models: { worker: "test-model" } } },
+    tuiContext(),
+    { runProcess, taskStore: taskStore([{ id: "1", status: "pending" }]), spawnReplacement: async ({ role }) => ({ ok: true, role, repository: root }) },
+  );
+  assert.ok(journey.steps.some(s => s.progressCredited === false), "a replacement without progress is not credited");
+  assert.equal(journey.status, "worker-unresponsive-exhausted");
+});
+
+test("AJ-4: confirmed-default keeps the existing handoff path", async () => {
+  const fixture = herdrFixture({ statuses: { worker: "idle" } });
+  const runProcess = async ({ argv }) => {
+    const [action, role] = [argv[1], argv[2]];
+    if (action === "prompt") return { code: 2, stdout: JSON.stringify({ error: { code: "agent_prompt_stalled" } }) };
+    return fixture.runProcess({ argv });
+  };
+  const journey = await runWorkerJourney(
+    { action: "dispatch", role: "worker", stepPrompt: "x" },
+    tuiContext(),
+    { runProcess, taskStore: taskStore([{ id: "1", status: "pending" }]), spawnReplacement: async ({ role }) => ({ ok: true, role, repository: root }) },
+  );
+  assert.equal(journey.status, "worker-unresponsive");
 });
