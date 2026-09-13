@@ -51,6 +51,7 @@ proofs for agentic workflows.
 | `agentic_worker_dispatch` | Runs controlled worker journeys and observes worker liveness. | shipped |
 | `agentic_kanban_board` | Shows the workspace task board: lanes, flags, priorities, dependencies, and which cards can run. | shipped |
 | `agentic_kanban_board_write` | Adds cards to the board through the trusted writer, which records who authorized the work. | shipped |
+| `agentic_kanban_board_update` | Moves, closes, flags, edits, or removes cards on the board, always recording who authorized the change. | shipped |
 
 **Status: active development and testing.** Each extension ships only after
 it passes fixture-based acceptance, native tests, live-session checks, and
@@ -206,14 +207,24 @@ instruction, or your approval of an agent's proposal. A card without that
 record cannot be dispatched. A hand-edited card cannot fake the record, and
 a tampered card refuses to run.
 
-Only you complete a card. Move it to done in your board UI, or tell an
-agent to close it. An agent report that says the work is finished is
-evidence for your review. It is never the completion itself.
+Agents can also move cards between lanes, flag them, edit them, or remove
+them, but only on your instruction, recorded the same way. Only you
+complete a card. Move it to done in your board UI, or tell an agent to
+close it. An agent report that says the work is finished is evidence for
+your review. It is never the completion itself.
 
-The card format is shared. The same board renders in Obsidian, with
-optional Tasks-plugin emoji, and in the Vogelkop Task Board pane. The
-machine-readable fields are the single source of truth, so there is no
-second copy to keep in sync.
+Alongside the board file you get a companion view file for Obsidian,
+updated after every change, so the board renders as a kanban board while
+you work.
+
+The card format is shared. The same board renders in Obsidian and in the
+Vogelkop Task Board pane. The machine-readable fields are the single
+source of truth, so there is no second copy to keep in sync.
+
+Coming next: agents that claim cards from the board and work them
+overnight, a board watcher that keeps checking for dispatchable work, and
+our own Obsidian plugin that renders the board natively, so Obsidian and
+Vogelkop stay full equals as ways to read and work the board.
 
 </details>
 
