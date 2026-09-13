@@ -988,37 +988,50 @@ export function observeBoardProvider({ boardPath }) {
   return { present, boardPath: present ? boardPath : null };
 }
 
-export function registerKanbanBoardTools(pi, { boardPath } = {}) {
-  const observation = observeBoardProvider({ boardPath });
-  if (!observation.present) return { registered: [], observation };
-  // Additive, fail-closed: registered only behind the observation,
-  // so removing the board file removes the surface (§5).
+export function registerKanbanBoardTools(pi, { boardPath = null, resolveBoardPath = null } = {}) {
+  // Board resolution happens per tool call, not at registration: Pi
+  // extensions receive only the ExtensionAPI at registration (ctx is
+  // per-tool-call), so a static boardPath observed at startup is wrong for
+  // multi-workspace sessions and undefined cwd breaks resolution entirely.
+  // Registration is unconditional; the surface is gated per call — no board
+  // for the calling workspace yields a structured board-unavailable result
+  // (reversibility preserved: no board file, nothing happens).
+  const boardPathFor = (ctx) => {
+    if (typeof resolveBoardPath === "function") return resolveBoardPath(ctx);
+    return typeof boardPath === "string" && boardPath !== "" ? boardPath : null;
+  };
+  const observation = observeBoardProvider({ boardPath: boardPathFor(undefined) ?? undefined });
   const registered = [];
+  const unavailableValue = (extra = {}) => ({
+    ok: false,
+    persisted: false,
+    boardUnavailable: true,
+    code: "board-unavailable",
+    reason: "no board file found for this workspace (board-unavailable)",
+    errors: ["no board file found for this workspace (board-unavailable)"],
+    ...extra,
+  });
+  const unavailableResult = (extra = {}) => {
+    const value = unavailableValue(extra);
+    return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+  };
   if (typeof pi?.registerTool === "function") {
     pi.registerTool({
       name: "agentic_kanban_board",
       label: "Kanban Board",
       description: "Read-only view of the validated task board: lanes, flags, priorities, dependencies, and dispatchability. The board is additive and grants no authority; agents read it and act within card states.",
       parameters: { type: "object", additionalProperties: false, properties: {} },
-      async execute() {
-        // F7(b): every tool call re-observes the board. If the board file was
-        // removed after registration, return an observed board-unavailable
-        // result instead of silently serving a stale board. Registration
-        // stays; the surface is gated per call.
-        if (!existsSync(observation.boardPath)) {
-          const value = {
-            ok: false,
-            nonAuthorizing: true,
-            persisted: false,
-            boardUnavailable: true,
-            cards: [],
-            errors: ["board file is no longer present (board-unavailable)"],
-          };
-          return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+      async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+        // Per-call board resolution + F7(b) re-observation. No board for the
+        // calling workspace, or the board removed after registration:
+        // observed board-unavailable, never a stale board, never a throw.
+        const activeBoardPath = boardPathFor(ctx);
+        if (!activeBoardPath || !existsSync(activeBoardPath)) {
+          return unavailableResult({ nonAuthorizing: true, cards: [] });
         }
         let value;
         try {
-          const markdown = readFileSync(observation.boardPath, "utf8");
+          const markdown = readFileSync(activeBoardPath, "utf8");
           const validated = validateBoard(markdown);
           value = validated.ok
             ? { ok: true, nonAuthorizing: true, persisted: false, cards: validated.cards, errors: [] }
@@ -1075,20 +1088,13 @@ export function registerKanbanBoardTools(pi, { boardPath } = {}) {
         },
         required: ["title", "specification", "definitionOfDone", "stoppingPoint", "scopePaths", "authority"],
       },
-      async execute(_toolContext, input) {
-        // F7(b): re-observe the board on every call. If the board file was
-        // removed after registration, return board-unavailable instead of
-        // writing to a stale path.
-        if (!existsSync(observation.boardPath)) {
-          const value = {
-            ok: false,
-            persisted: false,
-            boardUnavailable: true,
-            code: "board-unavailable",
-            reason: "board file is no longer present (board-unavailable)",
-            errors: ["board file is no longer present (board-unavailable)"],
-          };
-          return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+      async execute(_toolCallId, input, _signal, _onUpdate, ctx) {
+        // Per-call board resolution + F7(b) re-observation. No board for the
+        // calling workspace, or the board removed after registration:
+        // structured board-unavailable instead of writing to a stale path.
+        const activeBoardPath = boardPathFor(ctx);
+        if (!activeBoardPath || !existsSync(activeBoardPath)) {
+          return unavailableResult();
         }
         // The writer allocates the cardId and computes all hashes; the tool
         // forwards only content and the authority record. Input is normalized
@@ -1132,7 +1138,7 @@ export function registerKanbanBoardTools(pi, { boardPath } = {}) {
         let result;
         try {
           result = writeCard({
-            boardPath: observation.boardPath,
+            boardPath: activeBoardPath,
             input: writerInput,
             authority: input?.authority,
             registries: {},
@@ -1179,5 +1185,5 @@ export function registerKanbanBoardTools(pi, { boardPath } = {}) {
     });
     registered.push("agentic_kanban_board_write");
   }
-  return { registered, observation };
+  return { registered, observation: { ...observation, boardPath: observation.boardPath } };
 }

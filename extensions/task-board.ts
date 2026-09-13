@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// BOARD-1 provider extension (§5 reversibility): the board surface registers
-// only when a real board file is observed in the workspace. No board file,
-// no behavior change and no new tool.
+// BOARD-1 provider extension (§5 reversibility): both board tools register
+// unconditionally at startup; board resolution happens per tool call from
+// the calling workspace's cwd. No board file for the calling workspace
+// yields a structured board-unavailable result — no behavior change, nothing
+// created.
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -23,9 +25,10 @@ export function resolveBoardPath(cwd) {
 
 export default async function taskBoardPi(pi) {
   const module = await import(new URL("../scripts/enforcement/task_board_core_pi.js", import.meta.url).href);
-  const boardPath = resolveBoardPath(pi?.ctx?.cwd);
-  if (boardPath === null) {
-    return { registered: [], observation: { present: false, boardPath: null } };
-  }
-  return module.registerKanbanBoardTools(pi, { boardPath });
+  // The ExtensionAPI carries no ctx at registration time (ctx is
+  // per-tool-call), so registration is unconditional and each execute()
+  // resolves the board from its own ctx.cwd, falling back to process.cwd().
+  return module.registerKanbanBoardTools(pi, {
+    resolveBoardPath: (ctx) => resolveBoardPath(ctx?.cwd || process.cwd()),
+  });
 }
