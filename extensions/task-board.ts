@@ -9,7 +9,9 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-const BOARD_FILENAMES = ["board.md", "TASKS.md"];
+// The canonical file comes first: the projection (board.md) is a derived
+// view and must never be the board the tools operate on.
+const BOARD_FILENAMES = ["TASKS.md", "board.md"];
 
 // Returns the board path for the workspace: an existing board file if one is
 // present, otherwise the canonical TASKS.md candidate (the write tool
