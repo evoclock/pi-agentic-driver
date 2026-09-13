@@ -1275,11 +1275,17 @@ export function isDispatchable(card, boardIndex) {
 // Markdown stays canonical for task semantics.
 // ---------------------------------------------------------------------------
 
-export const CLAIMS_SCHEMA = "agentic-driver.board-claims.v1";
+export const CLAIMS_SCHEMA = "agentic-driver.board-claims.v2";
 export const ENVELOPE_SCHEMA = "agentic-driver.assignment-envelope.v1";
 export const AUTOMATION_POLICY_SCHEMA = "agentic-driver.automation-policy.v1";
 export const PLACEMENTS = Object.freeze(["container", "host"]);
+export const RISK_LEVELS = Object.freeze(["low", "medium", "high"]);
 export const DEFAULT_ENVELOPE_EXPIRY_HOURS = 12;
+
+// F1: the claims file is AUTHENTICATED exactly like the writer state — an
+// HMAC-SHA256 over its content, keyed by the writer-state secret, verified on
+// every read. Malformed, tampered, or HMAC-failing claims files fail closed:
+// dispatch is REFUSED, never treated as an empty claims list.
 
 export function claimsPath(boardPath) {
   return `${boardPath}.claims.json`;
@@ -1304,14 +1310,101 @@ function writeJsonFileAtomic(path, value) {
   renameSync(tmpPath, path);
 }
 
-export function readClaims(boardPath) {
-  const value = readJsonFile(claimsPath(boardPath));
-  if (value === null || typeof value !== "object" || !Array.isArray(value.claims)) return [];
-  return value.claims.filter((claim) => claim && typeof claim.cardId === "string");
+// HMAC over the canonical JSON form of the claims content, keyed by the
+// writer-state secret (F1). Covers claims, consumed-claim records, and the
+// transaction record — every authority-bearing field of the file.
+function claimsFileHmac(value, secret) {
+  return createHmac("sha256", secret)
+    .update(canonicalJsonString({
+      schema: value.schema,
+      transaction: value.transaction ?? null,
+      claims: value.claims ?? [],
+      consumedClaims: value.consumedClaims ?? [],
+    }), "utf8")
+    .digest("hex");
 }
 
-function writeClaims(boardPath, claims) {
-  writeJsonFileAtomic(claimsPath(boardPath), { schema: CLAIMS_SCHEMA, claims });
+function wellFormedClaim(claim) {
+  return claim !== null && typeof claim === "object" && !Array.isArray(claim)
+    && typeof claim.cardId === "string"
+    && typeof claim.claimedAt === "string"
+    && typeof claim.role === "string"
+    && typeof claim.envelopeId === "string"
+    && claim.envelope !== null && typeof claim.envelope === "object";
+}
+
+function wellFormedConsumedClaim(claim) {
+  return claim !== null && typeof claim === "object" && !Array.isArray(claim)
+    && typeof claim.cardId === "string"
+    && typeof claim.envelopeId === "string"
+    && typeof claim.consumedAt === "string"
+    && typeof claim.reason === "string";
+}
+
+// Read and VERIFY the claims file. Missing file → empty state (a fresh board
+// has no claims). Malformed JSON, wrong shape, or an HMAC that does not
+// verify → {ok: false, reason} — the caller MUST fail closed (refuse
+// dispatch), never treat corruption as "no claims".
+export function readClaimsState(boardPath) {
+  const path = claimsPath(boardPath);
+  if (!existsSync(path)) {
+    return { ok: true, missing: true, state: { transaction: null, claims: [], consumedClaims: [] } };
+  }
+  const value = readJsonFile(path);
+  if (value === null || typeof value !== "object" || Array.isArray(value)
+    || !Array.isArray(value.claims) || (value.consumedClaims !== undefined && !Array.isArray(value.consumedClaims))) {
+    return { ok: false, reason: "the claims file is malformed (fails closed)" };
+  }
+  if (!value.claims.every(wellFormedClaim)
+    || !(value.consumedClaims ?? []).every(wellFormedConsumedClaim)) {
+    return { ok: false, reason: "the claims file contains a malformed claim record (fails closed)" };
+  }
+  // F2 integrity: an ACTIVE claim may never reference a consumed envelope —
+  // a consumed envelope cannot be reused; only a new envelopeId is valid.
+  const consumedIds = new Set((value.consumedClaims ?? []).map((entry) => entry.envelopeId));
+  if (value.claims.some((claim) => consumedIds.has(claim.envelopeId))) {
+    return { ok: false, reason: "an active claim references a consumed envelope — the claims file is inconsistent (fails closed)" };
+  }
+  const secret = readWriterState(writerStatePath(boardPath)).secret;
+  if (secret === null) {
+    return { ok: false, reason: "writer state file has no secret to verify the claims file (fails closed)" };
+  }
+  if (typeof value.hmac !== "string" || value.hmac !== claimsFileHmac(value, secret)) {
+    return { ok: false, reason: "the claims file HMAC does not verify — tampered or forged (fails closed)" };
+  }
+  return {
+    ok: true,
+    state: {
+      transaction: value.transaction ?? null,
+      claims: value.claims,
+      consumedClaims: value.consumedClaims ?? [],
+    },
+  };
+}
+
+// Convenience reader. Throws a coded error on corruption so a caller cannot
+// silently treat tampered state as an empty claims list (Sol minor 3).
+export function readClaims(boardPath) {
+  const result = readClaimsState(boardPath);
+  if (!result.ok) {
+    throw Object.assign(new Error(result.reason), { code: "claims-corrupt" });
+  }
+  return result.state.claims;
+}
+
+function writeClaims(boardPath, claims, { consumedClaims = null, transaction = null } = {}) {
+  const secret = readWriterState(writerStatePath(boardPath)).secret;
+  if (secret === null) {
+    throw Object.assign(new Error("writer state file has no secret (fails closed)"), { code: "writer-state-unavailable" });
+  }
+  const value = {
+    schema: CLAIMS_SCHEMA,
+    transaction,
+    claims,
+    consumedClaims: consumedClaims ?? readClaimsState(boardPath).state?.consumedClaims ?? [],
+  };
+  value.hmac = claimsFileHmac(value, secret);
+  writeJsonFileAtomic(claimsPath(boardPath), value);
 }
 
 // The automation policy (§3.2, §4): an explicit, revocable record the USER
@@ -1325,8 +1418,16 @@ export function readAutomationPolicy(boardPath, { configPath = null } = {}) {
   return value;
 }
 
-// Validate the policy shape and currency. Returns {ok, policy, reason}.
-export function checkAutomationPolicy(policy, { now = null } = {}) {
+// Validate the policy shape and currency. The shape is CLOSED (F5): unknown
+// fields fail closed with a clear reason. Roles must match ROLE_NAME_RE.
+// The policy is bound to the board file it applies to (F4) and carries a risk
+// ceiling (F4). Returns {ok, policy, reason}.
+const POLICY_FIELDS = Object.freeze([
+  "roles", "placement", "maxConcurrent", "expiry", "envelopeExpiryHours",
+  "board", "riskCeiling", "allowPerCardRiskOverride",
+]);
+
+export function checkAutomationPolicy(policy, { now = null, boardPath = null } = {}) {
   const at = now ?? new Date().toISOString();
   if (policy === null || policy === undefined) {
     return { ok: false, reason: "no automation policy is set — automated dispatch is refused (fails closed)" };
@@ -1334,9 +1435,14 @@ export function checkAutomationPolicy(policy, { now = null } = {}) {
   if (typeof policy !== "object" || Array.isArray(policy)) {
     return { ok: false, reason: "the automation policy is malformed (fails closed)" };
   }
+  for (const key of Object.keys(policy)) {
+    if (!POLICY_FIELDS.includes(key)) {
+      return { ok: false, reason: `the automation policy has an unknown field "${key}" — the policy shape is closed (fails closed)` };
+    }
+  }
   if (!Array.isArray(policy.roles) || policy.roles.length === 0
-    || !policy.roles.every((role) => typeof role === "string" && role !== "")) {
-    return { ok: false, reason: "the automation policy declares no dispatchable roles (fails closed)" };
+    || !policy.roles.every((role) => typeof role === "string" && ROLE_NAME_RE.test(role))) {
+    return { ok: false, reason: `the automation policy declares no valid roles (every role must match ${ROLE_NAME_RE.source}) (fails closed)` };
   }
   if (!PLACEMENTS.includes(policy.placement)) {
     return { ok: false, reason: `the automation policy placement must be one of ${PLACEMENTS.join(", ")} (fails closed)` };
@@ -1352,12 +1458,32 @@ export function checkAutomationPolicy(policy, { now = null } = {}) {
   if (Date.parse(expiry) <= Date.parse(at)) {
     return { ok: false, reason: "the automation policy has expired — new dispatches are refused until it is renewed" };
   }
+  if (policy.envelopeExpiryHours !== undefined
+    && (!Number.isFinite(Number(policy.envelopeExpiryHours)) || Number(policy.envelopeExpiryHours) <= 0)) {
+    return { ok: false, reason: "the automation policy envelopeExpiryHours must be a positive number (fails closed)" };
+  }
+  if (typeof policy.board !== "string" || policy.board === "") {
+    return { ok: false, reason: "the automation policy does not name the board file it applies to (fails closed)" };
+  }
+  if (boardPath !== null && policy.board !== boardPath) {
+    return { ok: false, reason: `the automation policy is bound to board "${policy.board}", not this board (fails closed)` };
+  }
+  if (typeof policy.riskCeiling !== "string" || !RISK_LEVELS.includes(policy.riskCeiling)) {
+    return { ok: false, reason: `the automation policy riskCeiling must be one of ${RISK_LEVELS.join(", ")} (fails closed)` };
+  }
+  if (policy.allowPerCardRiskOverride !== undefined && typeof policy.allowPerCardRiskOverride !== "boolean") {
+    return { ok: false, reason: "the automation policy allowPerCardRiskOverride must be a boolean (fails closed)" };
+  }
   return { ok: true, policy, reason: null };
 }
 
-// §3.2 assignment envelope: created ONCE per assignment, immutable, and
-// single-attempt. Retry, drift, or expiry require a NEW envelope — never a
-// mutation of this one.
+// §3.2 assignment envelope: created ONCE per assignment, immutable (deep-
+// frozen, F2), and single-attempt. Retry, drift, or expiry require a NEW
+// envelope — never a mutation of this one. F4: the starting revision comes
+// from the CARD'S repository (resolved from the workspace the board lives
+// in), the card's base revision is bound in when present (branch chaining),
+// and the risk classification comes from the policy (per-card override only
+// when the policy allows).
 export function createEnvelope({ card, policy, now = null, repository = null, startingRevision = null }) {
   const at = now ?? new Date().toISOString();
   const envelopeId = randomBytes(16).toString("hex");
@@ -1367,25 +1493,40 @@ export function createEnvelope({ card, policy, now = null, repository = null, st
   let expiry = new Date(Date.parse(at) + expiryHours * 3_600_000).toISOString();
   // The envelope can never outlive the policy that authorized it.
   if (policy?.expiry && Date.parse(policy.expiry) < Date.parse(expiry)) expiry = policy.expiry;
-  return Object.freeze({
+  const repo = repository ?? (policy?.board ? dirname(policy.board) : process.cwd());
+  const overrideAllowed = policy?.allowPerCardRiskOverride === true;
+  const cardRisk = typeof card?.risk === "string" && RISK_LEVELS.includes(card.risk) ? card.risk : null;
+  const risk = overrideAllowed && cardRisk !== null ? cardRisk : policy?.riskCeiling ?? "low";
+  return deepFreeze({
     schema: ENVELOPE_SCHEMA,
     envelopeId,
     cardId: card.cardId,
     cardHash: card.hash ?? null,
-    repository: repository ?? process.cwd(),
-    startingRevision: startingRevision ?? gitHead(process.cwd()),
+    repository: repo,
+    startingRevision: startingRevision ?? gitHead(repo),
+    baseRevision: card.base ?? null,
     branch: `board/${card.cardId}-${envelopeId.slice(0, 8)}`,
-    allowedPaths: [...(card.scope ?? [])],
-    unchangedPaths: [...(card.unchangedPaths ?? [])],
-    capabilities: [...(card.capabilities ?? [])],
+    allowedPaths: Object.freeze([...(card.scope ?? [])]),
+    unchangedPaths: Object.freeze([...(card.unchangedPaths ?? [])]),
+    capabilities: Object.freeze([...(card.capabilities ?? [])]),
     stoppingPoint: card.stoppingPoint ?? null,
-    acceptance: { specHash: card.specHash ?? null, dodHash: card.dodHash ?? null },
+    acceptance: Object.freeze({ specHash: card.specHash ?? null, dodHash: card.dodHash ?? null }),
     placement: policy?.placement ?? null,
     interactionProfile: policy?.placement ?? null,
+    risk,
+    riskCeiling: policy?.riskCeiling ?? null,
     mode: "automated",
     createdAt: at,
     expiry,
   });
+}
+
+function deepFreeze(value) {
+  if (value !== null && typeof value === "object") {
+    for (const key of Object.keys(value)) deepFreeze(value[key]);
+    Object.freeze(value);
+  }
+  return value;
 }
 
 // Read-only git observation for the envelope's starting revision. Git
@@ -1454,9 +1595,24 @@ function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, rep
   if (!existsSync(boardPath)) {
     return { ok: false, code: "board-unavailable", reason: "board file is no longer present (board-unavailable)" };
   }
+  if (!ROLE_NAME_RE.test(role)) {
+    return { ok: false, code: "role-invalid", reason: `role "${role}" does not match ${ROLE_NAME_RE.source} (fails closed)` };
+  }
+  // F1: read AND verify the claims file. Corruption fails closed.
+  const claimsRead = readClaimsState(boardPath);
+  if (!claimsRead.ok) {
+    return { ok: false, code: "claims-corrupt", reason: claimsRead.reason };
+  }
+  // F3: reconcile an interrupted transaction before anything else. A crash
+  // between the claims-file write and the projection republish leaves a
+  // transaction record; roll it forward (republish the projection) so a live
+  // claim never exists without its active-state publication, and an envelope
+  // never exists without its claim (the envelope is written inside the same
+  // claims record, so claims-file presence IS claim+envelope presence).
+  reconcileTransactionLocked({ boardPath, state: claimsRead.state });
   // Automation policy first (§4): no policy = no overnight dispatch.
   const resolvedPolicy = policy ?? readAutomationPolicy(boardPath, { configPath });
-  const policyCheck = checkAutomationPolicy(resolvedPolicy, { now: at });
+  const policyCheck = checkAutomationPolicy(resolvedPolicy, { now: at, boardPath });
   if (!policyCheck.ok) {
     return { ok: false, code: "policy-refused", reason: policyCheck.reason };
   }
@@ -1467,8 +1623,11 @@ function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, rep
   if (policyCheck.policy.placement !== "container") {
     return { ok: false, code: "policy-placement-refused", reason: "automated board dispatch requires container placement per the automation policy (§3.4)" };
   }
+  // F4: the starting revision comes from the card's repository — the
+  // workspace the board lives in, not process.cwd().
+  const repo = repository ?? dirname(boardPath);
   // Expired envelopes release their claims automatically on check (§4.6).
-  const activeClaims = releaseExpiredClaimsLocked(boardPath, at);
+  const activeClaims = releaseExpiredClaimsLocked({ boardPath, at, state: claimsRead.state });
   const concurrency = Number(policyCheck.policy.maxConcurrent);
   if (activeClaims.length >= concurrency) {
     return { ok: false, code: "policy-concurrency-refused", reason: `the automation policy allows at most ${concurrency} concurrent claim(s); ${activeClaims.length} are active` };
@@ -1477,6 +1636,14 @@ function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, rep
   if (!validatedBoard.ok) {
     return { ok: false, code: "board-invalid", errors: validatedBoard.errors };
   }
+  // F2: an envelope whose attempt was consumed (expired, reclaimed, or
+  // completed) can never be reused — the consumed-attempt marker is
+  // HMAC-covered in the claims file, and readClaimsState refuses any active
+  // claim referencing a consumed envelopeId. A retry mints a NEW envelope.
+  const consumedIds = new Set(claimsRead.state.consumedClaims.map((entry) => entry.envelopeId));
+  if (cardId !== null && claimsRead.state.claims.some((claim) => claim.cardId === cardId && consumedIds.has(claim.envelopeId))) {
+    return { ok: false, code: "envelope-consumed", reason: `card ${cardId} has a consumed envelope attempt; a retry requires a new dispatch and a new envelope` };
+  }
   const selected = selectDispatchableCard({ cards: validatedBoard.cards, boardPath, activeClaims, cardId });
   if (selected === null) {
     return { ok: false, code: "no-dispatchable-card", reason: cardId
@@ -1484,7 +1651,7 @@ function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, rep
       : "no dispatchable unclaimed card is available" };
   }
   const card = selected.card;
-  const envelope = createEnvelope({ card, policy: policyCheck.policy, now: at, repository, startingRevision });
+  const envelope = createEnvelope({ card, policy: policyCheck.policy, now: at, repository: repo, startingRevision });
   const claim = {
     cardId: card.cardId,
     claimedAt: at,
@@ -1492,11 +1659,61 @@ function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, rep
     envelopeId: envelope.envelopeId,
     envelope,
   };
-  writeClaims(boardPath, [...activeClaims, claim]);
+  const nextClaims = [...activeClaims, claim];
+  // F3: the transaction record goes into the claims file BEFORE the
+  // projection rename. Both writes are atomic renames under the lock, so a
+  // crash leaves either the old or the new complete state, and the record
+  // drives roll-forward recovery on the next operation.
+  const transaction = { op: "claim", cardId: card.cardId, envelopeId: envelope.envelopeId, at, phase: "claims-written" };
+  writeClaims(boardPath, nextClaims, { transaction });
   // Active-state publication: the projection is recomputed with the claim
   // visible, in the same locked operation (§3.6).
-  const projection = writeProjection(boardPath, validatedBoard.cards, [...activeClaims, claim]);
-  return { ok: true, claimed: true, cardId: card.cardId, role, claim, envelope, projection };
+  const projection = writeProjection(boardPath, validatedBoard.cards, nextClaims);
+  // F3 + minor: the transaction is finalized and a projection failure
+  // surfaces as a structured error on the claim result — never swallowed.
+  const transactionError = finalizeTransactionLocked({ boardPath, claims: nextClaims, projection });
+  return {
+    ok: true,
+    claimed: true,
+    cardId: card.cardId,
+    role,
+    claim,
+    envelope,
+    projection,
+    ...(transactionError ? { projectionError: transactionError } : {}),
+  };
+}
+
+// F3: roll an interrupted claim transaction forward — the claims (and their
+// envelopes) are already committed in the authenticated claims file, so only
+// the projection publication can be stale; republish it.
+function reconcileTransactionLocked({ boardPath, state }) {
+  const transaction = state.transaction;
+  if (transaction === null || transaction.phase !== "claims-written") return null;
+  if (!existsSync(boardPath)) return null;
+  const validated = validateBoard(readFileSync(boardPath, "utf8"), {});
+  if (!validated.ok) return null;
+  const projection = writeProjection(boardPath, validated.cards, state.claims);
+  return finalizeTransactionLocked({ boardPath, claims: state.claims, projection });
+}
+
+// F3: clear the transaction record once the projection is published.
+function finalizeTransactionLocked({ boardPath, claims, projection }) {
+  if (!projection?.written) {
+    // Leave the transaction record in place so the next operation reconciles;
+    // surface the failure as a structured error (minor 3).
+    return `projection publication failed: ${projection?.error ?? "unknown"} (transaction record retained for recovery)`;
+  }
+  writeClaims(boardPath, claims, { transaction: null });
+  return null;
+}
+
+// F2: whether an envelope attempt has been consumed (expired, reclaimed, or
+// completed) — the journey layer checks this before executing an envelope.
+export function isEnvelopeConsumed(boardPath, envelopeId) {
+  const read = readClaimsState(boardPath);
+  if (!read.ok) throw Object.assign(new Error(read.reason), { code: "claims-corrupt" });
+  return read.state.consumedClaims.some((entry) => entry.envelopeId === envelopeId);
 }
 
 // Release every claim whose envelope expiry has passed. Returns the surviving
@@ -1505,19 +1722,30 @@ export function releaseExpiredClaims({ boardPath, now = null } = {}) {
   if (typeof boardPath !== "string" || boardPath === "") {
     throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
   }
-  return withWriterLock(boardPath, () => ({
-    released: releaseExpiredClaimsLocked(boardPath, now ?? new Date().toISOString()),
-  })).released;
+  return withWriterLock(boardPath, () => {
+    const read = readClaimsState(boardPath);
+    if (!read.ok) throw Object.assign(new Error(read.reason), { code: "claims-corrupt" });
+    return { released: releaseExpiredClaimsLocked({ boardPath, at: now ?? new Date().toISOString(), state: read.state }) };
+  }).released;
 }
 
-function releaseExpiredClaimsLocked(boardPath, at) {
-  const existing = readClaims(boardPath);
+function releaseExpiredClaimsLocked({ boardPath, at, state = null }) {
+  const existing = (state ?? readClaimsState(boardPath).state ?? { claims: [] }).claims;
   const active = existing.filter((claim) => {
     const expiry = claim?.envelope?.expiry;
     return typeof expiry === "string" && Date.parse(expiry) > Date.parse(at);
   });
   if (active.length !== existing.length) {
-    writeClaims(boardPath, active);
+    // F2: a released envelope's attempt is consumed — it can never be
+    // reused; a retry mints a new envelope.
+    const consumedClaims = [...(state?.consumedClaims ?? readClaimsState(boardPath).state?.consumedClaims ?? []),
+      ...existing.filter((claim) => !active.includes(claim)).map((claim) => ({
+        cardId: claim.cardId,
+        envelopeId: claim.envelopeId,
+        consumedAt: at,
+        reason: "expired",
+      }))];
+    writeClaims(boardPath, active, { consumedClaims });
     if (existsSync(boardPath)) {
       const validated = validateBoard(readFileSync(boardPath, "utf8"), {});
       if (validated.ok) writeProjection(boardPath, validated.cards, active);
@@ -1533,14 +1761,24 @@ export function reclaimClaim({ boardPath, cardId = null, envelopeId = null } = {
     throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
   }
   return withWriterLock(boardPath, () => {
-    const existing = readClaims(boardPath);
+    const read = readClaimsState(boardPath);
+    if (!read.ok) throw Object.assign(new Error(read.reason), { code: "claims-corrupt" });
+    const existing = read.state.claims;
     const kept = existing.filter((claim) =>
       (cardId !== null ? claim.cardId !== cardId : true)
       && (envelopeId !== null ? claim.envelopeId !== envelopeId : true));
     if (kept.length === existing.length) {
       return { ok: false, code: "claim-not-found", reason: "no matching claim to reclaim" };
     }
-    writeClaims(boardPath, kept);
+    // F2: a reclaimed envelope's attempt is consumed too.
+    const consumedClaims = [...read.state.consumedClaims,
+      ...existing.filter((claim) => !kept.includes(claim)).map((claim) => ({
+        cardId: claim.cardId,
+        envelopeId: claim.envelopeId,
+        consumedAt: new Date().toISOString(),
+        reason: "reclaimed",
+      }))];
+    writeClaims(boardPath, kept, { consumedClaims });
     if (existsSync(boardPath)) {
       const validated = validateBoard(readFileSync(boardPath, "utf8"), {});
       if (validated.ok) writeProjection(boardPath, validated.cards, kept);
@@ -1924,7 +2162,7 @@ export function registerKanbanBoardTools(pi, { boardPath = null, resolveBoardPat
         try {
           result = claimCard({ boardPath: activeBoardPath, role: input.role, cardId: input?.cardId ?? null });
         } catch (error) {
-          const code = typeof error?.code === "string" ? error.code : "dispatch-error";
+          const code = typeof error?.code === "string" && error.code !== "claims-corrupt" ? error.code : error.code;
           const value = { ok: false, code, reason: String(error?.message || error).slice(0, 512), errors: [String(error?.message || error).slice(0, 512)] };
           return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
         }
@@ -1943,6 +2181,7 @@ export function registerKanbanBoardTools(pi, { boardPath = null, resolveBoardPat
         } else {
           value = { ok: false, code: result.code, reason: result.reason ?? (result.errors ?? []).join("; "), errors: result.errors ?? [] };
         }
+        if (result.ok && result.projectionError) value.projectionError = result.projectionError;
         return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
       },
     });
