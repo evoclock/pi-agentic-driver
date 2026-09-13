@@ -1,4 +1,4 @@
-# pi-agentic-driver v0.8.4
+# pi-agentic-driver v0.9.0
 
 <p align="center">
   <img src="assets/Yamagane-origami.png" alt="pi-agentic-driver, Yamagane origami mark" width="140"/>
@@ -7,7 +7,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL%20v3-blue?style=flat" alt="License: AGPL v3"/></a>
   <a href="https://www.npmjs.com/package/@evoclock/pi-agentic-driver"><img src="https://img.shields.io/npm/v/@evoclock/pi-agentic-driver?style=flat" alt="npm version"/></a>
-  <img src="https://img.shields.io/badge/version-0.8.4-blue?style=flat" alt="Version 0.8.4"/>
+  <img src="https://img.shields.io/badge/version-0.9.0-blue?style=flat" alt="Version 0.9.0"/>
   <img src="https://img.shields.io/badge/status-active%20development%20%26%20testing-orange?style=flat" alt="Status"/>
   <img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=flat&logo=javascript&logoColor=black" alt="JavaScript"/>
   <img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat&logo=typescript&logoColor=white" alt="TypeScript"/>
@@ -52,6 +52,7 @@ proofs for agentic workflows.
 | `agentic_kanban_board` | Shows the workspace task board: lanes, flags, priorities, dependencies, and which cards can run. | shipped |
 | `agentic_kanban_board_write` | Adds cards to the board through the trusted writer, which records who authorized the work. | shipped |
 | `agentic_kanban_board_update` | Moves, closes, flags, edits, or removes cards on the board, always recording who authorized the change. | shipped |
+| `agentic_kanban_board_dispatch` | Claims an eligible board card for automated contained work and creates its assignment envelope. | shipped |
 
 **Status: active development and testing.** Each extension ships only after
 it passes fixture-based acceptance, native tests, live-session checks, and
@@ -191,40 +192,51 @@ silently, and return results as untrusted evidence.
 
 
 <details>
-<summary><strong>task board, planned work you can see</strong> <em>(released, 0.8.4)</em></summary>
+<summary><strong>task board, planned and automated work you can see</strong> <em>(released, 0.9.0)</em></summary>
 
-Keep planned work on a Kanban board. You read and edit the board in
-Obsidian or in the Vogelkop Task Board pane (our upcoming Scientific and
-Research Workbench). Agents read the same board and add cards to it.
+Keep planned work in canonical `TASKS.md`. You can read it directly or use
+the generated `board.md` view in Obsidian. Agents use the same canonical
+record through natural-language board tools.
 
-The board appears only when a `board.md` or `TASKS.md` file exists in the
-workspace. With no board file, the tools do not appear and nothing changes.
+You can tell an agent to add, edit, move, block, propose, close, or remove a
+card. The trusted writer assigns its ID, checks its fields, records your
+instruction, and protects its dispatch provenance.
 
-When an agent adds a card, a trusted writer does the bookkeeping: it
-assigns the card ID, computes the integrity hash, checks the card, and
-records who authorized the work. The record comes from you: your
-instruction, or your approval of an agent's proposal. A card without that
-record cannot be dispatched. A hand-edited card cannot fake the record, and
-a tampered card refuses to run.
+Agents cannot invent additional work or complete a card on their own. An
+agent report is evidence for your review. Only your clear instruction or
+direct board action completes the card.
 
-Agents can also move cards between lanes, flag them, edit them, or remove
-them, but only on your instruction, recorded the same way. Only you
-complete a card. Move it to done in your board UI, or tell an agent to
-close it. An agent report that says the work is finished is evidence for
-your review. It is never the completion itself.
+For automated work, you set an explicit policy for the board. It defines:
 
-Alongside the board file you get a companion view file for Obsidian,
-updated after every change, so the board renders as a kanban board while
-you work.
+- allowed roles and repositories;
+- contained placement;
+- the maximum concurrent work;
+- the policy expiry; and
+- the risk ceiling.
 
-The card format is shared. The same board renders in Obsidian and in the
-Vogelkop Task Board pane. The machine-readable fields are the single
-source of truth, so there is no second copy to keep in sync.
+Without a valid policy, automated dispatch is refused.
 
-Coming next: agents that claim cards from the board and work them
-overnight, a board watcher that keeps checking for dispatchable work, and
-our own Obsidian plugin that renders the board natively, so Obsidian and
-Vogelkop stay full equals as ways to read and work the board.
+`agentic_kanban_board_dispatch` claims the highest-priority eligible card and
+creates a single-attempt assignment envelope. The envelope binds the card,
+repository, starting revision, assigned branch, allowed paths, stopping
+point, expiry, and interaction profile.
+
+Blocked, altered, expired, reused, or unauthorized assignments fail closed.
+The journey validates the authenticated envelope before each consequential
+step. It runs on the assigned branch and consumes the envelope when the
+attempt ends.
+
+Consuming an envelope releases the claim. It does not mark the card done.
+
+Claims and envelopes are kept in authenticated state beside `TASKS.md`. The
+derived `board.md` view shows active claims but never becomes an authority
+source.
+
+Coming next:
+
+- an optional watcher that checks for dispatchable work;
+- Vogelkop support for the shared card fields; and
+- our own Obsidian plugin for canonical `TASKS.md`.
 
 </details>
 
@@ -399,10 +411,10 @@ end" or "don't wait for me" and the journey runs in autonomous mode. Say
 "do these two things" and it runs in the normal mode, pausing for you
 between steps. The mode is recorded in the report either way.
 
-The journeys run work you dispatch in natural language: work that is real
-and authorized but not yet formally placed on a kanban board. A task board
-integration is planned, and once it ships, planned journeys will execute
-board-managed work with the same containment and safety guarantees.
+Autonomous journeys can run work you dispatch directly or work claimed from
+a task board. Board-managed journeys use the card's authenticated assignment
+envelope and the board's automation policy. Direct journeys continue to work
+without a board.
 
 ### The cast
 
@@ -531,7 +543,7 @@ pi install npm:@evoclock/pi-agentic-driver
 Or from Git at a pinned tag:
 
 ```sh
-pi install git:github.com/evoclock/pi-agentic-driver@v0.8.4
+pi install git:github.com/evoclock/pi-agentic-driver@v0.9.0
 ```
 
 Released extensions load standalone; neither requires the other.
@@ -545,7 +557,7 @@ extensions you want with the object form in your Pi settings:
 {
   "packages": [
     {
-      "source": "npm:@evoclock/pi-agentic-driver@0.8.4",
+      "source": "npm:@evoclock/pi-agentic-driver@0.9.0",
       "extensions": [
         "extensions/aidr.ts",
         "extensions/code-phage.js"
