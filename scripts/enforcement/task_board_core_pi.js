@@ -1079,8 +1079,15 @@ export function registerKanbanBoardTools(pi, { resolveBoardPath, boardPath } = {
       async execute(_toolContext, input, _signal, _onUpdate, ctx) {
         // Resolve the board per call from the calling session's working
         // directory. No board here: structured board-unavailable, no write.
-        const resolvedBoardPath = (typeof resolveBoardPath === "function" ? resolveBoardPath(ctx?.cwd) : null) ?? boardPath ?? null;
-        if (resolvedBoardPath === null || !existsSync(resolvedBoardPath)) {
+        let resolvedBoardPath = (typeof resolveBoardPath === "function" ? resolveBoardPath(ctx?.cwd) : null) ?? boardPath ?? null;
+        // The write tool bootstraps: a MISSING board file is fine (the writer
+        // creates it fresh under the lock). When the resolver finds no board,
+        // fall back to the canonical board.md in the workspace so the writer
+        // can create it.
+        if (resolvedBoardPath === null && typeof ctx?.cwd === "string" && ctx.cwd !== "") {
+          resolvedBoardPath = join(ctx.cwd, "TASKS.md");
+        }
+        if (resolvedBoardPath === null) {
           const value = {
             ok: false,
             persisted: false,
@@ -1138,7 +1145,10 @@ export function registerKanbanBoardTools(pi, { resolveBoardPath, boardPath } = {
             authority: input?.authority,
             registries: {},
             surface: "tasks",
-            requireExistingBoard: true,
+            // No requireExistingBoard here: the write tool bootstraps a
+            // fresh board when none exists (§3.4/§5). Recreation is safe —
+            // the writer builds fresh content only, and every card still
+            // requires a genuine authority record.
           });
         } catch (error) {
           const code = typeof error?.code === "string" ? error.code : "writer-error";
