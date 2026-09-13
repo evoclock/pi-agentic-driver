@@ -768,14 +768,31 @@ export function declaredBoardPrefix(cards) {
 // atomic (temp file + rename) so it lands complete or not at all. Declines
 // before persist on any validation violation. Writer operations are
 // serialized with a lock file; IDs come from a durable high-water mark.
-export function writeCard({ boardPath, input, authority, registries = {}, surface = "tasks", now = null }) {
+export function writeCard({ boardPath, input, authority, registries = {}, surface = "tasks", now = null, requireExistingBoard = false }) {
   if (typeof boardPath !== "string" || boardPath === "") {
     throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
   }
-  return withWriterLock(boardPath, () => writeCardLocked({ boardPath, input, authority, registries, surface, now }));
+  return withWriterLock(boardPath, () => writeCardLocked({ boardPath, input, authority, registries, surface, now, requireExistingBoard }));
 }
 
-function writeCardLocked({ boardPath, input, authority, registries, surface, now }) {
+function writeCardLocked({ boardPath, input, authority, registries, surface, now, requireExistingBoard }) {
+  // Authoritative board-presence check, made under the writer lock (TOCTOU
+  // fix): when requireExistingBoard is set — the tool path — a board deleted
+  // between the caller's outer observation and this locked write must fail
+  // closed as board-unavailable. Without this, the absent file would be
+  // treated as an empty board and silently recreated. The direct writer API
+  // retains fresh-board bootstrap (requireExistingBoard defaults to false);
+  // an empty file is a valid fresh board either way — only a missing file
+  // fails when the flag is set.
+  if (requireExistingBoard && !existsSync(boardPath)) {
+    return {
+      ok: false,
+      code: "board-unavailable",
+      reason: "board file is no longer present (board-unavailable)",
+      errors: ["board file is no longer present (board-unavailable)"],
+      persisted: false,
+    };
+  }
   const markdown = existsSync(boardPath) ? readFileSync(boardPath, "utf8") : "";
   // Existing boards are validated against the complete persisted
   // representation, not merely parsed (§6 gate 2).
@@ -974,7 +991,7 @@ export function observeBoardProvider({ boardPath }) {
 export function registerKanbanBoardTools(pi, { boardPath } = {}) {
   const observation = observeBoardProvider({ boardPath });
   if (!observation.present) return { registered: [], observation };
-  // Additive, read-only, fail-closed: registered only behind the observation,
+  // Additive, fail-closed: registered only behind the observation,
   // so removing the board file removes the surface (§5).
   const registered = [];
   if (typeof pi?.registerTool === "function") {
@@ -1013,6 +1030,154 @@ export function registerKanbanBoardTools(pi, { boardPath } = {}) {
       },
     });
     registered.push("agentic_kanban_board");
+  }
+  // The write tool (§3.5): card creation goes through the trusted writer
+  // only. The tool never accepts a model-supplied cardId (the writer mints
+  // it) and never accepts hashes (the writer computes them). It DOES accept
+  // the authority record — that record is the governance input this tool
+  // exists to capture: the user's instruction, or the user's approved
+  // report proposal, quoted verbatim. A card without a genuine authority
+  // record cannot be created.
+  if (typeof pi?.registerTool === "function") {
+    pi.registerTool({
+      name: "agentic_kanban_board_write",
+      label: "Kanban Board Write",
+      description:
+        "Create a task-board card through the trusted board writer. Governance: all writes go through the trusted, deterministic writer — never through model-authored Markdown. An authority record is REQUIRED and must be genuine: either the user's actual instruction to write this card, or the user's approved report proposal, with the user's words quoted verbatim. A card without a genuine authority record cannot be created; agents must quote the user's actual instruction and must never invent, paraphrase-as-quote, or fabricate one. The writer allocates the cardId and computes the integrity hashes; do not supply either.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          title: { type: "string", description: "Card title (human-visible)." },
+          description: { type: "string", description: "Optional longer description." },
+          priority: { type: "string", enum: [...PRIORITIES], description: "Optional priority (P0-P3)." },
+          lane: { type: "string", enum: [...LANES], description: "Optional lane; defaults to backlog." },
+          specification: { type: "string", description: "Specification text (hashed by the writer). Required for a dispatchable card." },
+          definitionOfDone: { type: "string", description: "Definition-of-done text (hashed by the writer)." },
+          stoppingPoint: { type: "string", description: "Declared stopping point for review." },
+          scopePaths: { type: "array", items: { type: "string" }, description: "Repository-relative scope paths." },
+          capabilities: { type: "array", items: { type: "string" }, description: "Allowed capability classes (validated against the board registry)." },
+          dependencies: { type: "array", items: { type: "string" }, description: "Ordered blocked-by cardIds (existing cards)." },
+          base: { type: "string", description: "Optional exact base revision: a full 40-hex Git commit SHA." },
+          dueDate: { type: "string", description: "Optional due date, ISO yyyy-mm-dd." },
+          flags: { type: "array", items: { type: "string", enum: [...FLAGS] }, description: "Optional flags (proposed/blocked/cancelled)." },
+          authority: {
+            type: "object",
+            description: "REQUIRED authority record (§3.1/§3.5): { source: 'instruction' | 'report-proposal', sessionOrReportId, quotedInstruction }. Quote the user's actual instruction verbatim; never invent one.",
+            additionalProperties: false,
+            properties: {
+              source: { type: "string", enum: ["instruction", "report-proposal"] },
+              sessionOrReportId: { type: "string" },
+              quotedInstruction: { type: "string", description: "The user's actual words. Required; a digest alone is not accepted through this tool." },
+            },
+            required: ["source", "sessionOrReportId", "quotedInstruction"],
+          },
+        },
+        required: ["title", "specification", "definitionOfDone", "stoppingPoint", "scopePaths", "authority"],
+      },
+      async execute(_toolContext, input) {
+        // F7(b): re-observe the board on every call. If the board file was
+        // removed after registration, return board-unavailable instead of
+        // writing to a stale path.
+        if (!existsSync(observation.boardPath)) {
+          const value = {
+            ok: false,
+            persisted: false,
+            boardUnavailable: true,
+            code: "board-unavailable",
+            reason: "board file is no longer present (board-unavailable)",
+            errors: ["board file is no longer present (board-unavailable)"],
+          };
+          return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+        }
+        // The writer allocates the cardId and computes all hashes; the tool
+        // forwards only content and the authority record. Input is normalized
+        // to the writer's field names; unknown fields are dropped here so the
+        // writer's own validation is the single gate.
+        const writerInput = {};
+        if (input?.title !== undefined) writerInput.title = input.title;
+        if (input?.description !== undefined) writerInput.description = input.description;
+        if (input?.priority !== undefined) writerInput.priority = input.priority;
+        if (input?.lane !== undefined) writerInput.lane = input.lane;
+        if (input?.specification !== undefined) writerInput.spec = input.specification;
+        if (input?.definitionOfDone !== undefined) writerInput.definitionOfDone = input.definitionOfDone;
+        if (input?.stoppingPoint !== undefined) writerInput.stoppingPoint = input.stoppingPoint;
+        if (input?.scopePaths !== undefined) writerInput.scope = input.scopePaths;
+        if (input?.capabilities !== undefined) writerInput.capabilities = input.capabilities;
+        if (input?.dependencies !== undefined) writerInput.dependencies = input.dependencies;
+        if (input?.base !== undefined) writerInput.base = input.base;
+        if (input?.dueDate !== undefined) writerInput.due = input.dueDate;
+        if (input?.flags !== undefined) writerInput.flags = input.flags;
+        // Required-field gate: the tool's contract requires these; a missing
+        // one is a structured refusal before any write is attempted. The
+        // authority record is deliberately NOT pre-gated: a missing or
+        // malformed authority must surface as the writer's
+        // authority-source-invalid refusal, so the governance reason is
+        // always the one reported.
+        const requiredFields = ["title", "specification", "definitionOfDone", "stoppingPoint", "scopePaths"];
+        const missing = requiredFields.filter((field) => input?.[field] === undefined || input?.[field] === null || input?.[field] === ""
+          || (Array.isArray(input?.[field]) && input[field].length === 0));
+        if (missing.length > 0) {
+          const value = {
+            ok: false,
+            persisted: false,
+            code: "invalid-input",
+            reason: `missing required field(s): ${missing.join(", ")}`,
+            errors: [`missing required field(s): ${missing.join(", ")}`],
+          };
+          return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+        }
+        // Writer errors become structured failures (ok:false with a code and
+        // reason), never raw throws — the model sees the governance reason.
+        let result;
+        try {
+          result = writeCard({
+            boardPath: observation.boardPath,
+            input: writerInput,
+            authority: input?.authority,
+            registries: {},
+            surface: "tasks",
+            requireExistingBoard: true,
+          });
+        } catch (error) {
+          const code = typeof error?.code === "string" ? error.code : "writer-error";
+          const value = {
+            ok: false,
+            persisted: false,
+            code,
+            reason: String(error?.message || error).slice(0, 512),
+            errors: [String(error?.message || error).slice(0, 512)],
+          };
+          return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+        }
+        let value;
+        if (result.ok) {
+          value = {
+            ok: true,
+            persisted: true,
+            cardId: result.card.cardId,
+            lane: result.card.lane,
+            flags: [...(result.card.flags ?? [])],
+            hashPresent: Boolean(result.card.hash),
+            specHashPresent: Boolean(result.card.specHash),
+            dodHashPresent: Boolean(result.card.dodHash),
+            authorityWriterHmacPresent: Boolean(result.card.authorityWriterHmac),
+            authoritySource: { ...result.card.authoritySource },
+          };
+        } else {
+          value = {
+            ok: false,
+            persisted: false,
+            code: result.code,
+            reason: (result.errors ?? []).join("; ").slice(0, 512),
+            errors: result.errors ?? [],
+            ...(result.cardId ? { cardId: result.cardId } : {}),
+          };
+        }
+        return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+      },
+    });
+    registered.push("agentic_kanban_board_write");
   }
   return { registered, observation };
 }
