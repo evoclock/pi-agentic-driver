@@ -64,7 +64,8 @@
     "PROVENANCE.md",
     "extensions/aidr.ts",
     "scripts/aidr_writing_review.js",
-    "templates/AGENTS.md"
+    "templates/AGENTS.md",
+    "scripts/enforcement/task_board_core_pi.js"
   ],
   "pi": {
     "extensions": [
