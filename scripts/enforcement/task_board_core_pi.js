@@ -656,9 +656,15 @@ function readWriterState(statePath) {
       // issued; a lower generation or digest mismatch is replay/deletion.
       claimsGeneration: Number.isInteger(generation) && generation >= 0 ? generation : 0,
       claimsDigest: typeof state?.claimsDigest === "string" && state.claimsDigest !== "" ? state.claimsDigest : null,
+      // A complete next claims state is staged here before either authority
+      // file changes. Recovery always rolls it forward; it never guesses
+      // whether an older claims file is legitimate.
+      pendingClaimsState: state?.pendingClaimsState && typeof state.pendingClaimsState === "object"
+        ? state.pendingClaimsState
+        : null,
     };
   } catch {
-    return { highWaterMark: 0, secret: null, issuedCardIds: [], claimsGeneration: 0, claimsDigest: null };
+    return { highWaterMark: 0, secret: null, issuedCardIds: [], claimsGeneration: 0, claimsDigest: null, pendingClaimsState: null };
   }
 }
 
@@ -1378,7 +1384,10 @@ export function wellFormedEnvelope(env) {
 
 const CLAIM_FIELDS = Object.freeze(["cardId", "claimedAt", "role", "envelopeId", "envelope"]);
 const CONSUMED_FIELDS = Object.freeze(["cardId", "envelopeId", "consumedAt", "reason"]);
-const CONSUMED_REASONS = Object.freeze(["expired", "reclaimed", "completed"]);
+const CONSUMED_REASONS = Object.freeze([
+  "expired", "reclaimed", "completed", "exhausted", "cancelled", "failed",
+  "waiting-approval", "role-blocked", "worker-unresponsive",
+]);
 const TRANSACTION_FIELDS = Object.freeze(["op", "cardId", "envelopeId", "at", "phase"]);
 const CLAIMS_STATE_FIELDS = Object.freeze(["schema", "generation", "transaction", "claims", "consumedClaims", "hmac"]);
 
@@ -1419,6 +1428,9 @@ function wellFormedTransaction(tx) {
 export function readClaimsState(boardPath) {
   const path = claimsPath(boardPath);
   const writerState = readWriterState(writerStatePath(boardPath));
+  if (writerState.pendingClaimsState !== null) {
+    return { ok: false, recoverable: true, reason: "a staged claims-anchor transaction requires recovery under the writer lock (fails closed)" };
+  }
   if (!existsSync(path)) {
     if (writerState.claimsDigest !== null || writerState.claimsGeneration > 0) {
       return { ok: false, reason: "the claims file is missing but the writer state anchors issued claims state — deletion is rejected (fails closed)" };
@@ -1453,6 +1465,9 @@ export function readClaimsState(boardPath) {
   if (value.generation !== writerState.claimsGeneration) {
     return { ok: false, reason: `claims generation ${value.generation} does not match the anchored generation ${writerState.claimsGeneration} — deletion or replay is rejected (fails closed)` };
   }
+  if (writerState.claimsDigest !== claimsAnchorDigest(value, writerState.secret)) {
+    return { ok: false, reason: "the claims content does not match the writer-state anchor — rollback is rejected (fails closed)" };
+  }
   return {
     ok: true,
     state: {
@@ -1474,32 +1489,63 @@ export function readClaims(boardPath) {
   return result.state.claims;
 }
 
-function writeClaims(boardPath, claims, { consumedClaims = null, transaction = null } = {}) {
+function claimsAnchorDigest(value, secret) {
+  return createHmac("sha256", secret)
+    .update(canonicalJsonString({ generation: value.generation, hmac: value.hmac }), "utf8")
+    .digest("hex");
+}
+
+// Recover the two-file claims/anchor commit. The complete authenticated next
+// claims state is staged in writer state first, so either crash window rolls
+// forward deterministically rather than accepting an older file.
+function recoverClaimsAnchorLocked(boardPath) {
   const statePath = writerStatePath(boardPath);
   const writerState = readWriterState(statePath);
+  const pending = writerState.pendingClaimsState;
+  if (pending === null) return { ok: true, recovered: false };
+  if (writerState.secret === null || !pending || typeof pending !== "object"
+    || !exactKeys(pending, CLAIMS_STATE_FIELDS)
+    || pending.hmac !== claimsFileHmac(pending, writerState.secret)) {
+    return { ok: false, reason: "the staged claims-anchor transaction is malformed or unauthenticated (fails closed)" };
+  }
+  writeJsonFileAtomic(claimsPath(boardPath), pending);
+  writeWriterState(statePath, {
+    ...writerState,
+    claimsGeneration: pending.generation,
+    claimsDigest: claimsAnchorDigest(pending, writerState.secret),
+    pendingClaimsState: null,
+  });
+  return { ok: true, recovered: true };
+}
+
+function writeClaims(boardPath, claims, { consumedClaims = null, transaction = null } = {}) {
+  const statePath = writerStatePath(boardPath);
+  let writerState = readWriterState(statePath);
   if (writerState.secret === null) {
     throw Object.assign(new Error("writer state file has no secret (fails closed)"), { code: "writer-state-unavailable" });
   }
+  const recovery = recoverClaimsAnchorLocked(boardPath);
+  if (!recovery.ok) throw Object.assign(new Error(recovery.reason), { code: "claims-anchor-recovery-failed" });
+  writerState = readWriterState(statePath);
   const previous = readClaimsState(boardPath);
-  const generation = (previous.state?.generation ?? writerState.claimsGeneration) + 1;
+  if (!previous.ok) throw Object.assign(new Error(previous.reason), { code: "claims-corrupt" });
   const value = {
     schema: CLAIMS_SCHEMA,
-    generation,
+    generation: previous.state.generation + 1,
     transaction,
     claims,
-    consumedClaims: consumedClaims ?? previous.state?.consumedClaims ?? [],
+    consumedClaims: consumedClaims ?? previous.state.consumedClaims,
   };
   value.hmac = claimsFileHmac(value, writerState.secret);
+  // Prepare → claims → commit. Because prepare contains the complete signed
+  // next value, recovery can safely roll forward after either later write.
+  writeWriterState(statePath, { ...writerState, pendingClaimsState: value });
   writeJsonFileAtomic(claimsPath(boardPath), value);
-  // Anchor the monotonic generation + content digest in the authenticated
-  // writer state so deletion and replay of older signed state fail closed.
-  const digest = createHmac("sha256", writerState.secret)
-    .update(canonicalJsonString({ generation: value.generation, hmac: value.hmac }), "utf8")
-    .digest("hex");
   writeWriterState(statePath, {
     ...writerState,
     claimsGeneration: value.generation,
-    claimsDigest: digest,
+    claimsDigest: claimsAnchorDigest(value, writerState.secret),
+    pendingClaimsState: null,
   });
 }
 
@@ -1652,6 +1698,14 @@ export function gitHead(cwd = process.cwd()) {
   }
 }
 
+export function gitBranch(cwd = process.cwd()) {
+  try {
+    return execFileSync("git", ["branch", "--show-current"], { cwd, encoding: "utf8" }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 // §3.3 + §4 dispatch eligibility, evaluated under the writer lock: the card
 // must be dispatchable per the pure predicate (which already enforces the
 // blocked-by gate, hash validity, and — with statePath set — writer
@@ -1727,6 +1781,10 @@ function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, rep
   }
   if (!ROLE_NAME_RE.test(role)) {
     return { ok: false, code: "role-invalid", reason: `role "${role}" does not match ${ROLE_NAME_RE.source} (fails closed)` };
+  }
+  const anchorRecovery = recoverClaimsAnchorLocked(boardPath);
+  if (!anchorRecovery.ok) {
+    return { ok: false, code: "claims-anchor-recovery-failed", recoverable: true, reason: anchorRecovery.reason };
   }
   // F1: read AND verify the claims file. Corruption fails closed.
   const claimsRead = readClaimsState(boardPath);
@@ -1890,24 +1948,76 @@ export function isEnvelopeConsumed(boardPath, envelopeId) {
   return read.state.consumedClaims.some((entry) => entry.envelopeId === envelopeId);
 }
 
+// Prepare the one assigned branch before execution. Authentication happens
+// first against the persisted claim; only a missing assigned branch may be
+// created, and only from the envelope's exact starting revision. Existing
+// branch mismatch is drift, not an implicit checkout.
+export function prepareEnvelopeForExecution({ boardPath, envelope }) {
+  if (typeof boardPath !== "string" || boardPath === "" || !wellFormedEnvelope(envelope)) {
+    return { ok: false, code: "envelope-invalid", reason: "a valid board path and envelope are required" };
+  }
+  try {
+    return withWriterLock(boardPath, () => {
+      const recovery = recoverClaimsAnchorLocked(boardPath);
+      if (!recovery.ok) return { ok: false, code: "claims-anchor-recovery-failed", reason: recovery.reason };
+      const guard = validateEnvelopeForExecutionLocked({ boardPath, envelope, requireBranch: false });
+      if (!guard.ok) return guard;
+      const current = gitBranch(envelope.repository);
+      if (current === envelope.branch) return { ok: true, prepared: false, envelope: guard.envelope };
+      if (gitHead(envelope.repository) !== envelope.startingRevision) {
+        return { ok: false, code: "revision-drift", reason: "the repository is not at the envelope starting revision (fails closed)" };
+      }
+      try {
+        execFileSync("git", ["show-ref", "--verify", "--quiet", `refs/heads/${envelope.branch}`], { cwd: envelope.repository });
+        return { ok: false, code: "branch-drift", reason: `assigned branch ${envelope.branch} already exists but is not checked out (fails closed)` };
+      } catch (error) {
+        if (error?.status !== 1) return { ok: false, code: "branch-unreadable", reason: "the assigned branch state could not be verified (fails closed)" };
+      }
+      execFileSync("git", ["switch", "-c", envelope.branch, envelope.startingRevision], { cwd: envelope.repository, stdio: "ignore" });
+      return { ok: true, prepared: true, envelope: guard.envelope };
+    });
+  } catch (error) {
+    return { ok: false, code: error?.code || "branch-prepare-failed", reason: String(error?.message || error).slice(0, 512) };
+  }
+}
+
 // Item 2: the authoritative execution-boundary validation. Before an
 // envelope is executed or resumed, the journey layer MUST call this: it
 // validates authenticated consumption, expiry, card-hash drift, repository
 // drift, and HEAD/base/branch drift against the CURRENT board and repository.
 // Any drift fails closed — retry requires a new envelope.
 export function validateEnvelopeForExecution({ boardPath, envelope, now = null }) {
+  if (typeof boardPath !== "string" || boardPath === "") {
+    return { ok: false, code: "board-path-required", reason: "boardPath is required" };
+  }
+  try {
+    return withWriterLock(boardPath, () => validateEnvelopeForExecutionLocked({ boardPath, envelope, now }));
+  } catch (error) {
+    return { ok: false, code: error?.code || "envelope-validation-failed", reason: String(error?.message || error).slice(0, 512) };
+  }
+}
+
+function validateEnvelopeForExecutionLocked({ boardPath, envelope, now = null, requireBranch = true }) {
   const at = now ?? new Date().toISOString();
   if (!wellFormedEnvelope(envelope)) {
     return { ok: false, code: "envelope-invalid", reason: "the envelope is malformed or has an unknown shape (fails closed)" };
   }
+  const recovery = recoverClaimsAnchorLocked(boardPath);
+  if (!recovery.ok) return { ok: false, code: "claims-anchor-recovery-failed", reason: recovery.reason };
   const read = readClaimsState(boardPath);
   if (!read.ok) return { ok: false, code: "claims-corrupt", reason: read.reason };
   const claim = read.state.claims.find((entry) => entry.envelopeId === envelope.envelopeId);
   if (!claim) {
+    const consumed = read.state.consumedClaims.some((entry) => entry.envelopeId === envelope.envelopeId);
     return { ok: false, code: "envelope-not-active",
-      reason: isEnvelopeConsumed(boardPath, envelope.envelopeId)
+      reason: consumed
         ? "the envelope attempt was consumed — a retry requires a new envelope (single-attempt lifecycle)"
         : "the envelope has no active claim on the board (fails closed)" };
+  }
+  // The caller does not get to supply a well-formed variant. Execution uses
+  // exactly the envelope authenticated inside the active claims state.
+  if (canonicalJsonString(envelope) !== canonicalJsonString(claim.envelope)) {
+    return { ok: false, code: "envelope-authentication-failed", reason: "the supplied envelope does not exactly match the authenticated active-claim envelope (fails closed)" };
   }
   // Single-attempt lifecycle: expiry.
   if (Date.parse(envelope.expiry) <= Date.parse(at)) {
@@ -1944,7 +2054,12 @@ export function validateEnvelopeForExecution({ boardPath, envelope, now = null }
         reason: `repository HEAD ${head} does not match the envelope's starting revision ${envelope.startingRevision} (drift — new envelope required)` };
     }
   }
-  return { ok: true, claim, reason: null };
+  const branch = gitBranch(envelope.repository);
+  if (requireBranch && branch !== envelope.branch) {
+    return { ok: false, code: "branch-drift",
+      reason: `repository branch ${branch ?? "(detached)"} does not match the assigned branch ${envelope.branch} (fails closed)` };
+  }
+  return { ok: true, claim, envelope: claim.envelope, reason: null };
 }
 
 // Item 2: completion consumption — when the work reaches its stopping point,
@@ -1958,6 +2073,8 @@ export function consumeEnvelope({ boardPath, envelopeId, reason = "completed" } 
     throw Object.assign(new Error(`reason must be one of ${CONSUMED_REASONS.join(", ")}`), { code: "invalid-input" });
   }
   return withWriterLock(boardPath, () => {
+    const anchorRecovery = recoverClaimsAnchorLocked(boardPath);
+    if (!anchorRecovery.ok) return { ok: false, code: "claims-anchor-recovery-failed", recoverable: true, reason: anchorRecovery.reason };
     const read = readClaimsState(boardPath);
     if (!read.ok) return { ok: false, code: "claims-corrupt", reason: read.reason };
     const reconciliation = reconcileTransactionLocked({ boardPath, state: read.state });
@@ -1991,6 +2108,8 @@ export function releaseExpiredClaims({ boardPath, now = null } = {}) {
     throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
   }
   return withWriterLock(boardPath, () => {
+    const anchorRecovery = recoverClaimsAnchorLocked(boardPath);
+    if (!anchorRecovery.ok) throw Object.assign(new Error(anchorRecovery.reason), { code: "claims-anchor-recovery-failed" });
     const read = readClaimsState(boardPath);
     if (!read.ok) throw Object.assign(new Error(read.reason), { code: "claims-corrupt" });
     // Item 3: every claims mutation reconciles first; refuse on failure.
@@ -2034,6 +2153,8 @@ export function reclaimClaim({ boardPath, cardId = null, envelopeId = null } = {
     throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
   }
   return withWriterLock(boardPath, () => {
+    const anchorRecovery = recoverClaimsAnchorLocked(boardPath);
+    if (!anchorRecovery.ok) throw Object.assign(new Error(anchorRecovery.reason), { code: "claims-anchor-recovery-failed" });
     const read = readClaimsState(boardPath);
     if (!read.ok) throw Object.assign(new Error(read.reason), { code: "claims-corrupt" });
     // Item 3: reconcile first; refuse the mutation when recovery fails.

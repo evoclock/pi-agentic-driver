@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import {
   writeCard, updateCard, claimCard, readClaims, readClaimsState, reclaimClaim, releaseExpiredClaims,
-  validateEnvelopeForExecution, consumeEnvelope,
+  prepareEnvelopeForExecution, validateEnvelopeForExecution, consumeEnvelope,
   readAutomationPolicy, checkAutomationPolicy, createEnvelope, isEnvelopeConsumed,
   dispatchEligibility, selectDispatchableCard, validateBoard,
   writerStatePath, claimsPath, automationPolicyPath,
@@ -681,7 +681,9 @@ test("item 2: validateEnvelopeForExecution — the authoritative execution bound
     const r = claimCard({ boardPath, role: "implementer", cardId: second });
     assert.equal(r.ok, true);
     const env = r.envelope;
-    // Clean pass.
+    const prepared = prepareEnvelopeForExecution({ boardPath, envelope: env });
+    assert.equal(prepared.ok, true, JSON.stringify(prepared));
+    // Clean pass on the authenticated assigned branch.
     const ok = validateEnvelopeForExecution({ boardPath, envelope: env });
     assert.equal(ok.ok, true, JSON.stringify(ok));
     // Card-hash drift: a semantic edit through the trusted writer changes the
@@ -700,15 +702,18 @@ test("item 2: validateEnvelopeForExecution — expiry, repository drift, revisio
     withPolicy(boardPath);
     const r = claimCard({ boardPath, role: "implementer", cardId: second });
     const env = r.envelope;
+    const prepared = prepareEnvelopeForExecution({ boardPath, envelope: env });
+    assert.equal(prepared.ok, true, JSON.stringify(prepared));
     // Expiry (validated with a future now).
     const expired = validateEnvelopeForExecution({ boardPath, envelope: env, now: new Date(Date.parse(env.expiry) + 1000).toISOString() });
     assert.equal(expired.ok, false);
     assert.equal(expired.code, "envelope-expired");
-    // Repository drift: an envelope bound to a different repository.
+    // A caller-modified repository (or any other field) is rejected before
+    // drift checks because it is not the authenticated persisted envelope.
     const foreign = { ...env, repository: "/somewhere/else" };
     const repoDrift = validateEnvelopeForExecution({ boardPath, envelope: foreign });
     assert.equal(repoDrift.ok, false);
-    assert.equal(repoDrift.code, "repository-drift");
+    assert.equal(repoDrift.code, "envelope-authentication-failed");
     // Revision drift: a new commit moves HEAD past the starting revision.
     execFileSync("git", ["-C", dir, "commit", "-q", "--allow-empty", "-m", "drift"]);
     const revDrift = validateEnvelopeForExecution({ boardPath, envelope: env });
@@ -826,4 +831,145 @@ test("item 2/3: journey wiring — an invalid envelope refuses execution before 
     assert.equal(journey.status, "failed");
     assert.match(journey.code ?? "", /envelope/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+function idleCommunicationFixture(repository, onAction = () => {}) {
+  return async ({ argv }) => {
+    const [action, role] = [argv[1], argv[2]];
+    onAction(action);
+    if (action === "get") return { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: role, agent: "pi", status: "idle", repository } }) };
+    if (action === "prompt") return { code: 0, stdout: JSON.stringify({ type: "agent_prompted", agent: { name: role, agent: "pi", status: "done", repository } }) };
+    if (action === "read") return { code: 0, stdout: "[WORKER_REPORT_BEGIN]\nok\n[WORKER_REPORT_END]" };
+    throw new Error(`unexpected action ${action}`);
+  };
+}
+
+test("final: caller-modified envelope fields are rejected against the authenticated claim", () => {
+  const dir = freshDir();
+  try {
+    const { boardPath, second } = fixtureBoard(dir);
+    withPolicy(boardPath);
+    const r = claimCard({ boardPath, role: "implementer", cardId: second });
+    assert.equal(r.ok, true);
+    for (const altered of [
+      { ...r.envelope, expiry: "2099-12-31T00:00:00.000Z" },
+      { ...r.envelope, startingRevision: "a".repeat(40) },
+      { ...r.envelope, risk: "high" },
+      { ...r.envelope, allowedPaths: ["other/"] },
+      { ...r.envelope, capabilities: ["network"] },
+    ]) {
+      const result = validateEnvelopeForExecution({ boardPath, envelope: altered });
+      assert.equal(result.ok, false);
+      assert.equal(result.code, "envelope-authentication-failed");
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("final: assigned branch is prepared once and later branch drift is refused", () => {
+  const dir = freshDir();
+  try {
+    const { boardPath, second } = fixtureBoard(dir);
+    withPolicy(boardPath);
+    const r = claimCard({ boardPath, role: "implementer", cardId: second });
+    const prepared = prepareEnvelopeForExecution({ boardPath, envelope: r.envelope });
+    assert.equal(prepared.ok, true);
+    assert.equal(execFileSync("git", ["-C", dir, "branch", "--show-current"], { encoding: "utf8" }).trim(), r.envelope.branch);
+    assert.equal(validateEnvelopeForExecution({ boardPath, envelope: r.envelope }).ok, true);
+    execFileSync("git", ["-C", dir, "switch", "-q", "main"]);
+    const drift = validateEnvelopeForExecution({ boardPath, envelope: r.envelope });
+    assert.equal(drift.ok, false);
+    assert.equal(drift.code, "branch-drift");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("final: every terminal board journey consumes its envelope", async () => {
+  const { runWorkerJourney } = await import("../scripts/enforcement/herdr_async_dispatch_pi.js");
+  const dir = freshDir();
+  try {
+    const { boardPath, second } = fixtureBoard(dir);
+    withPolicy(boardPath);
+    const r = claimCard({ boardPath, role: "implementer", cardId: second });
+    const journey = await runWorkerJourney(
+      { role: "implementer", stepPrompt: "work", maxSteps: 1, autonomy: "autonomous", model: "test/model" },
+      { cwd: dir },
+      { taskStore: { list: () => [] }, runProcess: idleCommunicationFixture(dir), board: { boardPath, envelope: r.envelope } },
+    );
+    assert.equal(journey.status, "exhausted");
+    assert.equal(isEnvelopeConsumed(boardPath, r.envelope.envelopeId), true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("final: mid-journey card drift is caught before prompt and the attempt is consumed", async () => {
+  const { runWorkerJourney } = await import("../scripts/enforcement/herdr_async_dispatch_pi.js");
+  const dir = freshDir();
+  try {
+    const { boardPath, second } = fixtureBoard(dir);
+    withPolicy(boardPath);
+    const r = claimCard({ boardPath, role: "implementer", cardId: second });
+    let prompts = 0;
+    const store = { list: () => {
+      updateCard({ boardPath, cardId: second, changes: { specification: "drifted during journey" }, authority });
+      return [{ id: "1", status: "pending", subject: "work" }];
+    } };
+    const journey = await runWorkerJourney(
+      { role: "implementer", stepPrompt: "work", maxSteps: 1, autonomy: "autonomous", model: "test/model" },
+      { cwd: dir },
+      { taskStore: store, runProcess: idleCommunicationFixture(dir, (action) => { if (action === "prompt") prompts += 1; }), board: { boardPath, envelope: r.envelope } },
+    );
+    assert.equal(journey.status, "failed");
+    assert.equal(journey.code, "card-hash-drift");
+    assert.equal(prompts, 0);
+    assert.equal(isEnvelopeConsumed(boardPath, r.envelope.envelopeId), true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("final: envelope consumption failure makes a terminal result fail closed", async () => {
+  const { runWorkerJourney } = await import("../scripts/enforcement/herdr_async_dispatch_pi.js");
+  const dir = freshDir();
+  try {
+    const { boardPath, second } = fixtureBoard(dir);
+    withPolicy(boardPath);
+    const r = claimCard({ boardPath, role: "implementer", cardId: second });
+    const store = { list: () => {
+      writeFileSync(claimsPath(boardPath), "{corrupt");
+      return [];
+    } };
+    const journey = await runWorkerJourney(
+      { role: "implementer", stepPrompt: "work", maxSteps: 1, autonomy: "autonomous", model: "test/model" },
+      { cwd: dir },
+      { taskStore: store, runProcess: idleCommunicationFixture(dir), board: { boardPath, envelope: r.envelope } },
+    );
+    assert.equal(journey.ok, false);
+    assert.equal(journey.status, "failed");
+    assert.equal(journey.code, "claims-corrupt");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("final: both claims-anchor crash windows roll forward the staged signed state", () => {
+  for (const claimsWritten of [false, true]) {
+    const dir = freshDir();
+    try {
+      const { boardPath, second } = fixtureBoard(dir);
+      withPolicy(boardPath);
+      const r = claimCard({ boardPath, role: "implementer", cardId: second });
+      assert.equal(r.ok, true);
+      const oldClaims = JSON.parse(readFileSync(claimsPath(boardPath), "utf8"));
+      const oldWriter = JSON.parse(readFileSync(writerStatePath(boardPath), "utf8"));
+      reclaimClaim({ boardPath, cardId: second });
+      const nextClaims = JSON.parse(readFileSync(claimsPath(boardPath), "utf8"));
+      // Simulate prepare crash (old claims) or post-claims/pre-anchor crash
+      // (new claims), with the complete signed next state staged.
+      writeFileSync(writerStatePath(boardPath), JSON.stringify({ ...oldWriter, pendingClaimsState: nextClaims }));
+      writeFileSync(claimsPath(boardPath), JSON.stringify(claimsWritten ? nextClaims : oldClaims));
+      assert.equal(readClaimsState(boardPath).ok, false, "unrecovered public reads fail closed");
+      const recovered = releaseExpiredClaims({ boardPath });
+      assert.deepEqual(recovered, []);
+      const state = readClaimsState(boardPath);
+      assert.equal(state.ok, true);
+      assert.equal(state.state.generation, nextClaims.generation);
+      const writer = JSON.parse(readFileSync(writerStatePath(boardPath), "utf8"));
+      assert.equal(writer.pendingClaimsState, null);
+      assert.equal(writer.claimsGeneration, nextClaims.generation);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
 });

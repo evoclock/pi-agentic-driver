@@ -16,7 +16,7 @@ import {
   HERDR_COMMUNICATION_ACTIONS,
 } from "./herdr_communication_pi.js";
 import { isNativeTuiContext } from "./native_tui_context.js";
-import { validateEnvelopeForExecution, consumeEnvelope } from "./task_board_core_pi.js";
+import { prepareEnvelopeForExecution, validateEnvelopeForExecution, consumeEnvelope } from "./task_board_core_pi.js";
 
 export const WORKER_DISPATCH_TOOL = "agentic_worker_dispatch";
 export const WORKER_DISPATCH_SCHEMA = "agentic-driver.worker-dispatch.v1";
@@ -247,24 +247,53 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   const communicationOptions = options.communication ?? options;
   const replacementRole = options.replacementRole ?? role;
   const replacementModel = options.replacementModel ?? options.model ?? params.model;
-  const finish = (status) => ({
-    schema: WORKER_DISPATCH_SCHEMA,
-    ok: status === "completed" || status === "exhausted" || status === "waiting-approval",
-    action: "dispatch",
-    mode,
-    autonomy,
-    ...(journey.cast ? { cast: journey.cast } : {}),
-    role,
-    status,
-    steps: journey.steps,
-    stepCount: journey.steps.filter((step) => step.status === "done").length,
-    code: journey.code,
-    report: journeyReceipt(journey),
-    reportMarkers: { open: "[WORKER_JOURNEY_REPORT_BEGIN]", close: "[WORKER_JOURNEY_REPORT_END]" },
-    handoff: journey.handoff,
-    nonAuthorizing: true,
-    persisted: false,
-  });
+  const board = options.board && typeof options.board === "object"
+    && typeof options.board.boardPath === "string" && options.board.envelope
+    ? options.board
+    : null;
+  let boardAttemptStarted = false;
+  let envelopeConsumed = false;
+  const finish = async (requestedStatus) => {
+    let status = requestedStatus;
+    if (board && boardAttemptStarted && !envelopeConsumed) {
+      const reason = ["completed", "exhausted", "cancelled", "failed", "waiting-approval", "role-blocked", "worker-unresponsive"].includes(status)
+        ? status
+        : status.startsWith("worker-unresponsive") ? "worker-unresponsive" : "failed";
+      let consumed;
+      try {
+        consumed = consumeEnvelope({ boardPath: board.boardPath, envelopeId: board.envelope.envelopeId, reason });
+      } catch (error) {
+        consumed = { ok: false, code: error?.code, reason: String(error?.message || error) };
+      }
+      if (consumed?.ok !== true) {
+        status = "failed";
+        journey.status = "failed";
+        journey.code = consumed?.code || "envelope-consume-failed";
+        journey.steps.push({ step: journey.steps.length + 1, taskId: null, status: "failed", error: consumed?.reason || "envelope consumption failed closed" });
+      } else {
+        envelopeConsumed = true;
+      }
+    }
+    journey.status = status;
+    return {
+      schema: WORKER_DISPATCH_SCHEMA,
+      ok: status === "completed" || status === "exhausted" || status === "waiting-approval",
+      action: "dispatch",
+      mode,
+      autonomy,
+      ...(journey.cast ? { cast: journey.cast } : {}),
+      role,
+      status,
+      steps: journey.steps,
+      stepCount: journey.steps.filter((step) => step.status === "done").length,
+      code: journey.code,
+      report: journeyReceipt(journey),
+      reportMarkers: { open: "[WORKER_JOURNEY_REPORT_BEGIN]", close: "[WORKER_JOURNEY_REPORT_END]" },
+      handoff: journey.handoff,
+      nonAuthorizing: true,
+      persisted: false,
+    };
+  };
 
   // Explicit unstuck path: with native confirmation, spin up a replacement
   // worker for the same trusted repository/role through the existing
@@ -376,19 +405,21 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   }
   if (signal?.aborted) return finish("cancelled");
 
-  // Board-planned journey (item 2): when a journey executes under a board
-  // assignment envelope, the single-attempt lifecycle is enforced at this
-  // execution boundary — authenticated consumption, expiry, card-hash
-  // drift, repository drift, and HEAD/base/branch drift all fail closed
-  // BEFORE any work begins; completion consumes the envelope.
-  const board = options.board && typeof options.board === "object"
-    && typeof options.board.boardPath === "string" && options.board.envelope
-    ? options.board
-    : null;
+  // Board-planned journey: authenticate the persisted envelope, prepare its
+  // assigned branch exactly once, then validate again. Every consequential
+  // prompt below repeats validation so mid-journey drift fails closed.
+  const checkBoardEnvelope = () => board
+    ? validateEnvelopeForExecution({ boardPath: board.boardPath, envelope: board.envelope })
+    : { ok: true };
   if (board) {
     let guard;
     try {
-      guard = validateEnvelopeForExecution({ boardPath: board.boardPath, envelope: board.envelope });
+      const prepared = prepareEnvelopeForExecution({ boardPath: board.boardPath, envelope: board.envelope });
+      if (!prepared.ok) guard = prepared;
+      else {
+        boardAttemptStarted = true;
+        guard = checkBoardEnvelope();
+      }
     } catch (error) {
       journey.status = "failed";
       journey.code = error?.code || "envelope-invalid";
@@ -480,6 +511,19 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       }
     }
 
+    // Revalidate immediately before the consequential prompt. This catches
+    // expiry, card/claim changes, and repository/branch/revision drift that
+    // occurred during pulse, queue observation, or confirmation.
+    if (board) {
+      const guard = checkBoardEnvelope();
+      if (!guard.ok) {
+        journey.status = "failed";
+        journey.code = guard.code || "envelope-invalid";
+        journey.steps.push({ step: stepIndex, taskId: task.id, status: "failed", error: guard.reason });
+        return finish("failed");
+      }
+    }
+
     // One prompt exchange. Any failure is terminal for the journey; there is
     // no invisible retry or resend.
     const exchange = await executeHerdrCommunication(
@@ -551,16 +595,6 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   }
 
   journey.status = "completed";
-  // Item 2: a completed board-planned journey consumes its envelope attempt
-  // (single-attempt lifecycle). Consumption never marks the card done —
-  // completion is human-only (§3.1).
-  if (board) {
-    try {
-      consumeEnvelope({ boardPath: board.boardPath, envelopeId: board.envelope.envelopeId, reason: "completed" });
-    } catch (error) {
-      journey.code = error?.code || "envelope-consume-failed";
-    }
-  }
   return finish("completed");
   // Unreachable in correct use: every step either dispatches one pending
   // task, or the queue observation returns null and the journey ends with
