@@ -39,6 +39,7 @@
     "extensions/code-phage.js",
     "extensions/herdr-communication.ts",
     "extensions/herdr-dispatch.ts",
+    "extensions/task-board.ts",
     "lib/adapters/diff-scope.mjs",
     "lib/adapters/evidence.mjs",
     "lib/adapters/narrative.mjs",
@@ -64,7 +65,8 @@
     "PROVENANCE.md",
     "extensions/aidr.ts",
     "scripts/aidr_writing_review.js",
-    "templates/AGENTS.md"
+    "templates/AGENTS.md",
+    "scripts/enforcement/task_board_core_pi.js"
   ],
   "pi": {
     "extensions": [
