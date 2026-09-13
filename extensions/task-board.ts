@@ -1,15 +1,14 @@
 // SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// BOARD-1 provider extension (§5 reversibility): the board surface registers
-// only when a real board file is observed in the workspace. No board file,
-// no behavior change and no new tool.
+// BOARD-1 provider extension. Both tools register at startup; the board is
+// resolved per tool call from the calling session's working directory. A
+// workspace with no board file gets a structured board-unavailable result —
+// nothing is created and nothing else changes.
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-// Documented board locations (design §2): workspace-level Obsidian Kanban
-// Markdown, or vogelkop's simpler TASKS.md shape.
 const BOARD_FILENAMES = ["board.md", "TASKS.md"];
 
 export function resolveBoardPath(cwd) {
@@ -23,9 +22,5 @@ export function resolveBoardPath(cwd) {
 
 export default async function taskBoardPi(pi) {
   const module = await import(new URL("../scripts/enforcement/task_board_core_pi.js", import.meta.url).href);
-  const boardPath = resolveBoardPath(pi?.ctx?.cwd);
-  if (boardPath === null) {
-    return { registered: [], observation: { present: false, boardPath: null } };
-  }
-  return module.registerKanbanBoardTools(pi, { boardPath });
+  return module.registerKanbanBoardTools(pi, { resolveBoardPath });
 }
