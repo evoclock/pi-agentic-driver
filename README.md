@@ -1,4 +1,4 @@
-# pi-agentic-driver v0.7.0
+# pi-agentic-driver v0.8.0
 
 <p align="center">
   <img src="assets/Yamagane-origami.png" alt="pi-agentic-driver, Yamagane origami mark" width="140"/>
@@ -7,7 +7,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL%20v3-blue?style=flat" alt="License: AGPL v3"/></a>
   <a href="https://www.npmjs.com/package/@evoclock/pi-agentic-driver"><img src="https://img.shields.io/npm/v/@evoclock/pi-agentic-driver?style=flat" alt="npm version"/></a>
-  <img src="https://img.shields.io/badge/version-0.7.0-blue?style=flat" alt="Version 0.7.0"/>
+  <img src="https://img.shields.io/badge/version-0.8.0-blue?style=flat" alt="Version 0.8.0"/>
   <img src="https://img.shields.io/badge/status-active%20development%20%26%20testing-orange?style=flat" alt="Status"/>
   <img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=flat&logo=javascript&logoColor=black" alt="JavaScript"/>
   <img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat&logo=typescript&logoColor=white" alt="TypeScript"/>
@@ -49,6 +49,8 @@ proofs for agentic workflows.
 | `agentic_aidr` | A remedy for AI;DR. Reviews writing for clarity, simplicity, brevity, and humanity. | shipped |
 | `agentic_linux_microvm_cutover` | Runs one job in a throwaway QEMU/KVM virtual machine on a Linux host, with a severity-tiered killswitch that stops escape attempts. | user-enabled, native confirmation |
 | `agentic_worker_dispatch` | Runs controlled worker journeys and observes worker liveness. | shipped |
+| `agentic_kanban_board` | Shows the workspace task board: lanes, flags, priorities, dependencies, and which cards can run. | shipped |
+| `agentic_kanban_board_write` | Adds cards to the board through the trusted writer, which records who authorized the work. | shipped |
 
 **Status: active development and testing.** Each extension ships only after
 it passes fixture-based acceptance, native tests, live-session checks, and
@@ -229,6 +231,34 @@ memory load, and supports plain-language and analogy modes. Review is
 read-only. An explicit file apply action shows a git diff and writes the
 exact replacement only after native confirmation. Release 0.4.2 adds controlled
 inputs, atomic replacement, drift checks, and exact write verification.
+
+</details>
+
+<details>
+<summary><strong>task board, planned work you can see</strong> <em>(released, 0.8.0)</em></summary>
+
+Keep planned work on a Kanban board. You read and edit the board in
+Obsidian or in the Vogelkop Task Board pane (our upcoming Scientific and
+Research Workbench). Agents read the same board and add cards to it.
+
+The board appears only when a `board.md` or `TASKS.md` file exists in the
+workspace. With no board file, the tools do not appear and nothing changes.
+
+When an agent adds a card, a trusted writer does the bookkeeping: it
+assigns the card ID, computes the integrity hash, checks the card, and
+records who authorized the work. The record comes from you: your
+instruction, or your approval of an agent's proposal. A card without that
+record cannot be dispatched. A hand-edited card cannot fake the record, and
+a tampered card refuses to run.
+
+Only you complete a card. Move it to done in your board UI, or tell an
+agent to close it. An agent report that says the work is finished is
+evidence for your review. It is never the completion itself.
+
+The card format is shared. The same board renders in Obsidian, with
+optional Tasks-plugin emoji, and in the Vogelkop Task Board pane. The
+machine-readable fields are the single source of truth, so there is no
+second copy to keep in sync.
 
 </details>
 
@@ -490,7 +520,7 @@ pi install npm:@evoclock/pi-agentic-driver
 Or from Git at a pinned tag:
 
 ```sh
-pi install git:github.com/evoclock/pi-agentic-driver@v0.7.0
+pi install git:github.com/evoclock/pi-agentic-driver@v0.8.0
 ```
 
 Released extensions load standalone; neither requires the other.
@@ -504,7 +534,7 @@ extensions you want with the object form in your Pi settings:
 {
   "packages": [
     {
-      "source": "npm:@evoclock/pi-agentic-driver@0.7.0",
+      "source": "npm:@evoclock/pi-agentic-driver@0.8.0",
       "extensions": [
         "extensions/aidr.ts",
         "extensions/code-phage.js"
