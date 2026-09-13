@@ -189,17 +189,6 @@ silently, and return results as untrusted evidence.
 </details>
 
 
-- **project status and state review.** Read-only projections of workspace Git
-  state, formal records, and task-state health.
-- **role-lane routing and warm sessions.** Separate lanes handle
-  implementation, planning, and review, and the router prefers a warm session
-  so context and cache survive across tasks. Route affinity is an
-  optimisation, never authority: an incompatible lane yields an explicit
-  review-required result, never silent model substitution.
-- **task-ledger integration.** Agents read and act within the task ledger's
-  card states without owning board authority: no admission, completion,
-  reconciliation, or migration by the agent itself.
-
 <details>
 <summary><strong>task board, planned work you can see</strong> <em>(released, 0.8.0)</em></summary>
 
@@ -227,6 +216,17 @@ machine-readable fields are the single source of truth, so there is no
 second copy to keep in sync.
 
 </details>
+
+- **project status and state review.** Read-only projections of workspace Git
+  state, formal records, and task-state health.
+- **role-lane routing and warm sessions.** Separate lanes handle
+  implementation, planning, and review, and the router prefers a warm session
+  so context and cache survive across tasks. Route affinity is an
+  optimisation, never authority: an incompatible lane yields an explicit
+  review-required result, never silent model substitution.
+- **task-ledger integration.** Agents read and act within the task ledger's
+  card states without owning board authority: no admission, completion,
+  reconciliation, or migration by the agent itself.
 
 ## Writing clearly
 
