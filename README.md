@@ -189,6 +189,34 @@ silently, and return results as untrusted evidence.
 </details>
 
 
+<details>
+<summary><strong>task board, planned work you can see</strong> <em>(released, 0.8.0)</em></summary>
+
+Keep planned work on a Kanban board. You read and edit the board in
+Obsidian or in the Vogelkop Task Board pane (our upcoming Scientific and
+Research Workbench). Agents read the same board and add cards to it.
+
+The board appears only when a `board.md` or `TASKS.md` file exists in the
+workspace. With no board file, the tools do not appear and nothing changes.
+
+When an agent adds a card, a trusted writer does the bookkeeping: it
+assigns the card ID, computes the integrity hash, checks the card, and
+records who authorized the work. The record comes from you: your
+instruction, or your approval of an agent's proposal. A card without that
+record cannot be dispatched. A hand-edited card cannot fake the record, and
+a tampered card refuses to run.
+
+Only you complete a card. Move it to done in your board UI, or tell an
+agent to close it. An agent report that says the work is finished is
+evidence for your review. It is never the completion itself.
+
+The card format is shared. The same board renders in Obsidian, with
+optional Tasks-plugin emoji, and in the Vogelkop Task Board pane. The
+machine-readable fields are the single source of truth, so there is no
+second copy to keep in sync.
+
+</details>
+
 - **project status and state review.** Read-only projections of workspace Git
   state, formal records, and task-state health.
 - **role-lane routing and warm sessions.** Separate lanes handle
