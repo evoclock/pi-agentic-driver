@@ -768,14 +768,31 @@ export function declaredBoardPrefix(cards) {
 // atomic (temp file + rename) so it lands complete or not at all. Declines
 // before persist on any validation violation. Writer operations are
 // serialized with a lock file; IDs come from a durable high-water mark.
-export function writeCard({ boardPath, input, authority, registries = {}, surface = "tasks", now = null }) {
+export function writeCard({ boardPath, input, authority, registries = {}, surface = "tasks", now = null, requireExistingBoard = false }) {
   if (typeof boardPath !== "string" || boardPath === "") {
     throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
   }
-  return withWriterLock(boardPath, () => writeCardLocked({ boardPath, input, authority, registries, surface, now }));
+  return withWriterLock(boardPath, () => writeCardLocked({ boardPath, input, authority, registries, surface, now, requireExistingBoard }));
 }
 
-function writeCardLocked({ boardPath, input, authority, registries, surface, now }) {
+function writeCardLocked({ boardPath, input, authority, registries, surface, now, requireExistingBoard }) {
+  // Authoritative board-presence check, made under the writer lock (TOCTOU
+  // fix): when requireExistingBoard is set — the tool path — a board deleted
+  // between the caller's outer observation and this locked write must fail
+  // closed as board-unavailable. Without this, the absent file would be
+  // treated as an empty board and silently recreated. The direct writer API
+  // retains fresh-board bootstrap (requireExistingBoard defaults to false);
+  // an empty file is a valid fresh board either way — only a missing file
+  // fails when the flag is set.
+  if (requireExistingBoard && !existsSync(boardPath)) {
+    return {
+      ok: false,
+      code: "board-unavailable",
+      reason: "board file is no longer present (board-unavailable)",
+      errors: ["board file is no longer present (board-unavailable)"],
+      persisted: false,
+    };
+  }
   const markdown = existsSync(boardPath) ? readFileSync(boardPath, "utf8") : "";
   // Existing boards are validated against the complete persisted
   // representation, not merely parsed (§6 gate 2).
@@ -1120,6 +1137,7 @@ export function registerKanbanBoardTools(pi, { boardPath } = {}) {
             authority: input?.authority,
             registries: {},
             surface: "tasks",
+            requireExistingBoard: true,
           });
         } catch (error) {
           const code = typeof error?.code === "string" ? error.code : "writer-error";

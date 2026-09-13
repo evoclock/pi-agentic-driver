@@ -1380,3 +1380,43 @@ test("write tool: board-unavailable mid-call returns a structured failure, no wr
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("write tool TOCTOU: board deleted between the outer check and the locked write fails closed, no file created", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "board1-"));
+  const boardPath = join(dir, "TASKS.md");
+  try {
+    writeFileSync(boardPath, serializeBoard([baseCard()], { surface: "tasks" }));
+    const tools = [];
+    registerKanbanBoardTools({ registerTool: (t) => tools.push(t) }, { boardPath });
+    const tool = tools.find((t) => t.name === "agentic_kanban_board_write");
+
+    // Delete the board AFTER the tool's outer existsSync() fast path but
+    // BEFORE the locked write: hold the writer lock across the deletion.
+    // The tool's outer check sees the board present; the locked write then
+    // re-observes and must fail closed without recreating anything.
+    let release;
+    const holder = withWriterLock(boardPath, () => new Promise((resolve) => { release = resolve; }));
+    rmSync(boardPath); // board vanishes inside the lock window
+    release();
+    await holder;
+
+    const result = await tool.execute({}, {
+      title: "Ghost write",
+      specification: "spec",
+      definitionOfDone: "dod",
+      stoppingPoint: "stop",
+      scopePaths: ["a.js"],
+      authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write it" },
+    });
+    const value = result.details;
+    assert.equal(value.ok, false);
+    assert.equal(value.persisted, false);
+    assert.equal(value.boardUnavailable, true);
+    assert.equal(value.code, "board-unavailable");
+    assert.ok(value.reason.includes("board-unavailable"));
+    assert.equal(existsSync(boardPath), false, "the locked write must not recreate the board file");
+    assert.equal(existsSync(writerStatePath(boardPath)), false, "no writer state may be created either");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
