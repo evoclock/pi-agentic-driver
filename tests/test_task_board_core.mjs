@@ -878,7 +878,7 @@ test("reversal: no board file means no observation and a per-call board-unavaila
     { registerTool: (t) => tools.push(t) },
     { resolveBoardPath: () => null },
   );
-  assert.deepEqual(registration.registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update"]);
+  assert.deepEqual(registration.registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update", "agentic_kanban_board_dispatch"]);
   const readTool = tools.find((t) => t.name === "agentic_kanban_board");
   const writeTool = tools.find((t) => t.name === "agentic_kanban_board_write");
   const readResult = await readTool.execute("id", {}, null, null, {});
@@ -905,8 +905,8 @@ test("reversal: provider observation happens per call on a real board file", asy
     const registration = registerKanbanBoardTools({ registerTool: (tool) => { registered.push(tool.name); tools.push(tool); } }, {
       resolveBoardPath: (ctx) => (ctx?.cwd === dir ? boardPath : null),
     });
-    assert.deepEqual(registration.registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update"]);
-    assert.deepEqual(registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update"]);
+    assert.deepEqual(registration.registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update", "agentic_kanban_board_dispatch"]);
+    assert.deepEqual(registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update", "agentic_kanban_board_dispatch"]);
     // With the board present, the read tool serves it.
     const readTool = tools.find((t) => t.name === "agentic_kanban_board");
     const served = await readTool.execute("id", {}, null, null, { cwd: dir });
@@ -936,8 +936,8 @@ test("B7 regression: the extension resolves the board path from the workspace", 
     const registered = [];
     const tools = [];
     const result = await extensionModule.default({ registerTool: (t) => { registered.push(t.name); tools.push(t); } });
-    assert.deepEqual(registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update"]);
-    assert.deepEqual(result.registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update"]);
+    assert.deepEqual(registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update", "agentic_kanban_board_dispatch"]);
+    assert.deepEqual(result.registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update", "agentic_kanban_board_dispatch"]);
     const readTool = tools.find((t) => t.name === "agentic_kanban_board");
     const served = await readTool.execute("id", {}, null, null, { cwd: emptyDir });
     assert.equal(served.details.ok, false);
@@ -950,8 +950,8 @@ test("B7 regression: the extension resolves the board path from the workspace", 
   // still never throws at registration.
   const fallbackRegistered = [];
   const fallback = await extensionModule.default({ registerTool: (t) => fallbackRegistered.push(t.name) });
-  assert.deepEqual(fallback.registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update"]);
-  assert.deepEqual(fallbackRegistered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update"]);
+  assert.deepEqual(fallback.registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update", "agentic_kanban_board_dispatch"]);
+  assert.deepEqual(fallbackRegistered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update", "agentic_kanban_board_dispatch"]);
 
   // A TASKS.md board in the workspace root: the tool registers.
   const tasksDir = mkdtempSync(join(tmpdir(), "board1-"));
@@ -960,8 +960,8 @@ test("B7 regression: the extension resolves the board path from the workspace", 
     const registered = [];
     const tools = [];
     const result = await extensionModule.default({ registerTool: (t) => { registered.push(t.name); tools.push(t); } });
-    assert.deepEqual(registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update"]);
-    assert.deepEqual(result.registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update"]);
+    assert.deepEqual(registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update", "agentic_kanban_board_dispatch"]);
+    assert.deepEqual(result.registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update", "agentic_kanban_board_dispatch"]);
     // The read tool serves the TASKS.md board resolved from ctx.cwd.
     const readTool = tools.find((t) => t.name === "agentic_kanban_board");
     const served = await readTool.execute("id", {}, null, null, { cwd: tasksDir });
@@ -978,7 +978,7 @@ test("B7 regression: the extension resolves the board path from the workspace", 
     const registered = [];
     const tools = [];
     await extensionModule.default({ registerTool: (t) => { registered.push(t.name); tools.push(t); } });
-    assert.deepEqual(registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update"]);
+    assert.deepEqual(registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update", "agentic_kanban_board_dispatch"]);
     const readTool = tools.find((t) => t.name === "agentic_kanban_board");
     const served = await readTool.execute("id", {}, null, null, { cwd: obsidianDir });
     assert.equal(served.details.ok, true);

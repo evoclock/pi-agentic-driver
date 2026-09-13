@@ -13,6 +13,7 @@
 
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, openSync, closeSync, unlinkSync, chmodSync, statSync as fsStatSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -486,6 +487,10 @@ export function serializeObsidianCard(card) {
   const checkbox = card.flags?.includes("cancelled") ? "[-]" : card.done ? "[x]" : "[ ]";
   const parts = [checkbox, card.title];
   parts.push(fieldText("id", card.cardId));
+  // §3.6: a live claim is published through the derived projection as the
+  // card being active. Presentation only — the claim record in dispatcher
+  // state is canonical for run authority, never this field.
+  if (card.activeClaim) parts.push(fieldText("active", card.activeClaim));
   if (card.hash) parts.push(fieldText("hash", card.hash));
   if (card.priority) parts.push(fieldText("priority", card.priority));
   for (const flag of card.flags ?? []) parts.push(fieldText("flag", flag));
@@ -582,11 +587,19 @@ export function projectionPath(boardPath) {
 // Recompute the projection from the canonical cards. Best-effort relative to
 // the authoritative write: a projection failure is reported but never rolls
 // back or invalidates the canonical persist.
-export function writeProjection(boardPath, cards) {
+export function writeProjection(boardPath, cards, claims = []) {
   const path = projectionPath(boardPath);
   try {
+    const claimedIds = new Set((Array.isArray(claims) ? claims : [])
+      .map((claim) => claim?.cardId)
+      .filter((id) => typeof id === "string"));
+    const annotated = cards.map((card) => {
+      if (!claimedIds.has(card.cardId)) return card;
+      const claim = (Array.isArray(claims) ? claims : []).find((entry) => entry?.cardId === card.cardId);
+      return { ...card, activeClaim: typeof claim?.role === "string" ? claim.role : "claimed" };
+    });
     const frontmatter = "---\nkanban-plugin: board\n---\n\n";
-    const body = serializeBoard(cards, { surface: "obsidian" })
+    const body = serializeBoard(annotated, { surface: "obsidian" })
       .replace(/^## backlog$/m, "## Backlog")
       .replace(/^## in-progress$/m, "## In Progress")
       .replace(/^## review$/m, "## Review")
@@ -1255,6 +1268,288 @@ export function isDispatchable(card, boardIndex) {
 }
 
 // ---------------------------------------------------------------------------
+// Dispatcher state (§3.6, §4): claims and assignment envelopes live OUTSIDE
+// the Markdown, beside the board, under the same writer lock as card writes.
+// Claim creation, envelope creation, and active-state publication happen in
+// one atomic operation. The claims file is canonical for run authority; the
+// Markdown stays canonical for task semantics.
+// ---------------------------------------------------------------------------
+
+export const CLAIMS_SCHEMA = "agentic-driver.board-claims.v1";
+export const ENVELOPE_SCHEMA = "agentic-driver.assignment-envelope.v1";
+export const AUTOMATION_POLICY_SCHEMA = "agentic-driver.automation-policy.v1";
+export const PLACEMENTS = Object.freeze(["container", "host"]);
+export const DEFAULT_ENVELOPE_EXPIRY_HOURS = 12;
+
+export function claimsPath(boardPath) {
+  return `${boardPath}.claims.json`;
+}
+
+export function automationPolicyPath(boardPath) {
+  return `${boardPath}.automation-policy.json`;
+}
+
+function readJsonFile(path) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeJsonFileAtomic(path, value) {
+  const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmpPath, JSON.stringify(value, null, 2) + "\n", "utf8");
+  chmodSync(tmpPath, 0o600);
+  renameSync(tmpPath, path);
+}
+
+export function readClaims(boardPath) {
+  const value = readJsonFile(claimsPath(boardPath));
+  if (value === null || typeof value !== "object" || !Array.isArray(value.claims)) return [];
+  return value.claims.filter((claim) => claim && typeof claim.cardId === "string");
+}
+
+function writeClaims(boardPath, claims) {
+  writeJsonFileAtomic(claimsPath(boardPath), { schema: CLAIMS_SCHEMA, claims });
+}
+
+// The automation policy (§3.2, §4): an explicit, revocable record the USER
+// sets. No policy file = no overnight dispatch, ever (fails closed). Shape:
+// { roles: [...], placement: "container" | "host", maxConcurrent: N,
+//   expiry: ISO yyyy-mm-dd (or full ISO timestamp), envelopeExpiryHours? }.
+export function readAutomationPolicy(boardPath, { configPath = null } = {}) {
+  const path = configPath ?? automationPolicyPath(boardPath);
+  const value = readJsonFile(path);
+  if (value === null || typeof value !== "object") return null;
+  return value;
+}
+
+// Validate the policy shape and currency. Returns {ok, policy, reason}.
+export function checkAutomationPolicy(policy, { now = null } = {}) {
+  const at = now ?? new Date().toISOString();
+  if (policy === null || policy === undefined) {
+    return { ok: false, reason: "no automation policy is set — automated dispatch is refused (fails closed)" };
+  }
+  if (typeof policy !== "object" || Array.isArray(policy)) {
+    return { ok: false, reason: "the automation policy is malformed (fails closed)" };
+  }
+  if (!Array.isArray(policy.roles) || policy.roles.length === 0
+    || !policy.roles.every((role) => typeof role === "string" && role !== "")) {
+    return { ok: false, reason: "the automation policy declares no dispatchable roles (fails closed)" };
+  }
+  if (!PLACEMENTS.includes(policy.placement)) {
+    return { ok: false, reason: `the automation policy placement must be one of ${PLACEMENTS.join(", ")} (fails closed)` };
+  }
+  const maxConcurrent = Number(policy.maxConcurrent);
+  if (!Number.isInteger(maxConcurrent) || maxConcurrent < 1) {
+    return { ok: false, reason: "the automation policy maxConcurrent must be a positive integer (fails closed)" };
+  }
+  const expiry = typeof policy.expiry === "string" ? policy.expiry : null;
+  if (expiry === null || Number.isNaN(Date.parse(expiry))) {
+    return { ok: false, reason: "the automation policy has no valid expiry (fails closed)" };
+  }
+  if (Date.parse(expiry) <= Date.parse(at)) {
+    return { ok: false, reason: "the automation policy has expired — new dispatches are refused until it is renewed" };
+  }
+  return { ok: true, policy, reason: null };
+}
+
+// §3.2 assignment envelope: created ONCE per assignment, immutable, and
+// single-attempt. Retry, drift, or expiry require a NEW envelope — never a
+// mutation of this one.
+export function createEnvelope({ card, policy, now = null, repository = null, startingRevision = null }) {
+  const at = now ?? new Date().toISOString();
+  const envelopeId = randomBytes(16).toString("hex");
+  const expiryHours = Number.isFinite(policy?.envelopeExpiryHours) && policy.envelopeExpiryHours > 0
+    ? policy.envelopeExpiryHours
+    : DEFAULT_ENVELOPE_EXPIRY_HOURS;
+  let expiry = new Date(Date.parse(at) + expiryHours * 3_600_000).toISOString();
+  // The envelope can never outlive the policy that authorized it.
+  if (policy?.expiry && Date.parse(policy.expiry) < Date.parse(expiry)) expiry = policy.expiry;
+  return Object.freeze({
+    schema: ENVELOPE_SCHEMA,
+    envelopeId,
+    cardId: card.cardId,
+    cardHash: card.hash ?? null,
+    repository: repository ?? process.cwd(),
+    startingRevision: startingRevision ?? gitHead(process.cwd()),
+    branch: `board/${card.cardId}-${envelopeId.slice(0, 8)}`,
+    allowedPaths: [...(card.scope ?? [])],
+    unchangedPaths: [...(card.unchangedPaths ?? [])],
+    capabilities: [...(card.capabilities ?? [])],
+    stoppingPoint: card.stoppingPoint ?? null,
+    acceptance: { specHash: card.specHash ?? null, dodHash: card.dodHash ?? null },
+    placement: policy?.placement ?? null,
+    interactionProfile: policy?.placement ?? null,
+    mode: "automated",
+    createdAt: at,
+    expiry,
+  });
+}
+
+// Read-only git observation for the envelope's starting revision. Git
+// OPERATIONS belong to the git extension (§0.9); reading HEAD is not one.
+export function gitHead(cwd = process.cwd()) {
+  try {
+    return execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// §3.3 + §4 dispatch eligibility, evaluated under the writer lock: the card
+// must be dispatchable per the pure predicate (which already enforces the
+// blocked-by gate, hash validity, and — with statePath set — writer
+// provenance), not already claimed, and its cardId must be in the writer's
+// issued-IDs ledger.
+export function dispatchEligibility({ card, boardIndex, boardPath, activeClaims }) {
+  const claimed = new Set((activeClaims ?? []).map((claim) => claim.cardId));
+  if (claimed.has(card.cardId)) {
+    return { eligible: false, reason: `card ${card.cardId} is already claimed` };
+  }
+  const withState = { ...card, statePath: writerStatePath(boardPath) };
+  const result = isDispatchable(withState, boardIndex);
+  if (!result.dispatchable) {
+    return { eligible: false, reason: result.failedConditions.join("; ") };
+  }
+  return { eligible: true, reason: null };
+}
+
+const PRIORITY_ORDER = Object.freeze({ P0: 0, P1: 1, P2: 2, P3: 3 });
+
+// Select the highest-priority dispatchable, unclaimed, provenance-verified
+// card. Optional cardId restricts selection to that card.
+export function selectDispatchableCard({ cards, boardPath, activeClaims, cardId = null }) {
+  const index = new Map(cards.map((card) => [card.cardId, card]));
+  const candidates = cards
+    .filter((card) => cardId === null || card.cardId === cardId)
+    .map((card) => ({ card, eligibility: dispatchEligibility({ card, boardIndex: index, boardPath, activeClaims }) }))
+    .filter((entry) => entry.eligibility.eligible)
+    .sort((a, b) =>
+      (PRIORITY_ORDER[a.card.priority] ?? 99) - (PRIORITY_ORDER[b.card.priority] ?? 99)
+      || String(a.card.cardId).localeCompare(String(b.card.cardId)));
+  return candidates[0] ?? null;
+}
+
+// §3.6 + §4: THE atomic claim. Under the writer lock, in one operation:
+// eligibility check → envelope creation → claims-file persist → projection
+// republication with the card shown active. A crash leaves either the old or
+// the new complete state (both writes are atomic renames); two concurrent
+// claims can never both win because the entire read-decide-write sequence
+// holds the lock. Expired claims are released first, inside the same lock.
+export function claimCard({ boardPath, cardId = null, role, policy = null, configPath = null, now = null, repository = null, startingRevision = null }) {
+  if (typeof boardPath !== "string" || boardPath === "") {
+    throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
+  }
+  if (typeof role !== "string" || role === "") {
+    throw Object.assign(new Error("role is required"), { code: "role-required" });
+  }
+  return withWriterLock(boardPath, () =>
+    claimCardLocked({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision }));
+}
+
+function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision }) {
+  const at = now ?? new Date().toISOString();
+  if (!existsSync(boardPath)) {
+    return { ok: false, code: "board-unavailable", reason: "board file is no longer present (board-unavailable)" };
+  }
+  // Automation policy first (§4): no policy = no overnight dispatch.
+  const resolvedPolicy = policy ?? readAutomationPolicy(boardPath, { configPath });
+  const policyCheck = checkAutomationPolicy(resolvedPolicy, { now: at });
+  if (!policyCheck.ok) {
+    return { ok: false, code: "policy-refused", reason: policyCheck.reason };
+  }
+  if (!policyCheck.policy.roles.includes(role)) {
+    return { ok: false, code: "policy-role-refused", reason: `role "${role}" is not declared in the automation policy (fails closed)` };
+  }
+  // §3.4 mode table: automated placement is container/microVM, always.
+  if (policyCheck.policy.placement !== "container") {
+    return { ok: false, code: "policy-placement-refused", reason: "automated board dispatch requires container placement per the automation policy (§3.4)" };
+  }
+  // Expired envelopes release their claims automatically on check (§4.6).
+  const activeClaims = releaseExpiredClaimsLocked(boardPath, at);
+  const concurrency = Number(policyCheck.policy.maxConcurrent);
+  if (activeClaims.length >= concurrency) {
+    return { ok: false, code: "policy-concurrency-refused", reason: `the automation policy allows at most ${concurrency} concurrent claim(s); ${activeClaims.length} are active` };
+  }
+  const validatedBoard = validateBoard(readFileSync(boardPath, "utf8"), {});
+  if (!validatedBoard.ok) {
+    return { ok: false, code: "board-invalid", errors: validatedBoard.errors };
+  }
+  const selected = selectDispatchableCard({ cards: validatedBoard.cards, boardPath, activeClaims, cardId });
+  if (selected === null) {
+    return { ok: false, code: "no-dispatchable-card", reason: cardId
+      ? `card ${cardId} is not dispatchable, is already claimed, or lacks writer provenance`
+      : "no dispatchable unclaimed card is available" };
+  }
+  const card = selected.card;
+  const envelope = createEnvelope({ card, policy: policyCheck.policy, now: at, repository, startingRevision });
+  const claim = {
+    cardId: card.cardId,
+    claimedAt: at,
+    role,
+    envelopeId: envelope.envelopeId,
+    envelope,
+  };
+  writeClaims(boardPath, [...activeClaims, claim]);
+  // Active-state publication: the projection is recomputed with the claim
+  // visible, in the same locked operation (§3.6).
+  const projection = writeProjection(boardPath, validatedBoard.cards, [...activeClaims, claim]);
+  return { ok: true, claimed: true, cardId: card.cardId, role, claim, envelope, projection };
+}
+
+// Release every claim whose envelope expiry has passed. Returns the surviving
+// active claims and republishes the projection. Safe to call anytime.
+export function releaseExpiredClaims({ boardPath, now = null } = {}) {
+  if (typeof boardPath !== "string" || boardPath === "") {
+    throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
+  }
+  return withWriterLock(boardPath, () => ({
+    released: releaseExpiredClaimsLocked(boardPath, now ?? new Date().toISOString()),
+  })).released;
+}
+
+function releaseExpiredClaimsLocked(boardPath, at) {
+  const existing = readClaims(boardPath);
+  const active = existing.filter((claim) => {
+    const expiry = claim?.envelope?.expiry;
+    return typeof expiry === "string" && Date.parse(expiry) > Date.parse(at);
+  });
+  if (active.length !== existing.length) {
+    writeClaims(boardPath, active);
+    if (existsSync(boardPath)) {
+      const validated = validateBoard(readFileSync(boardPath, "utf8"), {});
+      if (validated.ok) writeProjection(boardPath, validated.cards, active);
+    }
+  }
+  return active;
+}
+
+// Explicit reclaim: drop the claim for one card (or all claims with cardId
+// null). Releases the active-state publication. Never marks anything done.
+export function reclaimClaim({ boardPath, cardId = null, envelopeId = null } = {}) {
+  if (typeof boardPath !== "string" || boardPath === "") {
+    throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
+  }
+  return withWriterLock(boardPath, () => {
+    const existing = readClaims(boardPath);
+    const kept = existing.filter((claim) =>
+      (cardId !== null ? claim.cardId !== cardId : true)
+      && (envelopeId !== null ? claim.envelopeId !== envelopeId : true));
+    if (kept.length === existing.length) {
+      return { ok: false, code: "claim-not-found", reason: "no matching claim to reclaim" };
+    }
+    writeClaims(boardPath, kept);
+    if (existsSync(boardPath)) {
+      const validated = validateBoard(readFileSync(boardPath, "utf8"), {});
+      if (validated.ok) writeProjection(boardPath, validated.cards, kept);
+    }
+    return { ok: true, reclaimed: existing.length - kept.length, claims: kept };
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Provider observation (§5 reversibility): everything registers behind the
 // observation that a board file exists. No board file, no behavior change and
 // no new tool.
@@ -1594,6 +1889,64 @@ export function registerKanbanBoardTools(pi, { boardPath = null, resolveBoardPat
       },
     });
     registered.push("agentic_kanban_board_update");
+  }
+  // The dispatch tool (§4): claims the highest-priority dispatchable,
+  // unclaimed, provenance-verified card for a role under the user's
+  // automation policy, creates the assignment envelope, and returns the
+  // binding. The policy is the human decision; no policy = refusal. This
+  // tool wires claim + envelope only — journey execution integration is a
+  // follow-up.
+  if (typeof pi?.registerTool === "function") {
+    pi.registerTool({
+      name: "agentic_kanban_board_dispatch",
+      label: "Kanban Board Dispatch",
+      description:
+        "Claim the highest-priority dispatchable, unclaimed task-board card for a role and create its assignment envelope. Governed by the user's automation policy (roles, placement, maxConcurrent, expiry): no policy = refused; a role not in the policy = refused. Atomic: two concurrent claims can never claim the same card. Expired envelopes release automatically. Returns {cardId, envelope, branch, scope, stoppingPoint}.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          role: { type: "string", description: "The role claiming the card; must be declared in the automation policy." },
+          cardId: { type: "string", description: "Optional: claim this specific card instead of the highest-priority dispatchable one." },
+        },
+        required: ["role"],
+      },
+      async execute(_toolCallId, input, _signal, _onUpdate, ctx) {
+        const activeBoardPath = boardPathFor(ctx);
+        if (!activeBoardPath || !existsSync(activeBoardPath)) {
+          return unavailableResult();
+        }
+        if (typeof input?.role !== "string" || input.role === "") {
+          const value = { ok: false, code: "invalid-input", reason: "role is required", errors: ["role is required"] };
+          return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+        }
+        let result;
+        try {
+          result = claimCard({ boardPath: activeBoardPath, role: input.role, cardId: input?.cardId ?? null });
+        } catch (error) {
+          const code = typeof error?.code === "string" ? error.code : "dispatch-error";
+          const value = { ok: false, code, reason: String(error?.message || error).slice(0, 512), errors: [String(error?.message || error).slice(0, 512)] };
+          return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+        }
+        let value;
+        if (result.ok) {
+          value = {
+            ok: true,
+            claimed: true,
+            cardId: result.cardId,
+            envelope: result.envelope,
+            branch: result.envelope.branch,
+            scope: result.envelope.allowedPaths,
+            stoppingPoint: result.envelope.stoppingPoint,
+            role: result.role,
+          };
+        } else {
+          value = { ok: false, code: result.code, reason: result.reason ?? (result.errors ?? []).join("; "), errors: result.errors ?? [] };
+        }
+        return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+      },
+    });
+    registered.push("agentic_kanban_board_dispatch");
   }
   return { registered, observation: { ...observation, boardPath: observation.boardPath } };
 }
