@@ -1370,7 +1370,10 @@ export function registerKanbanBoardTools(pi, { boardPath = null, resolveBoardPat
         // calling workspace, or the board removed after registration:
         // structured board-unavailable instead of writing to a stale path.
         const activeBoardPath = boardPathFor(ctx);
-        if (!activeBoardPath || !existsSync(activeBoardPath)) {
+        // The write tool bootstraps: a missing board file is fine (the writer
+        // creates it fresh under the lock). Only an unresolvable workspace is
+        // refused here.
+        if (!activeBoardPath) {
           return unavailableResult();
         }
         // The writer allocates the cardId and computes all hashes; the tool
@@ -1420,7 +1423,9 @@ export function registerKanbanBoardTools(pi, { boardPath = null, resolveBoardPat
             authority: input?.authority,
             registries: {},
             surface: "tasks",
-            requireExistingBoard: true,
+            // No requireExistingBoard: the write tool bootstraps a fresh
+            // board when none exists. Recreation is safe — fresh content only,
+            // and every card still requires a genuine authority record.
           });
         } catch (error) {
           const code = typeof error?.code === "string" ? error.code : "writer-error";

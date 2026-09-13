@@ -1398,7 +1398,7 @@ test("write tool: writer-lock-held surfaces as a structured failure, not a throw
   }
 });
 
-test("write tool: board-unavailable mid-call returns a structured failure, no write", async () => {
+test("write tool with no board: bootstraps a fresh board; stale content does not return", async () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "TASKS.md");
   try {
@@ -1408,26 +1408,26 @@ test("write tool: board-unavailable mid-call returns a structured failure, no wr
     const tool = tools.find((t) => t.name === "agentic_kanban_board_write");
     rmSync(boardPath); // removed after registration
     const result = await tool.execute({}, {
-      title: "Ghost",
-      specification: "spec",
-      definitionOfDone: "dod",
+      title: "Fresh",
+      specification: "fresh spec",
+      definitionOfDone: "fresh dod",
       stoppingPoint: "stop",
       scopePaths: ["a.js"],
       authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write it" },
     });
     const value = result.details;
-    assert.equal(value.ok, false);
-    assert.equal(value.persisted, false);
-    assert.equal(value.boardUnavailable, true);
-    assert.equal(value.code, "board-unavailable");
-    assert.ok(value.reason.includes("board-unavailable"));
-    assert.equal(existsSync(boardPath), false, "no board file must be recreated");
+    assert.equal(value.ok, true);
+    assert.equal(value.persisted, true);
+    const markdown = readFileSync(boardPath, "utf8");
+    assert.ok(!markdown.includes("Example task"), "stale content must not return");
+    assert.ok(markdown.includes("Fresh"));
+    assert.equal(parseBoard(markdown).cards.length, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("write tool TOCTOU: board deleted between the outer check and the locked write fails closed, no file created", async () => {
+test("write tool after board deletion: bootstraps fresh, never resurrects stale content", async () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "TASKS.md");
   try {
@@ -1435,34 +1435,22 @@ test("write tool TOCTOU: board deleted between the outer check and the locked wr
     const tools = [];
     registerKanbanBoardTools({ registerTool: (t) => tools.push(t) }, { boardPath });
     const tool = tools.find((t) => t.name === "agentic_kanban_board_write");
-
-    // Delete the board AFTER the tool's outer existsSync() fast path but
-    // BEFORE the locked write: hold the writer lock across the deletion.
-    // The tool's outer check sees the board present; the locked write then
-    // re-observes and must fail closed without recreating anything.
-    let release;
-    const holder = withWriterLock(boardPath, () => new Promise((resolve) => { release = resolve; }));
-    rmSync(boardPath); // board vanishes inside the lock window
-    release();
-    await holder;
-
+    rmSync(boardPath);
     const result = await tool.execute({}, {
-      title: "Ghost write",
-      specification: "spec",
-      definitionOfDone: "dod",
+      title: "Fresh start",
+      specification: "fresh spec",
+      definitionOfDone: "fresh dod",
       stoppingPoint: "stop",
-      scopePaths: ["a.js"],
+      scopePaths: ["src/"],
       authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write it" },
     });
     const value = result.details;
-    assert.equal(value.ok, false);
-    assert.equal(value.persisted, false);
-    assert.equal(value.boardUnavailable, true);
-    assert.equal(value.code, "board-unavailable");
-    assert.ok(value.reason.includes("board-unavailable"));
-    assert.equal(existsSync(boardPath), false, "the locked write must not recreate the board file");
-    assert.equal(existsSync(writerStatePath(boardPath)), false, "no writer state may be created either");
+    assert.equal(value.ok, true, `expected bootstrap success: ${JSON.stringify(value)}`);
+    const markdown = readFileSync(boardPath, "utf8");
+    assert.ok(!markdown.includes("Example task"), "stale content must not be resurrected");
+    assert.equal(parseBoard(markdown).cards.length, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
