@@ -9,6 +9,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, utimesSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -887,8 +888,8 @@ test("reversal: provider observation gates registration on a real board file", (
     assert.equal(observation.present, true);
     const registered = [];
     const registration = registerKanbanBoardTools({ registerTool: (tool) => registered.push(tool.name) }, { boardPath });
-    assert.deepEqual(registration.registered, ["agentic_kanban_board"]);
-    assert.deepEqual(registered, ["agentic_kanban_board"]);
+    assert.deepEqual(registration.registered, ["agentic_kanban_board", "agentic_kanban_board_write"]);
+    assert.deepEqual(registered, ["agentic_kanban_board", "agentic_kanban_board_write"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -919,8 +920,8 @@ test("B7 regression: the extension resolves the board path from the workspace", 
     writeFileSync(join(tasksDir, "TASKS.md"), serializeBoard([baseCard()], { surface: "tasks" }));
     const registered = [];
     const result = await extensionModule.default({ registerTool: (t) => registered.push(t.name), ctx: { cwd: tasksDir } });
-    assert.deepEqual(registered, ["agentic_kanban_board"]);
-    assert.deepEqual(result.registered, ["agentic_kanban_board"]);
+    assert.deepEqual(registered, ["agentic_kanban_board", "agentic_kanban_board_write"]);
+    assert.deepEqual(result.registered, ["agentic_kanban_board", "agentic_kanban_board_write"]);
     assert.equal(result.observation.present, true);
   } finally {
     rmSync(tasksDir, { recursive: true, force: true });
@@ -932,7 +933,7 @@ test("B7 regression: the extension resolves the board path from the workspace", 
     writeFileSync(join(obsidianDir, "board.md"), serializeBoard([baseCard()], { surface: "obsidian" }));
     const registered = [];
     await extensionModule.default({ registerTool: (t) => registered.push(t.name), ctx: { cwd: obsidianDir } });
-    assert.deepEqual(registered, ["agentic_kanban_board"]);
+    assert.deepEqual(registered, ["agentic_kanban_board", "agentic_kanban_board_write"]);
   } finally {
     rmSync(obsidianDir, { recursive: true, force: true });
   }
@@ -1163,8 +1164,9 @@ test("F7b: the board tool re-observes on every call and reports board-unavailabl
   const boardPath = join(dir, "board.md");
   try {
     writeFileSync(boardPath, serializeBoard([baseCard()], { surface: "tasks" }));
-    let tool = null;
-    registerKanbanBoardTools({ registerTool: (t) => { tool = t; } }, { boardPath });
+    const registeredTools = [];
+    registerKanbanBoardTools({ registerTool: (t) => registeredTools.push(t) }, { boardPath });
+    const tool = registeredTools.find((t) => t.name === "agentic_kanban_board");
     assert.ok(tool);
     // Board present: normal result.
     let result = await tool.execute();
@@ -1180,6 +1182,200 @@ test("F7b: the board tool re-observes on every call and reports board-unavailabl
     writeFileSync(boardPath, serializeBoard([baseCard()], { surface: "tasks" }));
     result = await tool.execute();
     assert.equal(result.details.ok, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- §3.5 write tool: the trusted writer exposed as agentic_kanban_board_write
+
+test("write tool: successful write allocates cardId, persists hashes, records authority with HMAC", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "board1-"));
+  const boardPath = join(dir, "TASKS.md");
+  try {
+    writeFileSync(boardPath, serializeBoard([baseCard()], { surface: "tasks" }));
+    const tools = [];
+    registerKanbanBoardTools({ registerTool: (t) => tools.push(t) }, { boardPath });
+    const tool = tools.find((t) => t.name === "agentic_kanban_board_write");
+    assert.ok(tool, "write tool must register");
+
+    const authority = { source: "instruction", sessionOrReportId: "sess-42", quotedInstruction: "Write a card to add the export helper." };
+    const result = await tool.execute({}, {
+      title: "Add the export helper",
+      specification: "Add exportHelper() to lib.js with tests.",
+      definitionOfDone: "Tests pass and the helper is exported.",
+      stoppingPoint: "Stop after tests pass; await review.",
+      scopePaths: ["lib.js"],
+      authority,
+    });
+    const value = result.details;
+    assert.equal(value.ok, true);
+    assert.equal(value.persisted, true);
+    assert.match(value.cardId, /^T-\d{4}$/);
+    assert.equal(value.lane, "backlog");
+    assert.deepEqual(value.flags, []);
+    assert.equal(value.hashPresent, true);
+    assert.equal(value.specHashPresent, true);
+    assert.equal(value.dodHashPresent, true);
+    assert.equal(value.authorityWriterHmacPresent, true);
+    assert.deepEqual(value.authoritySource, authority);
+
+    // Persisted representation: the card is on the board and dispatchable.
+    const parsed = parseBoard(readFileSync(boardPath, "utf8"), { surface: "tasks" });
+    const card = parsed.cards.find((c) => c.cardId === value.cardId);
+    assert.ok(card, "card must be persisted");
+    assert.equal(card.hash, computeCardHash(card));
+    assert.equal(card.specHash, computeSpecHash(card.specText));
+    assert.equal(card.dodHash, computeSpecHash(card.dodText));
+    assert.deepEqual(card.authoritySource, authority);
+    assert.ok(card.authorityWriterHmac);
+    const state = JSON.parse(readFileSync(writerStatePath(boardPath), "utf8"));
+    assert.ok(state.issuedCardIds.includes(value.cardId));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("write tool: refuses a missing authority record with a structured failure", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "board1-"));
+  const boardPath = join(dir, "TASKS.md");
+  try {
+    writeFileSync(boardPath, serializeBoard([baseCard()], { surface: "tasks" }));
+    const tools = [];
+    registerKanbanBoardTools({ registerTool: (t) => tools.push(t) }, { boardPath });
+    const tool = tools.find((t) => t.name === "agentic_kanban_board_write");
+    const result = await tool.execute({}, {
+      title: "No authority",
+      specification: "spec",
+      definitionOfDone: "dod",
+      stoppingPoint: "stop",
+      scopePaths: ["a.js"],
+      // authority deliberately omitted
+    });
+    const value = result.details;
+    assert.equal(value.ok, false);
+    assert.equal(value.persisted, false);
+    assert.equal(value.code, "authority-source-invalid");
+    assert.ok(typeof value.reason === "string" && value.reason.length > 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("write tool: refuses a malformed authority record with a structured failure", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "board1-"));
+  const boardPath = join(dir, "TASKS.md");
+  try {
+    writeFileSync(boardPath, serializeBoard([baseCard()], { surface: "tasks" }));
+    const tools = [];
+    registerKanbanBoardTools({ registerTool: (t) => tools.push(t) }, { boardPath });
+    const tool = tools.find((t) => t.name === "agentic_kanban_board_write");
+    // Wrong source value and empty quoted instruction: both malformed.
+    for (const authority of [
+      { source: "vibes", sessionOrReportId: "s", quotedInstruction: "do it" },
+      { source: "instruction", sessionOrReportId: "s", quotedInstruction: "   " },
+      { source: "instruction", sessionOrReportId: "", quotedInstruction: "do it" },
+    ]) {
+      const result = await tool.execute({}, {
+        title: "Bad authority",
+        specification: "spec",
+        definitionOfDone: "dod",
+        stoppingPoint: "stop",
+        scopePaths: ["a.js"],
+        authority,
+      });
+      const value = result.details;
+      assert.equal(value.ok, false, JSON.stringify(value));
+      assert.equal(value.persisted, false);
+      assert.equal(value.code, "authority-source-invalid");
+    }
+    // Nothing was persisted.
+    const parsed = parseBoard(readFileSync(boardPath, "utf8"), { surface: "tasks" });
+    assert.equal(parsed.cards.length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("write tool: refuses an invalid card (missing specification) with a structured failure", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "board1-"));
+  const boardPath = join(dir, "TASKS.md");
+  try {
+    writeFileSync(boardPath, serializeBoard([baseCard()], { surface: "tasks" }));
+    const tools = [];
+    registerKanbanBoardTools({ registerTool: (t) => tools.push(t) }, { boardPath });
+    const tool = tools.find((t) => t.name === "agentic_kanban_board_write");
+    const result = await tool.execute({}, {
+      title: "No spec",
+      definitionOfDone: "dod",
+      stoppingPoint: "stop",
+      scopePaths: ["a.js"],
+      authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write it" },
+    });
+    const value = result.details;
+    assert.equal(value.ok, false);
+    assert.equal(value.persisted, false);
+    assert.equal(value.code, "invalid-input");
+    assert.ok(value.reason.includes("specification"));
+    assert.ok(Array.isArray(value.errors) && value.errors.length > 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("write tool: writer-lock-held surfaces as a structured failure, not a throw", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "board1-"));
+  const boardPath = join(dir, "TASKS.md");
+  try {
+    writeFileSync(boardPath, serializeBoard([baseCard()], { surface: "tasks" }));
+    const tools = [];
+    registerKanbanBoardTools({ registerTool: (t) => tools.push(t) }, { boardPath });
+    const tool = tools.find((t) => t.name === "agentic_kanban_board_write");
+    // Hold the writer lock across the tool call by planting a live lock file
+    // with a fresh token (the real writer's lock semantics).
+    writeFileSync(writerLockPath(boardPath), randomBytes(16).toString("hex") + "\n"); // a fresh, non-stale lock
+    const result = await tool.execute({}, {
+      title: "Contended",
+      specification: "spec",
+      definitionOfDone: "dod",
+      stoppingPoint: "stop",
+      scopePaths: ["a.js"],
+      authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write it" },
+    });
+    const value = result.details;
+    assert.equal(value.ok, false);
+    assert.equal(value.persisted, false);
+    assert.equal(value.code, "writer-lock-held");
+    assert.ok(value.reason.includes("lock"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("write tool: board-unavailable mid-call returns a structured failure, no write", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "board1-"));
+  const boardPath = join(dir, "TASKS.md");
+  try {
+    writeFileSync(boardPath, serializeBoard([baseCard()], { surface: "tasks" }));
+    const tools = [];
+    registerKanbanBoardTools({ registerTool: (t) => tools.push(t) }, { boardPath });
+    const tool = tools.find((t) => t.name === "agentic_kanban_board_write");
+    rmSync(boardPath); // removed after registration
+    const result = await tool.execute({}, {
+      title: "Ghost",
+      specification: "spec",
+      definitionOfDone: "dod",
+      stoppingPoint: "stop",
+      scopePaths: ["a.js"],
+      authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write it" },
+    });
+    const value = result.details;
+    assert.equal(value.ok, false);
+    assert.equal(value.persisted, false);
+    assert.equal(value.boardUnavailable, true);
+    assert.equal(value.code, "board-unavailable");
+    assert.ok(value.reason.includes("board-unavailable"));
+    assert.equal(existsSync(boardPath), false, "no board file must be recreated");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
