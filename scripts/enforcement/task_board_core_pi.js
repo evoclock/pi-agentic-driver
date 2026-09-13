@@ -988,11 +988,12 @@ export function observeBoardProvider({ boardPath }) {
   return { present, boardPath: present ? boardPath : null };
 }
 
-export function registerKanbanBoardTools(pi, { boardPath } = {}) {
-  const observation = observeBoardProvider({ boardPath });
-  if (!observation.present) return { registered: [], observation };
-  // Additive, fail-closed: registered only behind the observation,
-  // so removing the board file removes the surface (§5).
+export function registerKanbanBoardTools(pi, { resolveBoardPath, boardPath } = {}) {
+  // Tools register unconditionally; the board is resolved per call from the
+  // calling session's working directory (Pi extensions have no ctx at
+  // registration time). A workspace with no board file gets a structured
+  // board-unavailable result per call, so the surface stays reversible (§5):
+  // no board, nothing happens.
   const registered = [];
   if (typeof pi?.registerTool === "function") {
     pi.registerTool({
@@ -1000,25 +1001,25 @@ export function registerKanbanBoardTools(pi, { boardPath } = {}) {
       label: "Kanban Board",
       description: "Read-only view of the validated task board: lanes, flags, priorities, dependencies, and dispatchability. The board is additive and grants no authority; agents read it and act within card states.",
       parameters: { type: "object", additionalProperties: false, properties: {} },
-      async execute() {
-        // F7(b): every tool call re-observes the board. If the board file was
-        // removed after registration, return an observed board-unavailable
-        // result instead of silently serving a stale board. Registration
-        // stays; the surface is gated per call.
-        if (!existsSync(observation.boardPath)) {
+      async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+        // The board is resolved per call from the calling session's working
+        // directory. No board in this workspace: structured board-unavailable,
+        // nothing happens.
+        const resolvedBoardPath = (typeof resolveBoardPath === "function" ? resolveBoardPath(ctx?.cwd) : null) ?? boardPath ?? null;
+        if (resolvedBoardPath === null || !existsSync(resolvedBoardPath)) {
           const value = {
             ok: false,
             nonAuthorizing: true,
             persisted: false,
             boardUnavailable: true,
             cards: [],
-            errors: ["board file is no longer present (board-unavailable)"],
+            errors: ["no board.md or TASKS.md in this workspace (board-unavailable)"],
           };
           return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
         }
         let value;
         try {
-          const markdown = readFileSync(observation.boardPath, "utf8");
+          const markdown = readFileSync(resolvedBoardPath, "utf8");
           const validated = validateBoard(markdown);
           value = validated.ok
             ? { ok: true, nonAuthorizing: true, persisted: false, cards: validated.cards, errors: [] }
@@ -1075,18 +1076,18 @@ export function registerKanbanBoardTools(pi, { boardPath } = {}) {
         },
         required: ["title", "specification", "definitionOfDone", "stoppingPoint", "scopePaths", "authority"],
       },
-      async execute(_toolContext, input) {
-        // F7(b): re-observe the board on every call. If the board file was
-        // removed after registration, return board-unavailable instead of
-        // writing to a stale path.
-        if (!existsSync(observation.boardPath)) {
+      async execute(_toolContext, input, _signal, _onUpdate, ctx) {
+        // Resolve the board per call from the calling session's working
+        // directory. No board here: structured board-unavailable, no write.
+        const resolvedBoardPath = (typeof resolveBoardPath === "function" ? resolveBoardPath(ctx?.cwd) : null) ?? boardPath ?? null;
+        if (resolvedBoardPath === null || !existsSync(resolvedBoardPath)) {
           const value = {
             ok: false,
             persisted: false,
             boardUnavailable: true,
             code: "board-unavailable",
-            reason: "board file is no longer present (board-unavailable)",
-            errors: ["board file is no longer present (board-unavailable)"],
+            reason: "no board.md or TASKS.md in this workspace (board-unavailable)",
+            errors: ["no board.md or TASKS.md in this workspace (board-unavailable)"],
           };
           return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
         }
@@ -1132,7 +1133,7 @@ export function registerKanbanBoardTools(pi, { boardPath } = {}) {
         let result;
         try {
           result = writeCard({
-            boardPath: observation.boardPath,
+            boardPath: resolvedBoardPath,
             input: writerInput,
             authority: input?.authority,
             registries: {},
@@ -1179,5 +1180,5 @@ export function registerKanbanBoardTools(pi, { boardPath } = {}) {
     });
     registered.push("agentic_kanban_board_write");
   }
-  return { registered, observation };
+  return { registered };
 }
