@@ -248,7 +248,11 @@ function parseCardLine(line, surface, checkboxState = null) {
 
 function laneFromHeading(heading) {
   const name = heading.replace(/^##\s*/, "").trim().toLowerCase();
-  return LANES.includes(name) ? name : null;
+  if (LANES.includes(name)) return name;
+  // Obsidian display lane names (the derived projection's headings) map onto
+  // the canonical closed lanes — one semantic model, two surfaces (§1).
+  const display = { backlog: "backlog", "in progress": "in-progress", review: "review", done: "done" };
+  return display[name] ?? null;
 }
 
 export function parseBoard(markdown, { surface = "auto" } = {}) {
@@ -552,6 +556,49 @@ export function serializeBoard(cards, { surface }) {
 // validates, persists atomically, records the authority source. Models never
 // supply identifiers or hashes.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// The Obsidian projection (§2 derived projection). After every successful
+// write/update/delete to the canonical TASKS.md board, a sibling projection
+// file is RECOMPUTED from the canonical Markdown — never incrementally
+// patched, never read back as authority. The read tool (agentic_kanban_board)
+// reads only the canonical board file; if the canonical board is deleted the
+// projection is stale-by-design and is ignored by every reader. The
+// projection exists purely so the Obsidian Kanban plugin can render the same
+// semantic model (§1: one semantic model, two surfaces).
+//
+// Projection path: a sibling "board.md" next to the canonical board. When the
+// canonical board is itself named board.md (test/dev setups), the projection
+// is "board.projection.md" so the canonical file is never overwritten by its
+// own view.
+// ---------------------------------------------------------------------------
+
+export function projectionPath(boardPath) {
+  const file = boardPath.split("/").pop();
+  const name = file === "board.md" ? "board.projection.md" : "board.md";
+  return join(dirname(boardPath), name);
+}
+
+// Recompute the projection from the canonical cards. Best-effort relative to
+// the authoritative write: a projection failure is reported but never rolls
+// back or invalidates the canonical persist.
+export function writeProjection(boardPath, cards) {
+  const path = projectionPath(boardPath);
+  try {
+    const frontmatter = "---\nkanban-plugin: board\n---\n\n";
+    const body = serializeBoard(cards, { surface: "obsidian" })
+      .replace(/^## backlog$/m, "## Backlog")
+      .replace(/^## in-progress$/m, "## In Progress")
+      .replace(/^## review$/m, "## Review")
+      .replace(/^## done$/m, "## Done");
+    const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`;
+    writeFileSync(tmpPath, frontmatter + body, "utf8");
+    renameSync(tmpPath, path);
+    return { written: true, path, error: null };
+  } catch (error) {
+    return { written: false, path, error: String(error?.message || error).slice(0, 512) };
+  }
+}
 
 export function allocateCardId(cards, { prefix = "T" } = {}) {
   let max = 0;
@@ -893,7 +940,237 @@ function writeCardLocked({ boardPath, input, authority, registries, surface, now
   state.highWaterMark = nextNumber;
   if (!state.issuedCardIds.includes(cardId)) state.issuedCardIds.push(cardId);
   writeWriterState(statePath, state);
-  return { ok: true, cardId, card: Object.freeze({ ...card }), persisted: true, ...(now ? { now } : {}) };
+  // §2 derived projection: recomputed from the just-persisted canonical board
+  // on every mutation; a view only, never authority, stale-by-design if the
+  // canonical board is removed.
+  const projection = writeProjection(boardPath, [...existingCards, card]);
+  return { ok: true, cardId, card: Object.freeze({ ...card }), persisted: true, projection, ...(now ? { now } : {}) };
+}
+
+// ---------------------------------------------------------------------------
+// Card update and delete (§3.5): every board operation a user could express
+// goes through the trusted writer with a REQUIRED authority record, recorded
+// with the same HMAC + provenance discipline as creation. The card hash is
+// recomputed after any change; spec/DoD text updates recompute their hashes;
+// completion (done=true) requires human authority — an instruction or an
+// approved proposal — never an agent report alone.
+// ---------------------------------------------------------------------------
+
+const UPDATABLE_LIST_FIELDS = [
+  ["scopePaths", "scope"],
+  ["capabilities", "capabilities"],
+  ["dependencies", "dependencies"],
+  ["tags", "tags"],
+];
+
+// Apply a changes subset to a parsed card. Returns a plain updated card (hash
+// not yet recomputed) or an error descriptor.
+function applyCardChanges(card, changes) {
+  const updated = { ...card, flags: [...(card.flags ?? [])] };
+  const changed = [];
+  const c = changes ?? {};
+
+  if (c.lane !== undefined) {
+    if (!LANES.includes(c.lane)) {
+      return { error: { code: "invalid-lane", errors: [`lane "${c.lane}" is not one of ${LANES.join(", ")}`] } };
+    }
+    updated.lane = c.lane;
+    changed.push("lane");
+  }
+  if (c.done !== undefined) {
+    updated.done = Boolean(c.done);
+    // Moving to done sets the done checkbox AND the lane (§1 lifecycle).
+    if (c.done) updated.lane = "done";
+    changed.push("done");
+  }
+  if (c.flags !== undefined) {
+    // Accept {add: [], remove: []} or a full replacement array.
+    if (Array.isArray(c.flags)) {
+      updated.flags = [...c.flags];
+    } else if (c.flags && typeof c.flags === "object") {
+      const set = new Set(updated.flags);
+      for (const flag of c.flags.add ?? []) set.add(flag);
+      for (const flag of c.flags.remove ?? []) set.delete(flag);
+      updated.flags = [...set];
+    } else {
+      return { error: { code: "invalid-flags", errors: ["flags must be an array or {add, remove}"] } };
+    }
+    changed.push("flags");
+  }
+  if (c.title !== undefined) {
+    if (typeof c.title !== "string" || c.title.trim() === "") {
+      return { error: { code: "invalid-title", errors: ["title must be a non-empty string"] } };
+    }
+    updated.title = sanitizeFreeText(c.title);
+    changed.push("title");
+  }
+  if (c.description !== undefined) {
+    updated.description = sanitizeFreeText(c.description);
+    changed.push("description");
+  }
+  if (c.priority !== undefined) {
+    if (c.priority !== null && !PRIORITIES.includes(c.priority)) {
+      return { error: { code: "invalid-priority", errors: [`priority "${c.priority}" is not one of ${PRIORITIES.join(", ")}`] } };
+    }
+    updated.priority = c.priority;
+    changed.push("priority");
+  }
+  for (const [textField, hashField] of [["specification", "specHash", "specText"], ["definitionOfDone", "dodHash", "dodText"]]) {
+    if (c[textField] !== undefined) {
+      const text = c[textField] === null ? null : nfc(String(c[textField]));
+      if (text !== null && text.trim() === "") {
+        return { error: { code: textField === "specification" ? "empty-specification" : "empty-definition-of-done", errors: [`${textField} text must be non-empty`] } };
+      }
+      updated[textField === "specification" ? "specText" : "dodText"] = text;
+      updated[hashField] = text !== null ? computeSpecHash(text) : null;
+      changed.push(textField);
+    }
+  }
+  if (c.stoppingPoint !== undefined) {
+    updated.stoppingPoint = c.stoppingPoint === null ? null : sanitizeFreeText(c.stoppingPoint);
+    changed.push("stoppingPoint");
+  }
+  for (const [inputKey, cardKey] of UPDATABLE_LIST_FIELDS) {
+    if (c[inputKey] !== undefined) {
+      if (!Array.isArray(c[inputKey])) {
+        return { error: { code: `invalid-${inputKey}`, errors: [`${inputKey} must be an array (full replacement list)`] } };
+      }
+      updated[cardKey] = [...c[inputKey]];
+      changed.push(inputKey);
+    }
+  }
+  if (c.base !== undefined) {
+    updated.base = c.base;
+    changed.push("base");
+  }
+  if (c.dueDate !== undefined) {
+    updated.due = c.dueDate;
+    changed.push("dueDate");
+  }
+  if (c.role !== undefined) {
+    updated.role = c.role;
+    changed.push("role");
+  }
+  return { updated, changed };
+}
+
+// Update an existing card through the trusted writer. `changes` is any subset
+// of: lane, done, flags, title, description, priority, specification,
+// definitionOfDone, stoppingPoint, scopePaths, capabilities, dependencies
+// (full replacement list), base, dueDate, role, tags. The authority record is
+// REQUIRED and re-recorded (HMAC bound to the recomputed card hash).
+export function updateCard({ boardPath, cardId, changes, authority, registries = {}, surface = "tasks", now = null }) {
+  if (typeof boardPath !== "string" || boardPath === "") {
+    throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
+  }
+  if (typeof cardId !== "string" || cardId === "") {
+    throw Object.assign(new Error("cardId is required"), { code: "card-id-required" });
+  }
+  return withWriterLock(boardPath, () => updateCardLocked({ boardPath, cardId, changes, authority, registries, surface, now }));
+}
+
+function updateCardLocked({ boardPath, cardId, changes, authority, registries, surface, now }) {
+  if (!existsSync(boardPath)) {
+    return { ok: false, code: "board-unavailable", reason: "board file is no longer present (board-unavailable)", errors: ["board file is no longer present (board-unavailable)"], persisted: false };
+  }
+  const validatedBoard = validateBoard(readFileSync(boardPath, "utf8"), registries);
+  if (!validatedBoard.ok) {
+    return { ok: false, code: "board-invalid", errors: validatedBoard.errors, persisted: false };
+  }
+  const index = validatedBoard.cards.findIndex((card) => card.cardId === cardId);
+  if (index === -1) {
+    return { ok: false, code: "card-not-found", errors: [`cardId "${cardId}" does not exist on the board`], persisted: false };
+  }
+  // Completion is human-only (§3.1): marking a card done requires the
+  // authority source to be an instruction or an approved report proposal.
+  // An agent report alone is never completion.
+  if (changes?.done === true) {
+    const source = authority?.source;
+    if (source !== "instruction" && source !== "report-proposal") {
+      return {
+        ok: false,
+        code: "completion-authority-required",
+        errors: ["marking a card done requires human authority: an instruction or an approved report proposal; an agent report alone is never completion"],
+        persisted: false,
+        cardId,
+      };
+    }
+  }
+  // The authority record is REQUIRED for every mutation and is validated
+  // exactly as at creation (recordAuthoritySource throws on malformation).
+  const record = recordAuthoritySource(authority);
+  const { updated, changed, error } = applyCardChanges(validatedBoard.cards[index], changes);
+  if (error) return { ok: false, code: error.code, errors: error.errors, persisted: false, cardId };
+  if (changed.length === 0) {
+    return { ok: false, code: "no-changes", errors: ["changes must contain at least one updatable field"], persisted: false, cardId };
+  }
+  const validation = validateCard(updated, registries);
+  if (!validation.ok) {
+    return { ok: false, code: "validation-failed", errors: validation.errors, persisted: false, cardId };
+  }
+  // The card hash is recomputed after ANY change (§1 hash binding).
+  updated.hash = computeCardHash(updated);
+  // F1: the re-recorded authority HMAC binds to the NEW card hash.
+  updated.authoritySource = record;
+  const statePath = writerStatePath(boardPath);
+  const state = readWriterState(statePath);
+  if (state.secret === null) {
+    return { ok: false, code: "writer-state-unavailable", errors: ["writer state file has no secret (fails closed)"], persisted: false, cardId };
+  }
+  updated.authorityWriterHmac = authorityRecordHmac(record, state.secret, updated.hash);
+  const cards = validatedBoard.cards.map((card, i) => (i === index ? updated : card));
+  const serialized = serializeBoard(cards, { surface });
+  const roundTrip = validateBoard(serialized, registries);
+  if (!roundTrip.ok) {
+    return { ok: false, code: "serialization-invalid", errors: roundTrip.errors, persisted: false, cardId };
+  }
+  const tmpPath = `${boardPath}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmpPath, serialized, "utf8");
+  renameSync(tmpPath, boardPath);
+  // Derived projection recomputed from the canonical board after the mutation.
+  const projection = writeProjection(boardPath, cards);
+  return { ok: true, cardId, card: Object.freeze({ ...updated }), changedFields: changed, persisted: true, projection, ...(now ? { now } : {}) };
+}
+
+// Remove a card from the board through the trusted writer. The issued-ID
+// ledger KEEPS the ID forever — a deleted cardId is never reused. Deletion is
+// a consequential action and requires the same REQUIRED authority record.
+export function deleteCard({ boardPath, cardId, authority, registries = {}, surface = "tasks", now = null }) {
+  if (typeof boardPath !== "string" || boardPath === "") {
+    throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
+  }
+  if (typeof cardId !== "string" || cardId === "") {
+    throw Object.assign(new Error("cardId is required"), { code: "card-id-required" });
+  }
+  return withWriterLock(boardPath, () => deleteCardLocked({ boardPath, cardId, authority, registries, surface, now }));
+}
+
+function deleteCardLocked({ boardPath, cardId, authority, registries, surface, now }) {
+  if (!existsSync(boardPath)) {
+    return { ok: false, code: "board-unavailable", reason: "board file is no longer present (board-unavailable)", errors: ["board file is no longer present (board-unavailable)"], persisted: false };
+  }
+  const validatedBoard = validateBoard(readFileSync(boardPath, "utf8"), registries);
+  if (!validatedBoard.ok) {
+    return { ok: false, code: "board-invalid", errors: validatedBoard.errors, persisted: false };
+  }
+  if (!validatedBoard.cards.some((card) => card.cardId === cardId)) {
+    return { ok: false, code: "card-not-found", errors: [`cardId "${cardId}" does not exist on the board`], persisted: false };
+  }
+  // Authority is REQUIRED for deletion too; validate exactly as at creation.
+  recordAuthoritySource(authority);
+  const cards = validatedBoard.cards.filter((card) => card.cardId !== cardId);
+  const serialized = cards.length > 0 ? serializeBoard(cards, { surface }) : "";
+  const roundTrip = validateBoard(serialized, registries);
+  if (!roundTrip.ok) {
+    // A dangling dependency on the deleted card fails closed.
+    return { ok: false, code: "dependency-referenced", errors: roundTrip.errors, persisted: false, cardId };
+  }
+  const tmpPath = `${boardPath}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmpPath, serialized, "utf8");
+  renameSync(tmpPath, boardPath);
+  // The issued-ID ledger keeps the deleted ID forever — never reused.
+  const projection = writeProjection(boardPath, cards);
+  return { ok: true, cardId, removed: true, persisted: true, projection, ...(now ? { now } : {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -988,13 +1265,33 @@ export function observeBoardProvider({ boardPath }) {
   return { present, boardPath: present ? boardPath : null };
 }
 
-export function registerKanbanBoardTools(pi, { resolveBoardPath, boardPath } = {}) {
-  // Tools register unconditionally; the board is resolved per call from the
-  // calling session's working directory (Pi extensions have no ctx at
-  // registration time). A workspace with no board file gets a structured
-  // board-unavailable result per call, so the surface stays reversible (§5):
-  // no board, nothing happens.
+export function registerKanbanBoardTools(pi, { boardPath = null, resolveBoardPath = null } = {}) {
+  // Board resolution happens per tool call, not at registration: Pi
+  // extensions receive only the ExtensionAPI at registration (ctx is
+  // per-tool-call), so a static boardPath observed at startup is wrong for
+  // multi-workspace sessions and undefined cwd breaks resolution entirely.
+  // Registration is unconditional; the surface is gated per call — no board
+  // for the calling workspace yields a structured board-unavailable result
+  // (reversibility preserved: no board file, nothing happens).
+  const boardPathFor = (ctx) => {
+    if (typeof resolveBoardPath === "function") return resolveBoardPath(ctx);
+    return typeof boardPath === "string" && boardPath !== "" ? boardPath : null;
+  };
+  const observation = observeBoardProvider({ boardPath: boardPathFor(undefined) ?? undefined });
   const registered = [];
+  const unavailableValue = (extra = {}) => ({
+    ok: false,
+    persisted: false,
+    boardUnavailable: true,
+    code: "board-unavailable",
+    reason: "no board file found for this workspace (board-unavailable)",
+    errors: ["no board file found for this workspace (board-unavailable)"],
+    ...extra,
+  });
+  const unavailableResult = (extra = {}) => {
+    const value = unavailableValue(extra);
+    return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+  };
   if (typeof pi?.registerTool === "function") {
     pi.registerTool({
       name: "agentic_kanban_board",
@@ -1002,24 +1299,16 @@ export function registerKanbanBoardTools(pi, { resolveBoardPath, boardPath } = {
       description: "Read-only view of the validated task board: lanes, flags, priorities, dependencies, and dispatchability. The board is additive and grants no authority; agents read it and act within card states.",
       parameters: { type: "object", additionalProperties: false, properties: {} },
       async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-        // The board is resolved per call from the calling session's working
-        // directory. No board in this workspace: structured board-unavailable,
-        // nothing happens.
-        const resolvedBoardPath = (typeof resolveBoardPath === "function" ? resolveBoardPath(ctx?.cwd) : null) ?? boardPath ?? null;
-        if (resolvedBoardPath === null || !existsSync(resolvedBoardPath)) {
-          const value = {
-            ok: false,
-            nonAuthorizing: true,
-            persisted: false,
-            boardUnavailable: true,
-            cards: [],
-            errors: ["no board.md or TASKS.md in this workspace (board-unavailable)"],
-          };
-          return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+        // Per-call board resolution + F7(b) re-observation. No board for the
+        // calling workspace, or the board removed after registration:
+        // observed board-unavailable, never a stale board, never a throw.
+        const activeBoardPath = boardPathFor(ctx);
+        if (!activeBoardPath || !existsSync(activeBoardPath)) {
+          return unavailableResult({ nonAuthorizing: true, cards: [] });
         }
         let value;
         try {
-          const markdown = readFileSync(resolvedBoardPath, "utf8");
+          const markdown = readFileSync(activeBoardPath, "utf8");
           const validated = validateBoard(markdown);
           value = validated.ok
             ? { ok: true, nonAuthorizing: true, persisted: false, cards: validated.cards, errors: [] }
@@ -1076,27 +1365,16 @@ export function registerKanbanBoardTools(pi, { resolveBoardPath, boardPath } = {
         },
         required: ["title", "specification", "definitionOfDone", "stoppingPoint", "scopePaths", "authority"],
       },
-      async execute(_toolContext, input, _signal, _onUpdate, ctx) {
-        // Resolve the board per call from the calling session's working
-        // directory. No board here: structured board-unavailable, no write.
-        let resolvedBoardPath = (typeof resolveBoardPath === "function" ? resolveBoardPath(ctx?.cwd) : null) ?? boardPath ?? null;
-        // The write tool bootstraps: a MISSING board file is fine (the writer
-        // creates it fresh under the lock). When the resolver finds no board,
-        // fall back to the canonical board.md in the workspace so the writer
-        // can create it.
-        if (resolvedBoardPath === null && typeof ctx?.cwd === "string" && ctx.cwd !== "") {
-          resolvedBoardPath = join(ctx.cwd, "TASKS.md");
-        }
-        if (resolvedBoardPath === null) {
-          const value = {
-            ok: false,
-            persisted: false,
-            boardUnavailable: true,
-            code: "board-unavailable",
-            reason: "no board.md or TASKS.md in this workspace (board-unavailable)",
-            errors: ["no board.md or TASKS.md in this workspace (board-unavailable)"],
-          };
-          return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+      async execute(_toolCallId, input, _signal, _onUpdate, ctx) {
+        // Per-call board resolution + F7(b) re-observation. No board for the
+        // calling workspace, or the board removed after registration:
+        // structured board-unavailable instead of writing to a stale path.
+        const activeBoardPath = boardPathFor(ctx);
+        // The write tool bootstraps: a missing board file is fine (the writer
+        // creates it fresh under the lock). Only an unresolvable workspace is
+        // refused here.
+        if (!activeBoardPath) {
+          return unavailableResult();
         }
         // The writer allocates the cardId and computes all hashes; the tool
         // forwards only content and the authority record. Input is normalized
@@ -1140,15 +1418,14 @@ export function registerKanbanBoardTools(pi, { resolveBoardPath, boardPath } = {
         let result;
         try {
           result = writeCard({
-            boardPath: resolvedBoardPath,
+            boardPath: activeBoardPath,
             input: writerInput,
             authority: input?.authority,
             registries: {},
             surface: "tasks",
-            // No requireExistingBoard here: the write tool bootstraps a
-            // fresh board when none exists (§3.4/§5). Recreation is safe —
-            // the writer builds fresh content only, and every card still
-            // requires a genuine authority record.
+            // No requireExistingBoard: the write tool bootstraps a fresh
+            // board when none exists. Recreation is safe — fresh content only,
+            // and every card still requires a genuine authority record.
           });
         } catch (error) {
           const code = typeof error?.code === "string" ? error.code : "writer-error";
@@ -1190,5 +1467,133 @@ export function registerKanbanBoardTools(pi, { resolveBoardPath, boardPath } = {
     });
     registered.push("agentic_kanban_board_write");
   }
-  return { registered };
+  // The update/delete tool (§3.5): card updates and removal go through the
+  // trusted writer only, with the same REQUIRED genuine authority record as
+  // creation. operation "update" applies a changes subset to an existing
+  // card (lane move, done, flags, field updates, dependency replacement);
+  // operation "delete" removes the card (the issued-ID ledger keeps the ID
+  // forever). Completion (done=true) is enforced by the writer: only an
+  // instruction or an approved report proposal completes a card — an agent
+  // report alone is never completion.
+  if (typeof pi?.registerTool === "function") {
+    pi.registerTool({
+      name: "agentic_kanban_board_update",
+      label: "Kanban Board Update",
+      description:
+        "Update or delete an existing task-board card through the trusted board writer. Governance: all writes go through the trusted, deterministic writer — never through model-authored Markdown. An authority record is REQUIRED and must be genuine: the user's actual instruction (or approved report proposal) quoted verbatim; never invent, paraphrase-as-quote, or fabricate one. Marking a card done requires human authority — an agent report alone is never completion. Do not supply hashes or identifiers other than the existing cardId.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          operation: { type: "string", enum: ["update", "delete"], description: "update (apply changes to a card) or delete (remove the card; its cardId is never reused)." },
+          cardId: { type: "string", description: "The existing cardId to update or delete." },
+          lane: { type: "string", enum: [...LANES], description: "update: move the card to this lane." },
+          done: { type: "boolean", description: "update: mark done (true) or un-done (false). done=true sets the done checkbox and the done lane, and requires human authority." },
+          flags: {
+            type: "object",
+            description: "update: add/remove flags, e.g. {add: ['blocked']} or {remove: ['blocked']}.",
+            additionalProperties: false,
+            properties: {
+              add: { type: "array", items: { type: "string", enum: [...FLAGS] } },
+              remove: { type: "array", items: { type: "string", enum: [...FLAGS] } },
+            },
+          },
+          title: { type: "string", description: "update: new title." },
+          description: { type: "string", description: "update: new description." },
+          priority: { type: "string", enum: [...PRIORITIES], description: "update: new priority (P0-P3)." },
+          specification: { type: "string", description: "update: new specification text (hash recomputed by the writer)." },
+          definitionOfDone: { type: "string", description: "update: new definition-of-done text (hash recomputed by the writer)." },
+          stoppingPoint: { type: "string", description: "update: new stopping point." },
+          scopePaths: { type: "array", items: { type: "string" }, description: "update: full replacement scope-path list." },
+          capabilities: { type: "array", items: { type: "string" }, description: "update: full replacement capability list." },
+          dependencies: { type: "array", items: { type: "string" }, description: "update: full replacement ordered blocked-by cardId list (add/remove by supplying the new complete list)." },
+          tags: { type: "array", items: { type: "string" }, description: "update: full replacement tag list." },
+          base: { type: "string", description: "update: exact base revision (full 40-hex Git commit SHA)." },
+          dueDate: { type: "string", description: "update: due date, ISO yyyy-mm-dd." },
+          role: { type: "string", description: "update: assigned role label." },
+          authority: {
+            type: "object",
+            description: "REQUIRED authority record (§3.1/§3.5): { source: 'instruction' | 'report-proposal', sessionOrReportId, quotedInstruction }. Quote the user's actual instruction verbatim; never invent one.",
+            additionalProperties: false,
+            properties: {
+              source: { type: "string", enum: ["instruction", "report-proposal"] },
+              sessionOrReportId: { type: "string" },
+              quotedInstruction: { type: "string", description: "The user's actual words. Required; a digest alone is not accepted through this tool." },
+            },
+            required: ["source", "sessionOrReportId", "quotedInstruction"],
+          },
+        },
+        required: ["operation", "cardId", "authority"],
+      },
+      async execute(_toolCallId, input, _signal, _onUpdate, ctx) {
+        const activeBoardPath = boardPathFor(ctx);
+        if (!activeBoardPath || !existsSync(activeBoardPath)) {
+          return unavailableResult();
+        }
+        const operation = input?.operation;
+        if (operation !== "update" && operation !== "delete") {
+          const value = { ok: false, persisted: false, code: "invalid-input", reason: "operation must be \"update\" or \"delete\"", errors: ["operation must be \"update\" or \"delete\""] };
+          return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+        }
+        if (typeof input?.cardId !== "string" || input.cardId === "") {
+          const value = { ok: false, persisted: false, code: "invalid-input", reason: "cardId is required", errors: ["cardId is required"] };
+          return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+        }
+        // Map the flat tool input onto the writer's changes subset. Absent
+        // fields are left untouched; list fields are full replacement lists.
+        const changes = {};
+        for (const key of ["lane", "done", "flags", "title", "description", "priority", "specification", "definitionOfDone", "stoppingPoint", "scopePaths", "capabilities", "dependencies", "tags", "base", "dueDate", "role"]) {
+          if (input?.[key] !== undefined) changes[key] = input[key];
+        }
+        let result;
+        try {
+          result = operation === "update"
+            ? updateCard({ boardPath: activeBoardPath, cardId: input.cardId, changes, authority: input?.authority, registries: {}, surface: "tasks" })
+            : deleteCard({ boardPath: activeBoardPath, cardId: input.cardId, authority: input?.authority, registries: {}, surface: "tasks" });
+        } catch (error) {
+          const code = typeof error?.code === "string" ? error.code : "writer-error";
+          const value = { ok: false, persisted: false, code, reason: String(error?.message || error).slice(0, 512), errors: [String(error?.message || error).slice(0, 512)] };
+          return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+        }
+        let value;
+        if (result.ok) {
+          value = operation === "update"
+            ? {
+                ok: true,
+                persisted: true,
+                operation,
+                cardId: result.card.cardId,
+                lane: result.card.lane,
+                done: Boolean(result.card.done),
+                flags: [...(result.card.flags ?? [])],
+                changedFields: result.changedFields,
+                hashPresent: Boolean(result.card.hash),
+                authorityWriterHmacPresent: Boolean(result.card.authorityWriterHmac),
+                authoritySource: { ...result.card.authoritySource },
+                projection: result.projection,
+              }
+            : {
+                ok: true,
+                persisted: true,
+                operation,
+                cardId: result.cardId,
+                removed: true,
+                projection: result.projection,
+              };
+        } else {
+          value = {
+            ok: false,
+            persisted: false,
+            code: result.code,
+            reason: (result.reason ?? (result.errors ?? []).join("; ")).slice(0, 512),
+            errors: result.errors ?? [],
+            ...(result.cardId ? { cardId: result.cardId } : {}),
+          };
+        }
+        return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+      },
+    });
+    registered.push("agentic_kanban_board_update");
+  }
+  return { registered, observation: { ...observation, boardPath: observation.boardPath } };
 }

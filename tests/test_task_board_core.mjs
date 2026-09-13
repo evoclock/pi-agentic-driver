@@ -869,54 +869,104 @@ test("B6 regression: titles and instruction text cannot inject field or comment 
 
 // --- §6 gate 4: reversal proof ------------------------------------------------
 
-test("reversal: tools register unconditionally; a workspace with no board gets board-unavailable per call", async () => {
-  const registered = [];
-  registerKanbanBoardTools({ registerTool: (tool) => registered.push(tool.name) }, {
-    resolveBoardPath: () => null,
-  });
-  assert.deepEqual(registered, ["agentic_kanban_board", "agentic_kanban_board_write"]);
-  // Per-call behavior: the read tool reports board-unavailable, changes nothing.
-  const readTool = registered[0];
-  const captured = [];
-  const pi = { registerTool: (tool) => captured.push(tool) };
-  registerKanbanBoardTools(pi, { resolveBoardPath: () => null });
-  const readResult = await captured[0].execute("t1", {}, undefined, undefined, { cwd: "/nonexistent-xyz" });
-  const readValue = JSON.parse(readResult.content[0].text);
-  assert.equal(readValue.ok, false);
-  assert.equal(readValue.boardUnavailable, true);
-  assert.equal(readValue.persisted, false);
+test("reversal: no board file means no observation and a per-call board-unavailable surface", async () => {
+  const observation = observeBoardProvider({ boardPath: "/nonexistent/board.md" });
+  assert.equal(observation.present, false);
+  // Registration is unconditional now; the observation happens per call.
+  const tools = [];
+  const registration = registerKanbanBoardTools(
+    { registerTool: (t) => tools.push(t) },
+    { resolveBoardPath: () => null },
+  );
+  assert.deepEqual(registration.registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update"]);
+  const readTool = tools.find((t) => t.name === "agentic_kanban_board");
+  const writeTool = tools.find((t) => t.name === "agentic_kanban_board_write");
+  const readResult = await readTool.execute("id", {}, null, null, {});
+  assert.equal(readResult.details.ok, false);
+  assert.equal(readResult.details.boardUnavailable, true);
+  const writeResult = await writeTool.execute("id", {
+    title: "x", specification: "s", definitionOfDone: "d", stoppingPoint: "sp", scopePaths: ["a"],
+    authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "q" },
+  }, null, null, {});
+  assert.equal(writeResult.details.ok, false);
+  assert.equal(writeResult.details.boardUnavailable, true);
+  assert.equal(writeResult.details.persisted, false);
+});
+
+test("reversal: provider observation happens per call on a real board file", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "board1-"));
+  const boardPath = join(dir, "board.md");
+  try {
+    writeFileSync(boardPath, serializeBoard([baseCard()], { surface: "tasks" }));
+    const observation = observeBoardProvider({ boardPath });
+    assert.equal(observation.present, true);
+    const registered = [];
+    const tools = [];
+    const registration = registerKanbanBoardTools({ registerTool: (tool) => { registered.push(tool.name); tools.push(tool); } }, {
+      resolveBoardPath: (ctx) => (ctx?.cwd === dir ? boardPath : null),
+    });
+    assert.deepEqual(registration.registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update"]);
+    assert.deepEqual(registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update"]);
+    // With the board present, the read tool serves it.
+    const readTool = tools.find((t) => t.name === "agentic_kanban_board");
+    const served = await readTool.execute("id", {}, null, null, { cwd: dir });
+    assert.equal(served.details.ok, true);
+    // Without a resolvable board, the same tools report unavailable.
+    const unserved = await readTool.execute("id", {}, null, null, { cwd: "/nonexistent-xyz" });
+    assert.equal(unserved.details.ok, false);
+    assert.equal(unserved.details.boardUnavailable, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("B7 regression: the extension resolves the board path from the workspace", async () => {
   const extensionModule = await import("../extensions/task-board.ts");
-  // Documented locations are supported.
-  assert.equal(extensionModule.resolveBoardPath("/nonexistent-xyz"), null);
+  // Documented behavior: a known workspace always yields a candidate path
+  // (existing board, or the canonical TASKS.md for bootstrap); unknown
+  // workspace input yields null.
   assert.equal(extensionModule.resolveBoardPath(""), null);
   assert.equal(extensionModule.resolveBoardPath(undefined), null);
+  assert.ok(extensionModule.resolveBoardPath("/nonexistent-xyz") !== null);
 
-  // Tools register unconditionally; per-call resolution decides availability.
+  // No board in the workspace: both tools still register (registration is
+  // unconditional; observation is per call) and calls report unavailable.
   const emptyDir = mkdtempSync(join(tmpdir(), "board1-"));
   try {
+    const registered = [];
     const tools = [];
-    const result = await extensionModule.default({ registerTool: (t) => tools.push(t) });
-    assert.deepEqual(result.registered, ["agentic_kanban_board", "agentic_kanban_board_write"]);
-    assert.deepEqual(tools.map((t) => t.name), ["agentic_kanban_board", "agentic_kanban_board_write"]);
-    // A call from a workspace with no board reports board-unavailable.
-    const readResult = await tools[0].execute("t1", {}, undefined, undefined, { cwd: emptyDir });
-    const readValue = JSON.parse(readResult.content[0].text);
-    assert.equal(readValue.boardUnavailable, true);
+    const result = await extensionModule.default({ registerTool: (t) => { registered.push(t.name); tools.push(t); } });
+    assert.deepEqual(registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update"]);
+    assert.deepEqual(result.registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update"]);
+    const readTool = tools.find((t) => t.name === "agentic_kanban_board");
+    const served = await readTool.execute("id", {}, null, null, { cwd: emptyDir });
+    assert.equal(served.details.ok, false);
+    assert.equal(served.details.boardUnavailable, true);
   } finally {
     rmSync(emptyDir, { recursive: true, force: true });
   }
+
+  // No ctx.cwd at all: resolution falls back to process.cwd() per call and
+  // still never throws at registration.
+  const fallbackRegistered = [];
+  const fallback = await extensionModule.default({ registerTool: (t) => fallbackRegistered.push(t.name) });
+  assert.deepEqual(fallback.registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update"]);
+  assert.deepEqual(fallbackRegistered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update"]);
 
   // A TASKS.md board in the workspace root: the tool registers.
   const tasksDir = mkdtempSync(join(tmpdir(), "board1-"));
   try {
     writeFileSync(join(tasksDir, "TASKS.md"), serializeBoard([baseCard()], { surface: "tasks" }));
     const registered = [];
-    const result = await extensionModule.default({ registerTool: (t) => registered.push(t.name), ctx: { cwd: tasksDir } });
-    assert.deepEqual(registered, ["agentic_kanban_board", "agentic_kanban_board_write"]);
-    assert.deepEqual(result.registered, ["agentic_kanban_board", "agentic_kanban_board_write"]);
+    const tools = [];
+    const result = await extensionModule.default({ registerTool: (t) => { registered.push(t.name); tools.push(t); } });
+    assert.deepEqual(registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update"]);
+    assert.deepEqual(result.registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update"]);
+    // The read tool serves the TASKS.md board resolved from ctx.cwd.
+    const readTool = tools.find((t) => t.name === "agentic_kanban_board");
+    const served = await readTool.execute("id", {}, null, null, { cwd: tasksDir });
+    assert.equal(served.details.ok, true);
+    assert.equal(served.details.cards.length, 1);
   } finally {
     rmSync(tasksDir, { recursive: true, force: true });
   }
@@ -926,8 +976,12 @@ test("B7 regression: the extension resolves the board path from the workspace", 
   try {
     writeFileSync(join(obsidianDir, "board.md"), serializeBoard([baseCard()], { surface: "obsidian" }));
     const registered = [];
-    await extensionModule.default({ registerTool: (t) => registered.push(t.name), ctx: { cwd: obsidianDir } });
-    assert.deepEqual(registered, ["agentic_kanban_board", "agentic_kanban_board_write"]);
+    const tools = [];
+    await extensionModule.default({ registerTool: (t) => { registered.push(t.name); tools.push(t); } });
+    assert.deepEqual(registered, ["agentic_kanban_board", "agentic_kanban_board_write", "agentic_kanban_board_update"]);
+    const readTool = tools.find((t) => t.name === "agentic_kanban_board");
+    const served = await readTool.execute("id", {}, null, null, { cwd: obsidianDir });
+    assert.equal(served.details.ok, true);
   } finally {
     rmSync(obsidianDir, { recursive: true, force: true });
   }
@@ -1375,38 +1429,30 @@ test("write tool with no board: bootstraps a fresh board; stale content does not
   }
 });
 
-test("write tool bootstraps a fresh board when the board file is gone (no stale resurrection)", async () => {
+test("write tool after board deletion: bootstraps fresh, never resurrects stale content", async () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "TASKS.md");
   try {
     writeFileSync(boardPath, serializeBoard([baseCard()], { surface: "tasks" }));
     const tools = [];
-    registerKanbanBoardTools({ registerTool: (t) => tools.push(t) }, { resolveBoardPath: (cwd) => join(cwd, "TASKS.md") });
+    registerKanbanBoardTools({ registerTool: (t) => tools.push(t) }, { boardPath });
     const tool = tools.find((t) => t.name === "agentic_kanban_board_write");
-
-    // The board vanishes, then a card is written: the writer creates a FRESH
-    // board (never restores the old content) and the new card still requires
-    // a genuine authority record. The old card must not reappear.
     rmSync(boardPath);
-    const authority = { source: "instruction", sessionOrReportId: "sess-42", quotedInstruction: "Write a card after the board was removed." };
     const result = await tool.execute({}, {
       title: "Fresh start",
-      specification: "Fresh spec after board removal.",
-      definitionOfDone: "Fresh board exists with only this card.",
-      stoppingPoint: "Stop after the fresh board is written.",
+      specification: "fresh spec",
+      definitionOfDone: "fresh dod",
+      stoppingPoint: "stop",
       scopePaths: ["src/"],
-      authority,
-    }, undefined, undefined, { cwd: dir });
-    const value = JSON.parse(result.content[0].text);
-    assert.equal(value.ok, true, `expected bootstrap success, got: ${JSON.stringify(value)}`);
-    assert.equal(value.persisted, true);
+      authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write it" },
+    });
+    const value = result.details;
+    assert.equal(value.ok, true, `expected bootstrap success: ${JSON.stringify(value)}`);
     const markdown = readFileSync(boardPath, "utf8");
     assert.ok(!markdown.includes("Example task"), "stale content must not be resurrected");
-    assert.ok(markdown.includes("Fresh start"));
-    // The fresh board has exactly one card: the new one.
-    const board = parseBoard(markdown);
-    assert.equal(board.cards.length, 1);
+    assert.equal(parseBoard(markdown).cards.length, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
