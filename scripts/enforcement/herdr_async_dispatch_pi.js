@@ -16,6 +16,7 @@ import {
   HERDR_COMMUNICATION_ACTIONS,
 } from "./herdr_communication_pi.js";
 import { isNativeTuiContext } from "./native_tui_context.js";
+import { validateEnvelopeForExecution, consumeEnvelope } from "./task_board_core_pi.js";
 
 export const WORKER_DISPATCH_TOOL = "agentic_worker_dispatch";
 export const WORKER_DISPATCH_SCHEMA = "agentic-driver.worker-dispatch.v1";
@@ -375,6 +376,33 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   }
   if (signal?.aborted) return finish("cancelled");
 
+  // Board-planned journey (item 2): when a journey executes under a board
+  // assignment envelope, the single-attempt lifecycle is enforced at this
+  // execution boundary — authenticated consumption, expiry, card-hash
+  // drift, repository drift, and HEAD/base/branch drift all fail closed
+  // BEFORE any work begins; completion consumes the envelope.
+  const board = options.board && typeof options.board === "object"
+    && typeof options.board.boardPath === "string" && options.board.envelope
+    ? options.board
+    : null;
+  if (board) {
+    let guard;
+    try {
+      guard = validateEnvelopeForExecution({ boardPath: board.boardPath, envelope: board.envelope });
+    } catch (error) {
+      journey.status = "failed";
+      journey.code = error?.code || "envelope-invalid";
+      journey.steps.push({ step: 0, taskId: null, status: "failed", error: String(error?.message || error).slice(0, 256) });
+      return finish("failed");
+    }
+    if (!guard.ok) {
+      journey.status = "failed";
+      journey.code = guard.code || "envelope-invalid";
+      journey.steps.push({ step: 0, taskId: null, status: "failed", error: guard.reason });
+      return finish("failed");
+    }
+  }
+
   for (let stepIndex = 1; stepIndex <= maxSteps; stepIndex += 1) {
     if (signal?.aborted) { journey.status = "cancelled"; return finish("cancelled"); }
 
@@ -523,6 +551,16 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   }
 
   journey.status = "completed";
+  // Item 2: a completed board-planned journey consumes its envelope attempt
+  // (single-attempt lifecycle). Consumption never marks the card done —
+  // completion is human-only (§3.1).
+  if (board) {
+    try {
+      consumeEnvelope({ boardPath: board.boardPath, envelopeId: board.envelope.envelopeId, reason: "completed" });
+    } catch (error) {
+      journey.code = error?.code || "envelope-consume-failed";
+    }
+  }
   return finish("completed");
   // Unreachable in correct use: every step either dispatches one pending
   // task, or the queue observation returns null and the journey ends with

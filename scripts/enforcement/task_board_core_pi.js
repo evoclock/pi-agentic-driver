@@ -645,13 +645,20 @@ function readWriterState(statePath) {
   try {
     const state = JSON.parse(readFileSync(statePath, "utf8"));
     const value = Number(state?.highWaterMark);
+    const generation = Number(state?.claimsGeneration);
     return {
       highWaterMark: Number.isInteger(value) && value >= 0 ? value : 0,
       secret: typeof state?.secret === "string" && state.secret !== "" ? state.secret : null,
       issuedCardIds: Array.isArray(state?.issuedCardIds) ? state.issuedCardIds.filter((id) => typeof id === "string") : [],
+      // Monotonic claims-generation anchor (deletion/rollback guard): the
+      // generation and digest of the LAST claims state this writer issued.
+      // A missing claims file is "fresh" only while no generation was ever
+      // issued; a lower generation or digest mismatch is replay/deletion.
+      claimsGeneration: Number.isInteger(generation) && generation >= 0 ? generation : 0,
+      claimsDigest: typeof state?.claimsDigest === "string" && state.claimsDigest !== "" ? state.claimsDigest : null,
     };
   } catch {
-    return { highWaterMark: 0, secret: null, issuedCardIds: [] };
+    return { highWaterMark: 0, secret: null, issuedCardIds: [], claimsGeneration: 0, claimsDigest: null };
   }
 }
 
@@ -1317,6 +1324,7 @@ function claimsFileHmac(value, secret) {
   return createHmac("sha256", secret)
     .update(canonicalJsonString({
       schema: value.schema,
+      generation: value.generation,
       transaction: value.transaction ?? null,
       claims: value.claims ?? [],
       consumedClaims: value.consumedClaims ?? [],
@@ -1324,60 +1332,134 @@ function claimsFileHmac(value, secret) {
     .digest("hex");
 }
 
+// Item 6: CLOSED, strictly validated shapes. Every record trusted by the
+// dispatcher has an exact key set and typed/pattern-checked values — unknown
+// or missing keys fail closed before anything is trusted.
+const ISO_TS_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+
+function exactKeys(value, keys) {
+  const actual = Object.keys(value ?? {}).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, i) => key === expected[i]);
+}
+
+const ENVELOPE_FIELDS = Object.freeze([
+  "schema", "envelopeId", "cardId", "cardHash", "repository", "startingRevision",
+  "baseRevision", "branch", "allowedPaths", "unchangedPaths", "capabilities",
+  "stoppingPoint", "acceptance", "placement", "interactionProfile", "risk",
+  "riskCeiling", "mode", "createdAt", "expiry",
+]);
+
+export function wellFormedEnvelope(env) {
+  if (env === null || typeof env !== "object" || Array.isArray(env) || !exactKeys(env, ENVELOPE_FIELDS)) return false;
+  if (env.schema !== ENVELOPE_SCHEMA) return false;
+  if (typeof env.envelopeId !== "string" || !/^[0-9a-f]{32}$/.test(env.envelopeId)) return false;
+  if (typeof env.cardId !== "string" || !CARD_ID_RE.test(env.cardId)) return false;
+  if (env.cardHash !== null && !/^[0-9a-f]{64}$/.test(env.cardHash)) return false;
+  if (typeof env.repository !== "string" || env.repository === "") return false;
+  if (env.startingRevision !== null && !COMMIT_SHA_RE.test(env.startingRevision)) return false;
+  if (env.baseRevision !== null && !COMMIT_SHA_RE.test(env.baseRevision)) return false;
+  if (typeof env.branch !== "string" || !/^board\//.test(env.branch)) return false;
+  if (!Array.isArray(env.allowedPaths) || !env.allowedPaths.every((p) => SAFE_PATH_RE.test(p))) return false;
+  if (!Array.isArray(env.unchangedPaths) || !env.unchangedPaths.every((p) => SAFE_PATH_RE.test(p))) return false;
+  if (!Array.isArray(env.capabilities) || !env.capabilities.every((c) => CAPABILITY_NAME_RE.test(c))) return false;
+  if (env.stoppingPoint !== null && typeof env.stoppingPoint !== "string") return false;
+  if (env.acceptance === null || typeof env.acceptance !== "object" || !exactKeys(env.acceptance, ["specHash", "dodHash"])) return false;
+  if (env.acceptance.specHash !== null && !/^[0-9a-f]{64}$/.test(env.acceptance.specHash)) return false;
+  if (env.acceptance.dodHash !== null && !/^[0-9a-f]{64}$/.test(env.acceptance.dodHash)) return false;
+  if (!PLACEMENTS.includes(env.placement)) return false;
+  if (!PLACEMENTS.includes(env.interactionProfile)) return false;
+  if (!RISK_LEVELS.includes(env.risk)) return false;
+  if (env.riskCeiling !== null && !RISK_LEVELS.includes(env.riskCeiling)) return false;
+  if (env.mode !== "automated") return false;
+  if (!ISO_TS_RE.test(env.createdAt) || !ISO_TS_RE.test(env.expiry)) return false;
+  return true;
+}
+
+const CLAIM_FIELDS = Object.freeze(["cardId", "claimedAt", "role", "envelopeId", "envelope"]);
+const CONSUMED_FIELDS = Object.freeze(["cardId", "envelopeId", "consumedAt", "reason"]);
+const CONSUMED_REASONS = Object.freeze(["expired", "reclaimed", "completed"]);
+const TRANSACTION_FIELDS = Object.freeze(["op", "cardId", "envelopeId", "at", "phase"]);
+const CLAIMS_STATE_FIELDS = Object.freeze(["schema", "generation", "transaction", "claims", "consumedClaims", "hmac"]);
+
 function wellFormedClaim(claim) {
-  return claim !== null && typeof claim === "object" && !Array.isArray(claim)
-    && typeof claim.cardId === "string"
-    && typeof claim.claimedAt === "string"
-    && typeof claim.role === "string"
-    && typeof claim.envelopeId === "string"
-    && claim.envelope !== null && typeof claim.envelope === "object";
+  return claim !== null && typeof claim === "object" && !Array.isArray(claim) && exactKeys(claim, CLAIM_FIELDS)
+    && CARD_ID_RE.test(claim.cardId)
+    && ISO_TS_RE.test(claim.claimedAt)
+    && ROLE_NAME_RE.test(claim.role)
+    && /^[0-9a-f]{32}$/.test(claim.envelopeId)
+    && wellFormedEnvelope(claim.envelope)
+    && claim.envelope.envelopeId === claim.envelopeId
+    && claim.envelope.cardId === claim.cardId;
 }
 
 function wellFormedConsumedClaim(claim) {
-  return claim !== null && typeof claim === "object" && !Array.isArray(claim)
-    && typeof claim.cardId === "string"
-    && typeof claim.envelopeId === "string"
-    && typeof claim.consumedAt === "string"
-    && typeof claim.reason === "string";
+  return claim !== null && typeof claim === "object" && !Array.isArray(claim) && exactKeys(claim, CONSUMED_FIELDS)
+    && CARD_ID_RE.test(claim.cardId)
+    && /^[0-9a-f]{32}$/.test(claim.envelopeId)
+    && ISO_TS_RE.test(claim.consumedAt)
+    && CONSUMED_REASONS.includes(claim.reason);
 }
 
-// Read and VERIFY the claims file. Missing file → empty state (a fresh board
-// has no claims). Malformed JSON, wrong shape, or an HMAC that does not
-// verify → {ok: false, reason} — the caller MUST fail closed (refuse
-// dispatch), never treat corruption as "no claims".
+function wellFormedTransaction(tx) {
+  return tx === null
+    || (typeof tx === "object" && !Array.isArray(tx) && exactKeys(tx, TRANSACTION_FIELDS)
+      && tx.op === "claim" && CARD_ID_RE.test(tx.cardId)
+      && /^[0-9a-f]{32}$/.test(tx.envelopeId) && ISO_TS_RE.test(tx.at)
+      && tx.phase === "claims-written");
+}
+
+// Read and VERIFY the claims file. Missing file → fresh ONLY while the
+// authenticated writer state proves no claims generation was ever issued;
+// once a generation is anchored, deletion fails closed. A generation older
+// than the anchored one, or a digest that does not match the anchored latest
+// digest, is replay of older correctly signed state — rejected. Malformed
+// JSON, wrong shape, or an HMAC that does not verify → {ok: false, reason};
+// the caller MUST fail closed (refuse dispatch).
 export function readClaimsState(boardPath) {
   const path = claimsPath(boardPath);
+  const writerState = readWriterState(writerStatePath(boardPath));
   if (!existsSync(path)) {
-    return { ok: true, missing: true, state: { transaction: null, claims: [], consumedClaims: [] } };
+    if (writerState.claimsDigest !== null || writerState.claimsGeneration > 0) {
+      return { ok: false, reason: "the claims file is missing but the writer state anchors issued claims state — deletion is rejected (fails closed)" };
+    }
+    return { ok: true, missing: true, state: { generation: 0, transaction: null, claims: [], consumedClaims: [] } };
   }
   const value = readJsonFile(path);
-  if (value === null || typeof value !== "object" || Array.isArray(value)
-    || !Array.isArray(value.claims) || (value.consumedClaims !== undefined && !Array.isArray(value.consumedClaims))) {
-    return { ok: false, reason: "the claims file is malformed (fails closed)" };
+  if (value === null || typeof value !== "object" || Array.isArray(value) || !exactKeys(value, CLAIMS_STATE_FIELDS)) {
+    return { ok: false, reason: "the claims file is malformed or has an unknown shape (fails closed)" };
   }
-  if (!value.claims.every(wellFormedClaim)
-    || !(value.consumedClaims ?? []).every(wellFormedConsumedClaim)) {
-    return { ok: false, reason: "the claims file contains a malformed claim record (fails closed)" };
+  if (!Array.isArray(value.claims) || !Array.isArray(value.consumedClaims)
+    || !Number.isInteger(value.generation) || value.generation < 0
+    || !wellFormedTransaction(value.transaction)
+    || !value.claims.every(wellFormedClaim)
+    || !value.consumedClaims.every(wellFormedConsumedClaim)) {
+    return { ok: false, reason: "the claims file contains a malformed record (fails closed)" };
   }
   // F2 integrity: an ACTIVE claim may never reference a consumed envelope —
   // a consumed envelope cannot be reused; only a new envelopeId is valid.
-  const consumedIds = new Set((value.consumedClaims ?? []).map((entry) => entry.envelopeId));
+  const consumedIds = new Set(value.consumedClaims.map((entry) => entry.envelopeId));
   if (value.claims.some((claim) => consumedIds.has(claim.envelopeId))) {
     return { ok: false, reason: "an active claim references a consumed envelope — the claims file is inconsistent (fails closed)" };
   }
-  const secret = readWriterState(writerStatePath(boardPath)).secret;
-  if (secret === null) {
+  if (writerState.secret === null) {
     return { ok: false, reason: "writer state file has no secret to verify the claims file (fails closed)" };
   }
-  if (typeof value.hmac !== "string" || value.hmac !== claimsFileHmac(value, secret)) {
+  if (typeof value.hmac !== "string" || value.hmac !== claimsFileHmac(value, writerState.secret)) {
     return { ok: false, reason: "the claims file HMAC does not verify — tampered or forged (fails closed)" };
+  }
+  // Deletion/rollback guard: the generation must be exactly the anchored
+  // latest (older = replay even if correctly signed; newer = not ours).
+  if (value.generation !== writerState.claimsGeneration) {
+    return { ok: false, reason: `claims generation ${value.generation} does not match the anchored generation ${writerState.claimsGeneration} — deletion or replay is rejected (fails closed)` };
   }
   return {
     ok: true,
     state: {
-      transaction: value.transaction ?? null,
+      generation: value.generation,
+      transaction: value.transaction,
       claims: value.claims,
-      consumedClaims: value.consumedClaims ?? [],
+      consumedClaims: value.consumedClaims,
     },
   };
 }
@@ -1393,18 +1475,32 @@ export function readClaims(boardPath) {
 }
 
 function writeClaims(boardPath, claims, { consumedClaims = null, transaction = null } = {}) {
-  const secret = readWriterState(writerStatePath(boardPath)).secret;
-  if (secret === null) {
+  const statePath = writerStatePath(boardPath);
+  const writerState = readWriterState(statePath);
+  if (writerState.secret === null) {
     throw Object.assign(new Error("writer state file has no secret (fails closed)"), { code: "writer-state-unavailable" });
   }
+  const previous = readClaimsState(boardPath);
+  const generation = (previous.state?.generation ?? writerState.claimsGeneration) + 1;
   const value = {
     schema: CLAIMS_SCHEMA,
+    generation,
     transaction,
     claims,
-    consumedClaims: consumedClaims ?? readClaimsState(boardPath).state?.consumedClaims ?? [],
+    consumedClaims: consumedClaims ?? previous.state?.consumedClaims ?? [],
   };
-  value.hmac = claimsFileHmac(value, secret);
+  value.hmac = claimsFileHmac(value, writerState.secret);
   writeJsonFileAtomic(claimsPath(boardPath), value);
+  // Anchor the monotonic generation + content digest in the authenticated
+  // writer state so deletion and replay of older signed state fail closed.
+  const digest = createHmac("sha256", writerState.secret)
+    .update(canonicalJsonString({ generation: value.generation, hmac: value.hmac }), "utf8")
+    .digest("hex");
+  writeWriterState(statePath, {
+    ...writerState,
+    claimsGeneration: value.generation,
+    claimsDigest: digest,
+  });
 }
 
 // The automation policy (§3.2, §4): an explicit, revocable record the USER
@@ -1424,7 +1520,7 @@ export function readAutomationPolicy(boardPath, { configPath = null } = {}) {
 // ceiling (F4). Returns {ok, policy, reason}.
 const POLICY_FIELDS = Object.freeze([
   "roles", "placement", "maxConcurrent", "expiry", "envelopeExpiryHours",
-  "board", "riskCeiling", "allowPerCardRiskOverride",
+  "board", "riskCeiling", "allowPerCardRiskOverride", "acceptedRepositories",
 ]);
 
 export function checkAutomationPolicy(policy, { now = null, boardPath = null } = {}) {
@@ -1474,7 +1570,20 @@ export function checkAutomationPolicy(policy, { now = null, boardPath = null } =
   if (policy.allowPerCardRiskOverride !== undefined && typeof policy.allowPerCardRiskOverride !== "boolean") {
     return { ok: false, reason: "the automation policy allowPerCardRiskOverride must be a boolean (fails closed)" };
   }
+  // Repository/base policy (item 4): a CLOSED list of accepted repositories.
+  // Dispatch may only run in a repository on this list; arbitrary repository
+  // overrides outside it are rejected.
+  if (!Array.isArray(policy.acceptedRepositories) || policy.acceptedRepositories.length === 0
+    || !policy.acceptedRepositories.every((repo) => typeof repo === "string" && repo !== "" && !repo.includes(".."))) {
+    return { ok: false, reason: "the automation policy acceptedRepositories must be a non-empty closed list of repository paths (fails closed)" };
+  }
   return { ok: true, policy, reason: null };
+}
+
+// Item 4: a repository override is honored only when it is on the policy's
+// closed acceptedRepositories list (exact match).
+export function repositoryAccepted(policy, repository) {
+  return Array.isArray(policy?.acceptedRepositories) && policy.acceptedRepositories.includes(repository);
 }
 
 // §3.2 assignment envelope: created ONCE per assignment, immutable (deep-
@@ -1497,13 +1606,17 @@ export function createEnvelope({ card, policy, now = null, repository = null, st
   const overrideAllowed = policy?.allowPerCardRiskOverride === true;
   const cardRisk = typeof card?.risk === "string" && RISK_LEVELS.includes(card.risk) ? card.risk : null;
   const risk = overrideAllowed && cardRisk !== null ? cardRisk : policy?.riskCeiling ?? "low";
+  // Item 4: work STARTS from the declared base revision where present — the
+  // envelope's starting revision IS the base (branch chaining), not merely a
+  // copied field; execution validation enforces HEAD === startingRevision.
+  const startRev = startingRevision ?? card.base ?? gitHead(repo);
   return deepFreeze({
     schema: ENVELOPE_SCHEMA,
     envelopeId,
     cardId: card.cardId,
     cardHash: card.hash ?? null,
     repository: repo,
-    startingRevision: startingRevision ?? gitHead(repo),
+    startingRevision: startRev,
     baseRevision: card.base ?? null,
     branch: `board/${card.cardId}-${envelopeId.slice(0, 8)}`,
     allowedPaths: Object.freeze([...(card.scope ?? [])]),
@@ -1586,8 +1699,25 @@ export function claimCard({ boardPath, cardId = null, role, policy = null, confi
   if (typeof role !== "string" || role === "") {
     throw Object.assign(new Error("role is required"), { code: "role-required" });
   }
-  return withWriterLock(boardPath, () =>
-    claimCardLocked({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision }));
+  // Contended locks (two pulses racing across processes) retry briefly and
+  // then fail as a structured contention error — never a crash. The claim
+  // itself stays atomic: whoever takes the lock first wins the card.
+  const { sleepSync } = { sleepSync: (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) };
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return withWriterLock(boardPath, () =>
+        claimCardLocked({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision }));
+    } catch (error) {
+      if (error?.code === "writer-lock-held" && attempt < 20) {
+        sleepSync(25);
+        continue;
+      }
+      if (error?.code === "writer-lock-held") {
+        return { ok: false, code: "lock-contention", reason: "the board writer lock stayed contended; the claim did not land (no card was double-claimed)" };
+      }
+      throw error;
+    }
+  }
 }
 
 function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision }) {
@@ -1609,7 +1739,13 @@ function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, rep
   // claim never exists without its active-state publication, and an envelope
   // never exists without its claim (the envelope is written inside the same
   // claims record, so claims-file presence IS claim+envelope presence).
-  reconcileTransactionLocked({ boardPath, state: claimsRead.state });
+  // If reconciliation itself fails, REFUSE the mutation — never clear or
+  // bypass the pending transaction (item 3).
+  const reconciliation = reconcileTransactionLocked({ boardPath, state: claimsRead.state });
+  if (reconciliation !== null && reconciliation.failed) {
+    return { ok: false, code: "recovery-failed", recoverable: true, reason: reconciliation.reason,
+      errors: [reconciliation.reason] };
+  }
   // Automation policy first (§4): no policy = no overnight dispatch.
   const resolvedPolicy = policy ?? readAutomationPolicy(boardPath, { configPath });
   const policyCheck = checkAutomationPolicy(resolvedPolicy, { now: at, boardPath });
@@ -1624,8 +1760,19 @@ function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, rep
     return { ok: false, code: "policy-placement-refused", reason: "automated board dispatch requires container placement per the automation policy (§3.4)" };
   }
   // F4: the starting revision comes from the card's repository — the
-  // workspace the board lives in, not process.cwd().
-  const repo = repository ?? dirname(boardPath);
+  // workspace the board lives in, not process.cwd(). A caller-supplied
+  // repository override is honored ONLY when it is on the policy's closed
+  // acceptedRepositories list (item 4).
+  const defaultRepo = dirname(boardPath);
+  const repo = repository !== undefined && repository !== null
+    ? (repositoryAccepted(policyCheck.policy, repository) ? repository : null)
+    : defaultRepo;
+  if (repo === null) {
+    return { ok: false, code: "policy-repository-refused", reason: `repository "${repository}" is not on the automation policy's acceptedRepositories list (fails closed)` };
+  }
+  if (!repositoryAccepted(policyCheck.policy, repo)) {
+    return { ok: false, code: "policy-repository-refused", reason: `repository "${repo}" is not on the automation policy's acceptedRepositories list (fails closed)` };
+  }
   // Expired envelopes release their claims automatically on check (§4.6).
   const activeClaims = releaseExpiredClaimsLocked({ boardPath, at, state: claimsRead.state });
   const concurrency = Number(policyCheck.policy.maxConcurrent);
@@ -1669,9 +1816,27 @@ function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, rep
   // Active-state publication: the projection is recomputed with the claim
   // visible, in the same locked operation (§3.6).
   const projection = writeProjection(boardPath, validatedBoard.cards, nextClaims);
-  // F3 + minor: the transaction is finalized and a projection failure
-  // surfaces as a structured error on the claim result — never swallowed.
-  const transactionError = finalizeTransactionLocked({ boardPath, claims: nextClaims, projection });
+  // Item 3: a projection failure returns ok:false as a STRUCTURED
+  // RECOVERABLE failure — the claim and envelope are committed in the
+  // authenticated claims file with the transaction retained; the next
+  // operation rolls the projection forward. Never silently ok:true.
+  if (!projection.written) {
+    return {
+      ok: false,
+      claimed: true,
+      code: "claim-recoverable",
+      recoverable: true,
+      reason: `projection publication failed: ${projection.error ?? "unknown"} (claim committed; transaction retained for roll-forward)`,
+      cardId: card.cardId,
+      role,
+      claim,
+      envelope,
+      projection,
+    };
+  }
+  // F3: finalize — clear the transaction record now that the projection is
+  // published.
+  finalizeTransactionLocked({ boardPath, claims: nextClaims, projection });
   return {
     ok: true,
     claimed: true,
@@ -1680,40 +1845,143 @@ function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, rep
     claim,
     envelope,
     projection,
-    ...(transactionError ? { projectionError: transactionError } : {}),
   };
 }
 
 // F3: roll an interrupted claim transaction forward — the claims (and their
 // envelopes) are already committed in the authenticated claims file, so only
-// the projection publication can be stale; republish it.
+// the projection publication can be stale; republish it. Returns
+// {failed: true, reason} when roll-forward fails; callers must REFUSE the
+// mutation and never clear the pending transaction (item 3).
 function reconcileTransactionLocked({ boardPath, state }) {
   const transaction = state.transaction;
   if (transaction === null || transaction.phase !== "claims-written") return null;
-  if (!existsSync(boardPath)) return null;
+  if (!existsSync(boardPath)) {
+    return { failed: true, reason: "a pending claim transaction exists but the board file is unavailable — recovery failed (fails closed)" };
+  }
   const validated = validateBoard(readFileSync(boardPath, "utf8"), {});
-  if (!validated.ok) return null;
+  if (!validated.ok) {
+    return { failed: true, reason: "a pending claim transaction exists but the board is invalid — recovery failed (fails closed)" };
+  }
   const projection = writeProjection(boardPath, validated.cards, state.claims);
-  return finalizeTransactionLocked({ boardPath, claims: state.claims, projection });
+  if (!projection.written) {
+    return { failed: true, reason: `projection republication failed during recovery: ${projection.error ?? "unknown"} (transaction retained)` };
+  }
+  writeClaims(boardPath, state.claims, { transaction: null });
+  return { failed: false };
 }
 
 // F3: clear the transaction record once the projection is published.
 function finalizeTransactionLocked({ boardPath, claims, projection }) {
   if (!projection?.written) {
-    // Leave the transaction record in place so the next operation reconciles;
-    // surface the failure as a structured error (minor 3).
+    // Leave the transaction record in place so the next operation reconciles.
     return `projection publication failed: ${projection?.error ?? "unknown"} (transaction record retained for recovery)`;
   }
   writeClaims(boardPath, claims, { transaction: null });
   return null;
 }
 
-// F2: whether an envelope attempt has been consumed (expired, reclaimed, or
-// completed) — the journey layer checks this before executing an envelope.
+// F2/Item 2: whether an envelope attempt has been consumed (expired,
+// reclaimed, or completed) — the journey layer checks this before executing
+// an envelope.
 export function isEnvelopeConsumed(boardPath, envelopeId) {
   const read = readClaimsState(boardPath);
   if (!read.ok) throw Object.assign(new Error(read.reason), { code: "claims-corrupt" });
   return read.state.consumedClaims.some((entry) => entry.envelopeId === envelopeId);
+}
+
+// Item 2: the authoritative execution-boundary validation. Before an
+// envelope is executed or resumed, the journey layer MUST call this: it
+// validates authenticated consumption, expiry, card-hash drift, repository
+// drift, and HEAD/base/branch drift against the CURRENT board and repository.
+// Any drift fails closed — retry requires a new envelope.
+export function validateEnvelopeForExecution({ boardPath, envelope, now = null }) {
+  const at = now ?? new Date().toISOString();
+  if (!wellFormedEnvelope(envelope)) {
+    return { ok: false, code: "envelope-invalid", reason: "the envelope is malformed or has an unknown shape (fails closed)" };
+  }
+  const read = readClaimsState(boardPath);
+  if (!read.ok) return { ok: false, code: "claims-corrupt", reason: read.reason };
+  const claim = read.state.claims.find((entry) => entry.envelopeId === envelope.envelopeId);
+  if (!claim) {
+    return { ok: false, code: "envelope-not-active",
+      reason: isEnvelopeConsumed(boardPath, envelope.envelopeId)
+        ? "the envelope attempt was consumed — a retry requires a new envelope (single-attempt lifecycle)"
+        : "the envelope has no active claim on the board (fails closed)" };
+  }
+  // Single-attempt lifecycle: expiry.
+  if (Date.parse(envelope.expiry) <= Date.parse(at)) {
+    return { ok: false, code: "envelope-expired", reason: `the envelope expired at ${envelope.expiry} (single-attempt lifecycle)` };
+  }
+  // Card hash drift: the board's current card must still hash to the
+  // envelope's binding.
+  if (!existsSync(boardPath)) {
+    return { ok: false, code: "board-unavailable", reason: "board file is no longer present (board-unavailable)" };
+  }
+  const board = validateBoard(readFileSync(boardPath, "utf8"), {});
+  if (!board.ok) return { ok: false, code: "board-invalid", reason: "the board is invalid (fails closed)" };
+  const card = board.cards.find((entry) => entry.cardId === envelope.cardId);
+  if (!card) {
+    return { ok: false, code: "card-not-found", reason: `card ${envelope.cardId} no longer exists on the board (drift — new envelope required)` };
+  }
+  if ((card.hash ?? computeCardHash(card)) !== envelope.cardHash) {
+    return { ok: false, code: "card-hash-drift", reason: "the card hash drifted from the envelope binding — semantic edits require a new envelope (fails closed)" };
+  }
+  // Repository drift.
+  if (envelope.repository !== dirname(boardPath)) {
+    return { ok: false, code: "repository-drift", reason: `the envelope is bound to repository "${envelope.repository}", not this board's repository (fails closed)` };
+  }
+  // HEAD/base/branch drift: work must start from the declared starting
+  // revision (the card's base revision where present, per item 4) — the
+  // repository's current HEAD must equal it.
+  if (envelope.startingRevision !== null) {
+    const head = gitHead(envelope.repository);
+    if (head === null) {
+      return { ok: false, code: "head-unreadable", reason: "the envelope's repository HEAD could not be read (fails closed)" };
+    }
+    if (head !== envelope.startingRevision) {
+      return { ok: false, code: "revision-drift",
+        reason: `repository HEAD ${head} does not match the envelope's starting revision ${envelope.startingRevision} (drift — new envelope required)` };
+    }
+  }
+  return { ok: true, claim, reason: null };
+}
+
+// Item 2: completion consumption — when the work reaches its stopping point,
+// the envelope attempt is consumed ("completed") and its claim released.
+// Never marks the card done (completion is human-only, §3.1).
+export function consumeEnvelope({ boardPath, envelopeId, reason = "completed" } = {}) {
+  if (typeof boardPath !== "string" || boardPath === "") {
+    throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
+  }
+  if (!CONSUMED_REASONS.includes(reason)) {
+    throw Object.assign(new Error(`reason must be one of ${CONSUMED_REASONS.join(", ")}`), { code: "invalid-input" });
+  }
+  return withWriterLock(boardPath, () => {
+    const read = readClaimsState(boardPath);
+    if (!read.ok) return { ok: false, code: "claims-corrupt", reason: read.reason };
+    const reconciliation = reconcileTransactionLocked({ boardPath, state: read.state });
+    if (reconciliation?.failed) {
+      return { ok: false, code: "recovery-failed", recoverable: true, reason: reconciliation.reason };
+    }
+    const claim = read.state.claims.find((entry) => entry.envelopeId === envelopeId);
+    if (!claim) {
+      return { ok: false, code: "envelope-not-active", reason: "the envelope has no active claim to consume" };
+    }
+    const kept = read.state.claims.filter((entry) => entry.envelopeId !== envelopeId);
+    const consumedClaims = [...read.state.consumedClaims, {
+      cardId: claim.cardId,
+      envelopeId,
+      consumedAt: new Date().toISOString(),
+      reason,
+    }];
+    writeClaims(boardPath, kept, { consumedClaims });
+    if (existsSync(boardPath)) {
+      const validated = validateBoard(readFileSync(boardPath, "utf8"), {});
+      if (validated.ok) writeProjection(boardPath, validated.cards, kept);
+    }
+    return { ok: true, consumed: true, envelopeId, reason, claims: kept };
+  });
 }
 
 // Release every claim whose envelope expiry has passed. Returns the surviving
@@ -1725,6 +1993,11 @@ export function releaseExpiredClaims({ boardPath, now = null } = {}) {
   return withWriterLock(boardPath, () => {
     const read = readClaimsState(boardPath);
     if (!read.ok) throw Object.assign(new Error(read.reason), { code: "claims-corrupt" });
+    // Item 3: every claims mutation reconciles first; refuse on failure.
+    const reconciliation = reconcileTransactionLocked({ boardPath, state: read.state });
+    if (reconciliation?.failed) {
+      throw Object.assign(new Error(reconciliation.reason), { code: "recovery-failed" });
+    }
     return { released: releaseExpiredClaimsLocked({ boardPath, at: now ?? new Date().toISOString(), state: read.state }) };
   }).released;
 }
@@ -1763,6 +2036,11 @@ export function reclaimClaim({ boardPath, cardId = null, envelopeId = null } = {
   return withWriterLock(boardPath, () => {
     const read = readClaimsState(boardPath);
     if (!read.ok) throw Object.assign(new Error(read.reason), { code: "claims-corrupt" });
+    // Item 3: reconcile first; refuse the mutation when recovery fails.
+    const reconciliation = reconcileTransactionLocked({ boardPath, state: read.state });
+    if (reconciliation?.failed) {
+      throw Object.assign(new Error(reconciliation.reason), { code: "recovery-failed" });
+    }
     const existing = read.state.claims;
     const kept = existing.filter((claim) =>
       (cardId !== null ? claim.cardId !== cardId : true)
@@ -2181,7 +2459,6 @@ export function registerKanbanBoardTools(pi, { boardPath = null, resolveBoardPat
         } else {
           value = { ok: false, code: result.code, reason: result.reason ?? (result.errors ?? []).join("; "), errors: result.errors ?? [] };
         }
-        if (result.ok && result.projectionError) value.projectionError = result.projectionError;
         return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
       },
     });

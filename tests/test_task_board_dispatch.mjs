@@ -13,9 +13,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import {
   writeCard, updateCard, claimCard, readClaims, readClaimsState, reclaimClaim, releaseExpiredClaims,
+  validateEnvelopeForExecution, consumeEnvelope,
   readAutomationPolicy, checkAutomationPolicy, createEnvelope, isEnvelopeConsumed,
   dispatchEligibility, selectDispatchableCard, validateBoard,
   writerStatePath, claimsPath, automationPolicyPath,
@@ -33,7 +34,7 @@ function freshDir() {
 }
 
 // A policy bound to the board it applies to (F4) with a risk ceiling (F4).
-function policyFor(boardPath, overrides = {}) {
+function policyFor(boardPath, dir = null, overrides = {}) {
   return {
     roles: ["implementer", "reviewer"],
     placement: "container",
@@ -41,6 +42,7 @@ function policyFor(boardPath, overrides = {}) {
     expiry: "2099-01-01",
     board: boardPath,
     riskCeiling: "low",
+    acceptedRepositories: [dir ?? dirname(boardPath)],
     ...overrides,
   };
 }
@@ -55,7 +57,7 @@ function fixtureBoard(dir) {
 }
 
 function withPolicy(boardPath, overrides = {}) {
-  writeFileSync(automationPolicyPath(boardPath), JSON.stringify(policyFor(boardPath, overrides)));
+  writeFileSync(automationPolicyPath(boardPath), JSON.stringify(policyFor(boardPath, null, overrides)));
 }
 
 test("atomic claim: two CONCURRENT claims, one wins (Promise.all, same card)", async () => {
@@ -379,13 +381,13 @@ test("F1: the claims file is HMAC-authenticated; tampering fails closed", () => 
     writeFileSync(claimsPath(boardPath), JSON.stringify(raw));
     const read = readClaimsState(boardPath);
     assert.equal(read.ok, false, "tampered claims file must fail closed");
-    assert.match(read.reason, /HMAC|tampered/);
+    assert.match(read.reason, /HMAC|tampered|malformed/);
     // Dispatch REFUSES rather than failing open.
     const refused = claimCard({ boardPath, role: "reviewer" });
     assert.equal(refused.ok, false);
     assert.equal(refused.code, "claims-corrupt");
     // readClaims throws rather than silently returning an empty list (minor 3).
-    assert.throws(() => readClaims(boardPath), /claims-corrupt|HMAC/);
+    assert.throws(() => readClaims(boardPath), (err) => err.code === "claims-corrupt");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -472,9 +474,11 @@ test("F3: a pending transaction record is reconciled (roll-forward)", () => {
     mkdirSyncSafe(projPath);
     withPolicy(boardPath); // refresh (file untouched by projection dir)
     const r2 = claimCard({ boardPath, role: "reviewer", cardId: first2(boardPath) });
-    assert.equal(r2.ok, true, JSON.stringify(r2));
     {
-      assert.ok(r2.projectionError, "projection failure surfaces as a structured error (minor 3)");
+      assert.equal(r2.ok, false, "projection failure returns ok:false (item 3)");
+      assert.equal(r2.code, "claim-recoverable");
+      assert.equal(r2.recoverable, true);
+      assert.ok(r2.claim && r2.envelope, "the committed claim and envelope are returned for roll-forward");
       const st = readClaimsState(boardPath);
       assert.equal(st.state.transaction?.phase, "claims-written", "transaction record retained for recovery");
       rmdirSyncSafe(projPath);
@@ -548,17 +552,17 @@ test("dispatch eligibility: pure predicate composes with claims and provenance",
 test("policy shape validation: malformed policies fail closed", () => {
   assert.equal(checkAutomationPolicy(null).ok, false);
   assert.equal(checkAutomationPolicy({}).ok, false);
-  assert.equal(checkAutomationPolicy({ roles: ["x"], placement: "orbital", maxConcurrent: 1, expiry: "2099-01-01", board: "b", riskCeiling: "low" }).ok, false);
-  assert.equal(checkAutomationPolicy({ roles: ["x"], placement: "container", maxConcurrent: 0, expiry: "2099-01-01", board: "b", riskCeiling: "low" }).ok, false);
+  assert.equal(checkAutomationPolicy({ roles: ["x"], placement: "orbital", maxConcurrent: 1, expiry: "2099-01-01", board: "b", riskCeiling: "low", acceptedRepositories: ["/repo"] }).ok, false);
+  assert.equal(checkAutomationPolicy({ roles: ["x"], placement: "container", maxConcurrent: 0, expiry: "2099-01-01", board: "b", riskCeiling: "low", acceptedRepositories: ["/repo"] }).ok, false);
   assert.equal(checkAutomationPolicy({ roles: ["x"], placement: "container", maxConcurrent: 1, expiry: "not-a-date", board: "b", riskCeiling: "low" }).ok, false);
   assert.equal(checkAutomationPolicy({ roles: ["x"], placement: "container", maxConcurrent: 1, expiry: "2000-01-01", board: "b", riskCeiling: "low" }).ok, false);
   // F5: invalid role names and unknown fields.
-  assert.equal(checkAutomationPolicy({ roles: ["bad role"], placement: "container", maxConcurrent: 1, expiry: "2099-01-01", board: "b", riskCeiling: "low" }).ok, false);
-  assert.equal(checkAutomationPolicy({ roles: ["x"], placement: "container", maxConcurrent: 1, expiry: "2099-01-01", board: "b", riskCeiling: "low", extra: 1 }).ok, false);
+  assert.equal(checkAutomationPolicy({ roles: ["bad role"], placement: "container", maxConcurrent: 1, expiry: "2099-01-01", board: "b", riskCeiling: "low", acceptedRepositories: ["/repo"] }).ok, false);
+  assert.equal(checkAutomationPolicy({ roles: ["x"], placement: "container", maxConcurrent: 1, expiry: "2099-01-01", board: "b", riskCeiling: "low", acceptedRepositories: ["/repo"], extra: 1 }).ok, false);
   // F4: board binding and risk ceiling are required.
-  assert.equal(checkAutomationPolicy({ roles: ["x"], placement: "container", maxConcurrent: 1, expiry: "2099-01-01", riskCeiling: "low" }).ok, false);
-  assert.equal(checkAutomationPolicy({ roles: ["x"], placement: "container", maxConcurrent: 1, expiry: "2099-01-01", board: "b" }).ok, false);
-  assert.equal(checkAutomationPolicy({ roles: ["x"], placement: "container", maxConcurrent: 1, expiry: "2099-01-01", board: "b", riskCeiling: "low" }).ok, true);
+  assert.equal(checkAutomationPolicy({ roles: ["x"], placement: "container", maxConcurrent: 1, expiry: "2099-01-01", riskCeiling: "low", acceptedRepositories: ["/repo"] }).ok, false);
+  assert.equal(checkAutomationPolicy({ roles: ["x"], placement: "container", maxConcurrent: 1, expiry: "2099-01-01", board: "b", acceptedRepositories: ["/repo"] }).ok, false);
+  assert.equal(checkAutomationPolicy({ roles: ["x"], placement: "container", maxConcurrent: 1, expiry: "2099-01-01", board: "b", riskCeiling: "low", acceptedRepositories: ["/repo"] }).ok, true);
   // F4: a policy bound to another board is refused for this board.
   assert.equal(checkAutomationPolicy({ roles: ["x"], placement: "container", maxConcurrent: 1, expiry: "2099-01-01", board: "other.md", riskCeiling: "low" }, { boardPath: "this.md" }).ok, false);
 });
@@ -578,5 +582,248 @@ test("readAutomationPolicy: missing file returns null; sidecar path is derived",
     assert.equal(readAutomationPolicy(boardPath), null);
     withPolicy(boardPath);
     assert.deepEqual(readAutomationPolicy(boardPath).roles, ["implementer", "reviewer"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------
+// Second fix pass regressions (items 1-6).
+// ---------------------------------------------------------------------------
+
+test("item 1: deleting the claims file after issuance fails closed (rollback guard)", () => {
+  const dir = freshDir();
+  try {
+    const { boardPath, second } = fixtureBoard(dir);
+    withPolicy(boardPath);
+    const r = claimCard({ boardPath, role: "implementer", cardId: second });
+    assert.equal(r.ok, true);
+    // Deleting the claims file (deletion/rollback) is rejected: the writer
+    // state anchors an issued claims generation.
+    rmSync(claimsPath(boardPath));
+    const read = readClaimsState(boardPath);
+    assert.equal(read.ok, false);
+    assert.match(read.reason, /deletion is rejected/);
+    const refused = claimCard({ boardPath, role: "reviewer" });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.code, "claims-corrupt");
+    assert.throws(() => readClaims(boardPath), (err) => err.code === "claims-corrupt");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("item 1: replay of an older CORRECTLY SIGNED claims state is rejected", () => {
+  const dir = freshDir();
+  try {
+    const { boardPath, first, second } = fixtureBoard(dir);
+    withPolicy(boardPath);
+    const r1 = claimCard({ boardPath, role: "implementer", cardId: second });
+    assert.equal(r1.ok, true);
+    // Save the current (correctly signed) state.
+    const older = readFileSync(claimsPath(boardPath), "utf8");
+    // Mutate through the trusted writer: reclaim + a new claim bumps the
+    // anchored generation.
+    reclaimClaim({ boardPath, cardId: second });
+    const r2 = claimCard({ boardPath, role: "reviewer", cardId: first });
+    assert.equal(r2.ok, true);
+    // Replay the older signed state.
+    writeFileSync(claimsPath(boardPath), older);
+    const read = readClaimsState(boardPath);
+    assert.equal(read.ok, false);
+    assert.match(read.reason, /generation .* does not match the anchored generation/);
+    const refused = claimCard({ boardPath, role: "implementer" });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.code, "claims-corrupt");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("item 4: a repository override outside acceptedRepositories is rejected", () => {
+  const dir = freshDir();
+  try {
+    const { boardPath, first } = fixtureBoard(dir);
+    withPolicy(boardPath, { acceptedRepositories: [dir] });
+    const refused = claimCard({ boardPath, role: "implementer", cardId: first, repository: "/tmp/evil-repo" });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.code, "policy-repository-refused");
+    assert.match(refused.reason, /acceptedRepositories/);
+    const ok = claimCard({ boardPath, role: "implementer", cardId: first, repository: dir });
+    assert.equal(ok.ok, true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("item 4: the default repository must also be on acceptedRepositories", () => {
+  const dir = freshDir();
+  try {
+    const { boardPath, first } = fixtureBoard(dir);
+    withPolicy(boardPath, { acceptedRepositories: ["/some/other/repo"] });
+    const refused = claimCard({ boardPath, role: "implementer", cardId: first });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.code, "policy-repository-refused");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("item 4: work starts from the declared base revision — startingRevision IS the base", () => {
+  const dir = freshDir();
+  try {
+    const { boardPath, second } = fixtureBoard(dir);
+    withPolicy(boardPath);
+    const base = execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    updateCard({ boardPath, cardId: second, changes: { base }, authority });
+    const r = claimCard({ boardPath, role: "implementer", cardId: second });
+    assert.equal(r.ok, true);
+    assert.equal(r.envelope.baseRevision, base);
+    assert.equal(r.envelope.startingRevision, base, "the envelope's starting revision is the declared base, not merely copied");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("item 2: validateEnvelopeForExecution — the authoritative execution boundary", () => {
+  const dir = freshDir();
+  try {
+    const { boardPath, second } = fixtureBoard(dir);
+    withPolicy(boardPath);
+    const r = claimCard({ boardPath, role: "implementer", cardId: second });
+    assert.equal(r.ok, true);
+    const env = r.envelope;
+    // Clean pass.
+    const ok = validateEnvelopeForExecution({ boardPath, envelope: env });
+    assert.equal(ok.ok, true, JSON.stringify(ok));
+    // Card-hash drift: a semantic edit through the trusted writer changes the
+    // card hash — the envelope fails closed (new envelope required).
+    updateCard({ boardPath, cardId: second, changes: { specification: "changed spec" }, authority });
+    const drift = validateEnvelopeForExecution({ boardPath, envelope: env });
+    assert.equal(drift.ok, false);
+    assert.equal(drift.code, "card-hash-drift");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("item 2: validateEnvelopeForExecution — expiry, repository drift, revision drift", () => {
+  const dir = freshDir();
+  try {
+    const { boardPath, second } = fixtureBoard(dir);
+    withPolicy(boardPath);
+    const r = claimCard({ boardPath, role: "implementer", cardId: second });
+    const env = r.envelope;
+    // Expiry (validated with a future now).
+    const expired = validateEnvelopeForExecution({ boardPath, envelope: env, now: new Date(Date.parse(env.expiry) + 1000).toISOString() });
+    assert.equal(expired.ok, false);
+    assert.equal(expired.code, "envelope-expired");
+    // Repository drift: an envelope bound to a different repository.
+    const foreign = { ...env, repository: "/somewhere/else" };
+    const repoDrift = validateEnvelopeForExecution({ boardPath, envelope: foreign });
+    assert.equal(repoDrift.ok, false);
+    assert.equal(repoDrift.code, "repository-drift");
+    // Revision drift: a new commit moves HEAD past the starting revision.
+    execFileSync("git", ["-C", dir, "commit", "-q", "--allow-empty", "-m", "drift"]);
+    const revDrift = validateEnvelopeForExecution({ boardPath, envelope: env });
+    assert.equal(revDrift.ok, false);
+    assert.equal(revDrift.code, "revision-drift");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("item 2: consumeEnvelope — completion consumption and single-attempt enforcement", () => {
+  const dir = freshDir();
+  try {
+    const { boardPath, second } = fixtureBoard(dir);
+    withPolicy(boardPath);
+    const r = claimCard({ boardPath, role: "implementer", cardId: second });
+    const env = r.envelope;
+    const done = consumeEnvelope({ boardPath, envelopeId: env.envelopeId, reason: "completed" });
+    assert.equal(done.ok, true);
+    assert.equal(isEnvelopeConsumed(boardPath, env.envelopeId), true);
+    assert.equal(readClaims(boardPath).length, 0, "the completed envelope's claim is released");
+    const after = validateEnvelopeForExecution({ boardPath, envelope: env });
+    assert.equal(after.ok, false);
+    assert.match(after.reason, /consumed/);
+    // The card is NOT marked done — completion is human-only (§3.1).
+    const board = validateBoard(readFileSync(boardPath, "utf8"), {});
+    assert.equal(board.cards.find((c) => c.cardId === second).lane, "backlog");
+    // Invalid consumption reason is rejected.
+    assert.throws(() => consumeEnvelope({ boardPath, envelopeId: "x".repeat(32), reason: "shenanigans" }), /reason must be one of/);
+    // Unknown envelopeId.
+    const unknown = consumeEnvelope({ boardPath, envelopeId: "a".repeat(32) });
+    assert.equal(unknown.ok, false);
+    assert.equal(unknown.code, "envelope-not-active");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("item 6: strict shapes — unknown fields in claim/transaction/envelope records fail closed", () => {
+  const dir = freshDir();
+  try {
+    const { boardPath, second } = fixtureBoard(dir);
+    withPolicy(boardPath);
+    const r = claimCard({ boardPath, role: "implementer", cardId: second });
+    assert.equal(r.ok, true);
+    const raw = JSON.parse(readFileSync(claimsPath(boardPath), "utf8"));
+    // Extra field on a claim record (checked before the HMAC).
+    const withExtra = JSON.parse(JSON.stringify(raw));
+    withExtra.claims[0].sneaky = true;
+    writeFileSync(claimsPath(boardPath), JSON.stringify(withExtra));
+    assert.equal(readClaimsState(boardPath).ok, false);
+    // Extra field on the transaction record.
+    const withTxFake = JSON.parse(JSON.stringify(raw));
+    withTxFake.transaction = { op: "claim", cardId: second, envelopeId: raw.claims[0].envelopeId, at: raw.claims[0].claimedAt, phase: "claims-written", extra: 1 };
+    writeFileSync(claimsPath(boardPath), JSON.stringify(withTxFake));
+    assert.equal(readClaimsState(boardPath).ok, false);
+    // Envelope record missing a field.
+    const withBrokenEnv = JSON.parse(JSON.stringify(raw));
+    delete withBrokenEnv.claims[0].envelope.risk;
+    writeFileSync(claimsPath(boardPath), JSON.stringify(withBrokenEnv));
+    assert.equal(readClaimsState(boardPath).ok, false);
+    // Unknown top-level field on the claims state.
+    const withTop = JSON.parse(JSON.stringify(raw));
+    withTop.unknown = 1;
+    writeFileSync(claimsPath(boardPath), JSON.stringify(withTop));
+    assert.equal(readClaimsState(boardPath).ok, false);
+    // Consumed marker with an unknown reason.
+    const withConsumed = JSON.parse(JSON.stringify(raw));
+    withConsumed.consumedClaims = [{ cardId: second, envelopeId: "b".repeat(32), consumedAt: new Date().toISOString(), reason: "hocus-pocus" }];
+    writeFileSync(claimsPath(boardPath), JSON.stringify(withConsumed));
+    assert.equal(readClaimsState(boardPath).ok, false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("item 5: genuine multi-process race — two OS processes contend on the same lock", async () => {
+  const dir = freshDir();
+  try {
+    const { boardPath, first } = fixtureBoard(dir);
+    withPolicy(boardPath, { maxConcurrent: 2 });
+    const corePath = new URL("../scripts/enforcement/task_board_core_pi.js", import.meta.url).href;
+    const childScript = `
+import { claimCard } from ${JSON.stringify(corePath)};
+import { writeFileSync } from "node:fs";
+const r = claimCard({ boardPath: ${JSON.stringify(boardPath)}, role: "implementer", cardId: ${JSON.stringify(first)} });
+writeFileSync(${JSON.stringify(join(dir, "RESULT-A"))}, JSON.stringify({ ok: r.ok, code: r.code ?? null }));
+`;
+    const childScript2 = childScript.replace("RESULT-A", "RESULT-B");
+    const spawn = (await import("node:child_process")).spawn;
+    const procs = [spawn(process.execPath, ["--input-type=module", "-e", childScript]), spawn(process.execPath, ["--input-type=module", "-e", childScript2])];
+    const codes = await Promise.all(procs.map((p) => new Promise((resolve) => p.on("exit", resolve))));
+    assert.deepEqual(codes, [0, 0], "both child processes exit cleanly");
+    const results = [readFileSync(join(dir, "RESULT-A"), "utf8"), readFileSync(join(dir, "RESULT-B"), "utf8")].map(JSON.parse);
+    const wins = results.filter((res) => res.ok === true);
+    const losses = results.filter((res) => res.ok !== true);
+    assert.equal(wins.length, 1, `exactly one process wins the lock race: ${JSON.stringify(results)}`);
+    assert.equal(losses.length, 1);
+    assert.equal(losses[0].code, "no-dispatchable-card");
+    assert.equal(readClaims(boardPath).length, 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("item 2/3: journey wiring — an invalid envelope refuses execution before any work", async () => {
+  const { runWorkerJourney } = await import("../scripts/enforcement/herdr_async_dispatch_pi.js");
+  const dir = freshDir();
+  try {
+    const { boardPath, second } = fixtureBoard(dir);
+    withPolicy(boardPath);
+    const r = claimCard({ boardPath, role: "implementer", cardId: second });
+    assert.equal(r.ok, true);
+    // Consume the attempt, then try to execute a journey under it.
+    consumeEnvelope({ boardPath, envelopeId: r.envelope.envelopeId, reason: "completed" });
+    const taskStore = { list: () => [] };
+    const journey = await runWorkerJourney(
+      { role: "implementer", stepPrompt: "work", maxSteps: 1 },
+      {},
+      { taskStore, board: { boardPath, envelope: r.envelope } },
+    );
+    assert.equal(journey.ok, false);
+    assert.equal(journey.status, "failed");
+    assert.match(journey.code ?? "", /envelope/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
