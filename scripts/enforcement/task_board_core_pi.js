@@ -12,7 +12,7 @@
 // surfaces fails closed.
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, openSync, closeSync, unlinkSync, statSync as fsStatSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -81,11 +81,43 @@ export function sha256Hex(text) {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
+// Free-text (titles, quoted instructions) is sanitized before it is ever
+// serialized into a card line: [key:: value] field syntax, stray "]", and
+// HTML-comment syntax are stripped so a hostile string cannot alter parsing
+// (§6 gate 3). Sanitization is lossy by design — it fails closed.
+export function sanitizeFreeText(text) {
+  return String(text ?? "").normalize("NFC")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<!--|-->/g, " ")
+    .replace(/\[[A-Za-z][A-Za-z0-9_-]*::[^\]]*\]?/g, " ")
+    .replace(/\]/g, ")")
+    .replace(/\s+/g, " ").trim();
+}
+
+// Spec/DoD text travels base64url-encoded inside a [key:: value] field: the
+// encoding round-trips byte-for-byte (so the dispatch gate can recompute the
+// hash) and cannot inject field or HTML-comment syntax.
+export function encodeFieldText(text) {
+  return Buffer.from(String(text ?? ""), "utf8").toString("base64url");
+}
+
+export function decodeFieldText(encoded) {
+  if (typeof encoded !== "string" || encoded === "") return null;
+  try {
+    return Buffer.from(encoded, "base64url").toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
 // The authority-bearing field set. The authority-source reference is NOT
 // hash-bearing: it is recorded alongside the card, outside this payload.
+// §1 scope = paths + capability classes + explicitly unchanged paths +
+// repository identity (for user-level cards) — all hash-bearing.
 const AUTHORITY_FIELDS = Object.freeze([
   "cardId", "lane", "flags", "priority", "dependencies", "base",
-  "specHash", "dodHash", "stoppingPoint", "scope",
+  "specHash", "dodHash", "stoppingPoint", "scope", "unchangedPaths",
+  "capabilities", "repositories",
 ]);
 
 export function hashPayload(card) {
@@ -132,6 +164,7 @@ export function stripTitle(rawTitle) {
 function parseCardLine(line, surface, checkboxState = null) {
   const errors = [];
   const fields = {};
+  const duplicateKeys = new Set();
   const flags = [];
   let idMarker = null;
   let idField = null;
@@ -156,8 +189,14 @@ function parseCardLine(line, surface, checkboxState = null) {
         flags.push(value);
       }
     } else {
+      // Duplicate authority-bearing fields are ambiguous (last-value-wins is
+      // an injection vector); reject fail-closed (M2).
+      if (Object.hasOwn(fields, key)) duplicateKeys.add(key);
       fields[key] = value;
     }
+  }
+  for (const key of duplicateKeys) {
+    errors.push(`duplicate [${key}:: ...] field on one card line (injection rejected)`);
   }
 
   // Mirror consistency (§1): if both surface markers are present they must
@@ -251,18 +290,38 @@ function semanticCard(raw, errors) {
     stoppingPoint: f.stopping ?? f["stopping-point"] ?? null,
     specHash: f.specHash ?? f["spec-hash"] ?? null,
     dodHash: f.dodHash ?? f["dod-hash"] ?? null,
+    specText: decodeFieldText(f.specText ?? f["spec-text"]),
+    dodText: decodeFieldText(f.dodText ?? f["dod-text"]),
     scope: f.scope ? f.scope.split(/[\s,]+/).filter(Boolean) : [],
+    unchangedPaths: f.unchanged ? f.unchanged.split(/[\s,]+/).filter(Boolean) : [],
     repositories: f.repos ? f.repos.split(/[\s,]+/).filter(Boolean) : [],
     tags: f.tags ? f.tags.split(/[\s,]+/).filter(Boolean) : [],
     provenance: f.provenance ?? null,
     importedId: f.importedId ?? null,
+    hash: f.hash ?? null,
     authoritySource: f.authority ? safeJsonParse(f.authority) : null,
     fields: { ...f },
     description: raw.description.join("\n"),
     done: raw.done ?? false,
   };
   if (card.cardId === null) errors.push(`card without an id marker in lane ${raw.lane}`);
+  if (card.authoritySource !== null && !isValidAuthoritySource(card.authoritySource)) {
+    errors.push(`${card.cardId ?? "(unidentified)"}: malformed authority-source record (fails closed)`);
+    card.authoritySource = null;
+  }
   return card;
+}
+
+// §3.5: an authority-source record is a reference — {source: "instruction" |
+// "report-proposal", sessionOrReportId, quotedInstruction-or-digest}. A
+// malformed or absent record is never dispatchable.
+export function isValidAuthoritySource(record) {
+  if (record === null || typeof record !== "object" || Array.isArray(record)) return false;
+  if (record.source !== "instruction" && record.source !== "report-proposal") return false;
+  if (typeof record.sessionOrReportId !== "string" || record.sessionOrReportId.trim() === "") return false;
+  const hasInstruction = typeof record.quotedInstruction === "string" && record.quotedInstruction.trim() !== "";
+  const hasDigest = typeof record.digest === "string" && /^[0-9a-f]{64}$/.test(record.digest);
+  return hasInstruction || hasDigest;
 }
 
 function safeJsonParse(text) {
@@ -326,6 +385,11 @@ export function validateCard(card, context = {}) {
       errors.push(`scope path "${path}" is not a safe repository-relative path`);
     }
   }
+  for (const path of card.unchangedPaths ?? []) {
+    if (!SAFE_PATH_RE.test(path) || path.includes("..")) {
+      errors.push(`unchanged path "${path}" is not a safe repository-relative path`);
+    }
+  }
   if (userLevel && (card.scope ?? []).length > 0 && (card.repositories ?? []).length === 0) {
     errors.push("a user-level card with scope paths must name the repository (or repositories) they refer to");
   }
@@ -381,6 +445,7 @@ export function serializeObsidianCard(card) {
   const checkbox = card.flags?.includes("cancelled") ? "[-]" : card.done ? "[x]" : "[ ]";
   const parts = [checkbox, card.title];
   parts.push(fieldText("id", card.cardId));
+  if (card.hash) parts.push(fieldText("hash", card.hash));
   if (card.priority) parts.push(fieldText("priority", card.priority));
   for (const flag of card.flags ?? []) parts.push(fieldText("flag", flag));
   if ((card.dependencies ?? []).length > 0) parts.push(fieldText("blockedBy", card.dependencies.join(", ")));
@@ -391,7 +456,10 @@ export function serializeObsidianCard(card) {
   if (card.stoppingPoint) parts.push(fieldText("stopping", card.stoppingPoint));
   if (card.specHash) parts.push(fieldText("specHash", card.specHash));
   if (card.dodHash) parts.push(fieldText("dodHash", card.dodHash));
+  if (card.specText !== null && card.specText !== undefined) parts.push(fieldText("specText", encodeFieldText(card.specText)));
+  if (card.dodText !== null && card.dodText !== undefined) parts.push(fieldText("dodText", encodeFieldText(card.dodText)));
   if ((card.scope ?? []).length > 0) parts.push(fieldText("scope", card.scope.join(", ")));
+  if ((card.unchangedPaths ?? []).length > 0) parts.push(fieldText("unchanged", card.unchangedPaths.join(", ")));
   if ((card.repositories ?? []).length > 0) parts.push(fieldText("repos", card.repositories.join(", ")));
   if ((card.tags ?? []).length > 0) parts.push(fieldText("tags", card.tags.join(", ")));
   if (card.provenance) parts.push(fieldText("provenance", card.provenance));
@@ -405,6 +473,7 @@ export function serializeObsidianCard(card) {
 export function serializeTasksCard(card) {
   const checkbox = card.flags?.includes("cancelled") ? "[-]" : card.done ? "[x]" : "[ ]";
   const parts = [checkbox, card.title, `<!-- id: ${card.cardId} -->`];
+  if (card.hash) parts.push(fieldText("hash", card.hash));
   if (card.priority) parts.push(fieldText("priority", card.priority));
   for (const flag of card.flags ?? []) parts.push(fieldText("flag", flag));
   if ((card.dependencies ?? []).length > 0) parts.push(fieldText("blockedBy", card.dependencies.join(", ")));
@@ -415,7 +484,10 @@ export function serializeTasksCard(card) {
   if (card.stoppingPoint) parts.push(fieldText("stopping", card.stoppingPoint));
   if (card.specHash) parts.push(fieldText("specHash", card.specHash));
   if (card.dodHash) parts.push(fieldText("dodHash", card.dodHash));
+  if (card.specText !== null && card.specText !== undefined) parts.push(fieldText("specText", encodeFieldText(card.specText)));
+  if (card.dodText !== null && card.dodText !== undefined) parts.push(fieldText("dodText", encodeFieldText(card.dodText)));
   if ((card.scope ?? []).length > 0) parts.push(fieldText("scope", card.scope.join(", ")));
+  if ((card.unchangedPaths ?? []).length > 0) parts.push(fieldText("unchanged", card.unchangedPaths.join(", ")));
   if ((card.repositories ?? []).length > 0) parts.push(fieldText("repos", card.repositories.join(", ")));
   if ((card.tags ?? []).length > 0) parts.push(fieldText("tags", card.tags.join(", ")));
   if (card.provenance) parts.push(fieldText("provenance", card.provenance));
@@ -451,7 +523,85 @@ export function allocateCardId(cards, { prefix = "T" } = {}) {
   return `${prefix}-${String(max + 1).padStart(4, "0")}`;
 }
 
-export function recordAuthoritySource({ source, sessionOrReportId, quotedInstruction }) {
+// The high-water mark is tracked durably in a writer state file next to the
+// board so deleting the highest card can never cause ID reuse (§3.5: IDs are
+// minted by the writer and never reused).
+export function writerStatePath(boardPath) {
+  return `${boardPath}.writer-state.json`;
+}
+
+function readHighWaterMark(statePath) {
+  try {
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    const value = Number(state?.highWaterMark);
+    return Number.isInteger(value) && value >= 0 ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function nextCardNumber(cards, prefix, statePath) {
+  let max = readHighWaterMark(statePath);
+  const re = new RegExp(`^${prefix}-(\\d+)$`);
+  for (const card of cards) {
+    const match = typeof card.cardId === "string" ? card.cardId.match(re) : null;
+    if (match) max = Math.max(max, Number(match[1]));
+  }
+  return max + 1;
+}
+
+export function formatCardId(prefix, number) {
+  return `${prefix}-${String(number).padStart(4, "0")}`;
+}
+
+// Writer serialization (§6 gate 2): a lock file created exclusively next to
+// the board. A stale lock (older than the TTL) is removed only under the
+// same exclusive-create discipline; anything else fails closed.
+const LOCK_TTL_MS = 30_000;
+
+export function writerLockPath(boardPath) {
+  return `${boardPath}.lock`;
+}
+
+export function withWriterLock(boardPath, fn) {
+  const lockPath = writerLockPath(boardPath);
+  mkdirSync(dirname(boardPath), { recursive: true });
+  for (;;) {
+    let fd = null;
+    try {
+      fd = openSync(lockPath, "wx");
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      let age = null;
+      try {
+        age = Date.now() - Number(fsStatSync(lockPath).mtimeMs);
+      } catch {
+        age = null;
+      }
+      if (age === null || age > LOCK_TTL_MS) {
+        try {
+          unlinkSync(lockPath);
+        } catch {
+          // Another writer reclaimed or removed it; retry the exclusive create.
+        }
+        continue;
+      }
+      throw Object.assign(new Error("board writer lock is held by another writer"), { code: "writer-lock-held" });
+    }
+    try {
+      return fn();
+    } finally {
+      try {
+        closeSync(fd);
+      } catch {}
+      try {
+        unlinkSync(lockPath);
+      } catch {}
+    }
+  }
+}
+
+export function recordAuthoritySource({ source, sessionOrReportId, quotedInstruction, digest } = {}) {
   if (source !== "instruction" && source !== "report-proposal") {
     throw Object.assign(new Error(`authority source must be "instruction" or "report-proposal", got "${source}"`), {
       code: "authority-source-invalid",
@@ -460,36 +610,76 @@ export function recordAuthoritySource({ source, sessionOrReportId, quotedInstruc
   if (typeof sessionOrReportId !== "string" || sessionOrReportId.trim() === "") {
     throw Object.assign(new Error("sessionOrReportId is required"), { code: "authority-source-invalid" });
   }
-  const record = { source, sessionOrReportId };
   if (typeof quotedInstruction === "string" && quotedInstruction.trim() !== "") {
-    record.quotedInstruction = quotedInstruction;
+    const record = { source, sessionOrReportId, quotedInstruction };
+    return record;
   } else if (typeof quotedInstruction === "string" && quotedInstruction.trim() === "") {
     throw Object.assign(new Error("an authority source requires a quoted instruction or a digest of it"), {
       code: "authority-source-invalid",
     });
+  } else if (typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest)) {
+    return { source, sessionOrReportId, digest };
   } else {
-    record.digest = sha256Hex(nfc(String(quotedInstruction ?? "")));
+    throw Object.assign(new Error("an authority source requires a quoted instruction or a caller-supplied digest"), {
+      code: "authority-source-invalid",
+    });
   }
   return record;
 }
 
+// The board's declared ID prefix: the first cardId on the board, else "T".
+// A model-supplied idPrefix is only honored when it matches the declared
+// prefix, so a model cannot mint a foreign ID space (§3.5).
+export function declaredBoardPrefix(cards) {
+  for (const card of cards) {
+    const match = typeof card.cardId === "string" ? card.cardId.match(/^([A-Za-z0-9][A-Za-z0-9._:-]{0,127})-(\d+)$/) : null;
+    if (match) return match[1];
+  }
+  return "T";
+}
+
 // Writes a card into a board file. Every step is deterministic; the write is
 // atomic (temp file + rename) so it lands complete or not at all. Declines
-// before persist on any validation violation.
+// before persist on any validation violation. Writer operations are
+// serialized with a lock file; IDs come from a durable high-water mark.
 export function writeCard({ boardPath, input, authority, registries = {}, surface = "tasks", now = null }) {
-  const markdown = existsSync(boardPath) ? readFileSync(boardPath, "utf8") : "";
-  const parsed = parseBoard(markdown);
-  if (!parsed.ok) {
-    return { ok: false, code: "board-invalid", errors: parsed.errors, persisted: false };
+  if (typeof boardPath !== "string" || boardPath === "") {
+    throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
   }
-  const cardId = allocateCardId(parsed.cards, { prefix: input.idPrefix ?? "T" });
+  return withWriterLock(boardPath, () => writeCardLocked({ boardPath, input, authority, registries, surface, now }));
+}
+
+function writeCardLocked({ boardPath, input, authority, registries, surface, now }) {
+  const markdown = existsSync(boardPath) ? readFileSync(boardPath, "utf8") : "";
+  // Existing boards are validated against the complete persisted
+  // representation, not merely parsed (§6 gate 2).
+  const validatedBoard = validateBoard(markdown);
+  if (!validatedBoard.ok) {
+    return { ok: false, code: "board-invalid", errors: validatedBoard.errors, persisted: false };
+  }
+  const parsed = { cards: validatedBoard.cards };
+  const declaredPrefix = declaredBoardPrefix(parsed.cards);
+  const prefix = input.idPrefix ?? declaredPrefix;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/.test(prefix) || prefix !== declaredPrefix) {
+    return {
+      ok: false,
+      code: "id-prefix-rejected",
+      errors: [`idPrefix "${prefix}" does not match the board's declared prefix "${declaredPrefix}"`],
+      persisted: false,
+    };
+  }
+  const statePath = writerStatePath(boardPath);
+  const nextNumber = nextCardNumber(parsed.cards, prefix, statePath);
+  const cardId = formatCardId(prefix, nextNumber);
   if (parsed.cards.some((card) => card.cardId === cardId)) {
     return { ok: false, code: "duplicate-card-id", errors: [`cardId "${cardId}" already exists`], persisted: false };
   }
+  const specText = input.spec !== undefined ? nfc(String(input.spec)) : null;
+  const dodText = input.definitionOfDone !== undefined ? nfc(String(input.definitionOfDone)) : null;
   const card = {
     cardId,
     lane: input.lane ?? "backlog",
-    title: nfc(String(input.title ?? "")),
+    title: sanitizeFreeText(input.title),
     flags: [...(input.flags ?? [])],
     priority: input.priority ?? null,
     dependencies: [...(input.dependencies ?? [])],
@@ -497,16 +687,21 @@ export function writeCard({ boardPath, input, authority, registries = {}, surfac
     due: input.due ?? null,
     role: input.role ?? null,
     capabilities: [...(input.capabilities ?? [])],
-    stoppingPoint: input.stoppingPoint ?? null,
-    specHash: input.spec !== undefined ? computeSpecHash(input.spec) : null,
-    dodHash: input.definitionOfDone !== undefined ? computeSpecHash(input.definitionOfDone) : null,
+    stoppingPoint: input.stoppingPoint !== null && input.stoppingPoint !== undefined
+      ? sanitizeFreeText(input.stoppingPoint)
+      : null,
+    specHash: specText !== null ? computeSpecHash(specText) : null,
+    dodHash: dodText !== null ? computeSpecHash(dodText) : null,
+    specText,
+    dodText,
     scope: [...(input.scope ?? [])],
+    unchangedPaths: [...(input.unchangedPaths ?? [])],
     repositories: [...(input.repositories ?? [])],
     tags: [...(input.tags ?? [])],
-    provenance: input.provenance ?? null,
+    provenance: input.provenance !== undefined && input.provenance !== null ? sanitizeFreeText(input.provenance) : null,
     importedId: input.importedId ?? null,
     authoritySource: recordAuthoritySource(authority),
-    description: nfc(String(input.description ?? "")),
+    description: sanitizeFreeText(input.description),
     done: false,
   };
   const validation = validateCard(card, { ...registries, userLevel: input.userLevel ?? false });
@@ -516,10 +711,17 @@ export function writeCard({ boardPath, input, authority, registries = {}, surfac
   card.hash = computeCardHash(card);
   const existingCards = parsed.cards.map((existing) => ({ ...existing, hash: existing.hash ?? computeCardHash(existing) }));
   const serialized = serializeBoard([...existingCards, card], { surface });
+  // The complete resulting board representation is validated before the
+  // atomic rename (§6 gate 2) — not just the in-memory new card.
+  const roundTrip = validateBoard(serialized);
+  if (!roundTrip.ok) {
+    return { ok: false, code: "serialization-invalid", errors: roundTrip.errors, persisted: false, cardId };
+  }
   mkdirSync(dirname(boardPath), { recursive: true });
   const tmpPath = `${boardPath}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(tmpPath, serialized, "utf8");
   renameSync(tmpPath, boardPath);
+  writeFileSync(statePath, JSON.stringify({ highWaterMark: nextNumber }, null, 2) + "\n", "utf8");
   return { ok: true, cardId, card: Object.freeze({ ...card }), persisted: true, ...(now ? { now } : {}) };
 }
 
@@ -536,7 +738,29 @@ export function isDispatchable(card, boardIndex) {
   if ((card.flags ?? []).includes("cancelled")) failed.push("card carries the #cancelled flag");
   if (!card.specHash) failed.push("specification hash missing");
   if (!card.dodHash) failed.push("definition-of-done hash missing");
-  if (card.hash && card.hash !== computeCardHash(card)) failed.push("card hash is stale or tampered (fails closed)");
+  // B1: a present, valid, matching card hash is REQUIRED — a missing hash
+  // never dispatches (fails closed).
+  if (!card.hash) {
+    failed.push("card hash missing (fails closed)");
+  } else if (card.hash !== computeCardHash(card)) {
+    failed.push("card hash is stale or tampered (fails closed)");
+  }
+  // B2: spec and DoD hashes are recomputed from the persisted text and
+  // compared; a mismatch or absent text fails closed.
+  if (card.specText === null || card.specText === undefined) {
+    failed.push("specification text missing (hash cannot be verified)");
+  } else if (computeSpecHash(card.specText) !== card.specHash) {
+    failed.push("specification hash does not match the persisted specification text (fails closed)");
+  }
+  if (card.dodText === null || card.dodText === undefined) {
+    failed.push("definition-of-done text missing (hash cannot be verified)");
+  } else if (computeSpecHash(card.dodText) !== card.dodHash) {
+    failed.push("definition-of-done hash does not match the persisted text (fails closed)");
+  }
+  // B4: dispatch requires a well-formed authority-source record (§3.5).
+  if (!isValidAuthoritySource(card.authoritySource)) {
+    failed.push("no well-formed authority-source record (fails closed)");
+  }
   if (!card.stoppingPoint) failed.push("stopping point not declared");
   if (!(card.scope ?? []).length) failed.push("scope paths not declared");
   for (const dep of card.dependencies ?? []) {

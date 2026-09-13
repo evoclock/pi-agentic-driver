@@ -39,6 +39,7 @@
     "extensions/code-phage.js",
     "extensions/herdr-communication.ts",
     "extensions/herdr-dispatch.ts",
+    "extensions/task-board.ts",
     "lib/adapters/diff-scope.mjs",
     "lib/adapters/evidence.mjs",
     "lib/adapters/narrative.mjs",

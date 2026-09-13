@@ -8,7 +8,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,7 +17,9 @@ import {
   canonicalJsonString, computeCardHash, computeSpecHash,
   parseBoard, validateCard, validateBoard, substituteImportedId,
   serializeObsidianCard, serializeTasksCard, serializeBoard,
-  allocateCardId, recordAuthoritySource, writeCard,
+  allocateCardId, recordAuthoritySource, writeCard, isValidAuthoritySource,
+  encodeFieldText, sanitizeFreeText, declaredBoardPrefix, withWriterLock,
+  writerStatePath, writerLockPath,
   isDispatchable, observeBoardProvider, registerKanbanBoardTools,
   stripTitle,
 } from "../scripts/enforcement/task_board_core_pi.js";
@@ -26,7 +28,7 @@ const SHA = "a".repeat(40);
 const registries = { roles: ["implementer", "reviewer"], capabilities: ["fs-write", "run-tests"] };
 
 function baseCard(overrides = {}) {
-  return {
+  const card = {
     cardId: "T-0001",
     lane: "backlog",
     title: "Do the thing",
@@ -40,13 +42,19 @@ function baseCard(overrides = {}) {
     stoppingPoint: "tests green",
     specHash: computeSpecHash("spec"),
     dodHash: computeSpecHash("done"),
+    specText: "spec",
+    dodText: "done",
     scope: ["src/"],
+    unchangedPaths: [],
     repositories: [],
     tags: [],
     description: "",
     done: false,
+    authoritySource: { source: "instruction", sessionOrReportId: "sess-1", quotedInstruction: "do the thing" },
     ...overrides,
   };
+  card.hash = overrides.hash ?? computeCardHash(card);
+  return card;
 }
 
 // --- §1: closed vocabularies and identity ----------------------------------
@@ -146,6 +154,27 @@ test("presentation is excluded from the hash; authority source is outside it", (
 test("semantic change changes the hash", () => {
   assert.notEqual(computeCardHash(baseCard()), computeCardHash(baseCard({ priority: "P0" })));
   assert.notEqual(computeCardHash(baseCard()), computeCardHash(baseCard({ flags: ["blocked"] })));
+});
+
+test("B3 regression: capabilities, repositories, and unchanged paths are hash-bearing", () => {
+  assert.notEqual(
+    computeCardHash(baseCard()),
+    computeCardHash(baseCard({ capabilities: ["fs-write"] })),
+  );
+  assert.notEqual(
+    computeCardHash(baseCard()),
+    computeCardHash(baseCard({ repositories: ["pi-agentic-driver"] })),
+  );
+  assert.notEqual(
+    computeCardHash(baseCard()),
+    computeCardHash(baseCard({ unchangedPaths: ["docs/"] })),
+  );
+  // Absent optional scope fields are omitted, never null, so an empty list
+  // and an absent list hash identically (§1 canonicalization).
+  assert.equal(
+    computeCardHash(baseCard({ capabilities: [], repositories: [], unchangedPaths: [] })),
+    computeCardHash({ ...baseCard(), capabilities: undefined, repositories: undefined, unchangedPaths: undefined }),
+  );
 });
 
 // --- §2: parsers and serializers, both surfaces -----------------------------
@@ -287,12 +316,68 @@ test("dependencies must be done and not cancelled; a cancelled dependency fails"
 
 test("stale or tampered card hash fails closed at dispatch", () => {
   const card = baseCard();
-  card.hash = computeCardHash(card);
   assert.equal(isDispatchable(card, boardIndex([])).dispatchable, true);
   card.priority = "P0"; // semantic tamper after the hash was computed
   const result = isDispatchable(card, boardIndex([]));
   assert.equal(result.dispatchable, false);
   assert.ok(result.failedConditions.some((c) => c.includes("stale or tampered")));
+});
+
+test("B1 regression: a missing card hash never dispatches (fails closed)", () => {
+  const card = baseCard();
+  delete card.hash;
+  const result = isDispatchable(card, boardIndex([]));
+  assert.equal(result.dispatchable, false);
+  assert.ok(result.failedConditions.some((c) => c.includes("card hash missing")));
+});
+
+test("B2 regression: spec/DoD hashes are verified against persisted text", () => {
+  // Persisted text tampered after the hash was written: mismatch fails closed.
+  const tamperedSpec = baseCard({ specText: "tampered spec" });
+  const r1 = isDispatchable(tamperedSpec, boardIndex([]));
+  assert.equal(r1.dispatchable, false);
+  assert.ok(r1.failedConditions.some((c) => c.includes("specification hash does not match")));
+
+  const tamperedDod = baseCard({ dodText: "tampered dod" });
+  const r2 = isDispatchable(tamperedDod, boardIndex([]));
+  assert.equal(r2.dispatchable, false);
+  assert.ok(r2.failedConditions.some((c) => c.includes("definition-of-done hash does not match")));
+
+  // Text absent entirely: the hash cannot be verified, so it fails closed.
+  const noText = baseCard({ specText: null, dodText: null });
+  const r3 = isDispatchable(noText, boardIndex([]));
+  assert.equal(r3.dispatchable, false);
+  assert.ok(r3.failedConditions.some((c) => c.includes("text missing")));
+
+  // Arbitrary non-empty hash values without backing text never pass.
+  const bogus = baseCard({ specHash: "abc", dodHash: "def", specText: null, dodText: null, hash: null });
+  assert.equal(isDispatchable(bogus, boardIndex([])).dispatchable, false);
+});
+
+test("B4 regression: dispatch requires a well-formed authority-source record", () => {
+  for (const bad of [
+    null,
+    {},
+    { source: "vibes", sessionOrReportId: "s", quotedInstruction: "x" },
+    { source: "instruction", sessionOrReportId: "" },
+    { source: "instruction", sessionOrReportId: "s" },
+    { source: "instruction", sessionOrReportId: "s", quotedInstruction: "   " },
+    { source: "instruction", sessionOrReportId: "s", digest: "nothex" },
+  ]) {
+    const result = isDispatchable(baseCard({ authoritySource: bad }), boardIndex([]));
+    assert.equal(result.dispatchable, false, JSON.stringify(bad));
+    assert.ok(result.failedConditions.some((c) => c.includes("authority-source")));
+  }
+  // A digest-bearing record is well-formed.
+  const digestRecord = { source: "report-proposal", sessionOrReportId: "r1", digest: "a".repeat(64) };
+  assert.equal(isDispatchable(baseCard({ authoritySource: digestRecord }), boardIndex([])).dispatchable, true);
+});
+
+test("B4 regression: a parsed malformed authority field fails validation", () => {
+  const md = "## backlog\n\n- [ ] x [id:: T-0001] [authority:: {oops}]";
+  const parsed = validateBoard(md);
+  assert.equal(parsed.ok, false);
+  assert.ok(parsed.errors.some((e) => e.includes("malformed authority-source")));
 });
 
 test("adversarial: quotes, backticks, :: inside values, emoji lookalikes, HTML-comment injection", () => {
@@ -327,9 +412,28 @@ test("malformed authority source records are refused", () => {
   assert.throws(() => recordAuthoritySource({ source: "vibes", sessionOrReportId: "s1", quotedInstruction: "do it" }));
   assert.throws(() => recordAuthoritySource({ source: "instruction", sessionOrReportId: "", quotedInstruction: "x" }));
   assert.throws(() => recordAuthoritySource({ source: "instruction", sessionOrReportId: "s1", quotedInstruction: "   " }));
+  // M1: an omitted quotedInstruction no longer hashes the empty string — a
+  // caller-supplied digest is required, or the call fails.
+  assert.throws(() => recordAuthoritySource({ source: "instruction", sessionOrReportId: "s1" }));
+  const digested = recordAuthoritySource({ source: "instruction", sessionOrReportId: "s1", digest: "b".repeat(64) });
+  assert.equal(digested.digest, "b".repeat(64));
+  assert.ok(!("quotedInstruction" in digested));
   const record = recordAuthoritySource({ source: "report-proposal", sessionOrReportId: "report-7", quotedInstruction: "approved" });
   assert.equal(record.source, "report-proposal");
   assert.ok(!("timestamp" in record));
+});
+
+test("M2 regression: duplicate authority-bearing fields are rejected fail-closed", () => {
+  for (const [line, key] of [
+    ["- [ ] x [id:: T-0001] [priority:: P1] [priority:: P0]", "priority"],
+    ["- [ ] x [id:: T-0001] [scope:: a/] [scope:: b/]", "scope"],
+    ["- [ ] x [id:: T-0001] [hash:: aa] [hash:: bb]", "hash"],
+    ["- [ ] x [id:: T-0001] [authority:: {}] [authority:: {}]", "authority"],
+  ]) {
+    const parsed = parseBoard(`## backlog\n\n${line}`);
+    assert.equal(parsed.ok, false, key);
+    assert.ok(parsed.errors.some((e) => e.includes(`duplicate [${key}::`)), key);
+  }
 });
 
 // --- §3.5: trusted board writer ----------------------------------------------
@@ -433,6 +537,158 @@ test("writer never accepts a model-supplied cardId", () => {
   }
 });
 
+test("B5 regression: deleting the highest card never reuses its ID (durable high-water mark)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "board1-"));
+  const boardPath = join(dir, "board.md");
+  try {
+    for (const title of ["one", "two", "three"]) {
+      const r = writeCard({
+        boardPath,
+        input: { title, spec: "s", definitionOfDone: "d", stoppingPoint: "x", scope: ["src/"] },
+        authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write" },
+        registries,
+      });
+      assert.equal(r.ok, true);
+    }
+    assert.ok(existsSync(writerStatePath(boardPath)));
+    // Delete the highest card from the file, keeping the writer state file.
+    const markdown = readFileSync(boardPath, "utf8").split("\n").filter((l) => !l.includes("T-0003")).join("\n");
+    writeFileSync(boardPath, markdown);
+    const r = writeCard({
+      boardPath,
+      input: { title: "four", spec: "s", definitionOfDone: "d", stoppingPoint: "x", scope: ["src/"] },
+      authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write" },
+      registries,
+    });
+    assert.equal(r.ok, true);
+    assert.equal(r.cardId, "T-0004");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("B5 regression: a model-supplied idPrefix that differs from the board prefix is rejected", () => {
+  const dir = mkdtempSync(join(tmpdir(), "board1-"));
+  const boardPath = join(dir, "board.md");
+  try {
+    const first = writeCard({
+      boardPath,
+      input: { title: "one", spec: "s", definitionOfDone: "d", stoppingPoint: "x", scope: ["src/"] },
+      authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write" },
+      registries,
+    });
+    assert.equal(first.cardId, "T-0001");
+    const hijack = writeCard({
+      boardPath,
+      input: { idPrefix: "EVIL", title: "x", spec: "s", definitionOfDone: "d", stoppingPoint: "x", scope: ["src/"] },
+      authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write" },
+      registries,
+    });
+    assert.equal(hijack.ok, false);
+    assert.equal(hijack.code, "id-prefix-rejected");
+    // A matching prefix is fine.
+    const ok = writeCard({
+      boardPath,
+      input: { idPrefix: "T", title: "two", spec: "s", definitionOfDone: "d", stoppingPoint: "x", scope: ["src/"] },
+      authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write" },
+      registries,
+    });
+    assert.equal(ok.cardId, "T-0002");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("B5 regression: writer operations are serialized with a lock file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "board1-"));
+  const boardPath = join(dir, "board.md");
+  try {
+    writeFileSync(writerLockPath(boardPath), "held"); // a fresh, non-stale lock
+    assert.throws(
+      () => writeCard({
+        boardPath,
+        input: { title: "x", spec: "s", definitionOfDone: "d", stoppingPoint: "x", scope: ["src/"] },
+        authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write" },
+        registries,
+      }),
+      (error) => error.code === "writer-lock-held",
+    );
+    assert.equal(existsSync(boardPath), false);
+    // A stale lock is reclaimed fail-closed and the write proceeds.
+    const past = new Date(Date.now() - 60_000);
+    writeFileSync(writerLockPath(boardPath), "stale");
+    // utimesSync-free: set mtime via write then utimes
+    utimesSync(writerLockPath(boardPath), past, past);
+    const r2 = writeCard({
+      boardPath,
+      input: { title: "x", spec: "s", definitionOfDone: "d", stoppingPoint: "x", scope: ["src/"] },
+      authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write" },
+      registries,
+    });
+    assert.equal(r2.ok, true);
+    assert.equal(existsSync(writerLockPath(boardPath)), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("B6 regression: the resulting board text is fully validated before persist", () => {
+  const dir = mkdtempSync(join(tmpdir(), "board1-"));
+  const boardPath = join(dir, "board.md");
+  try {
+    // A pre-existing card with an undeclared role makes the resulting board
+    // invalid; the writer must decline rather than persist around it.
+    writeFileSync(boardPath, "## backlog\n\n- [ ] rogue [id:: T-0001] [role:: wizard]");
+    const r = writeCard({
+      boardPath,
+      input: { title: "x", spec: "s", definitionOfDone: "d", stoppingPoint: "x", scope: ["src/"] },
+      authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write" },
+      registries,
+    });
+    assert.equal(r.ok, false);
+    assert.ok(r.errors.some((e) => e.includes("role registry")));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("B6 regression: titles and instruction text cannot inject field or comment syntax", () => {
+  const dir = mkdtempSync(join(tmpdir(), "board1-"));
+  const boardPath = join(dir, "board.md");
+  try {
+    const r = writeCard({
+      boardPath,
+      input: {
+        title: "Evil [flag:: blocked] <!-- id: T-9999 --> title] here",
+        description: "[priority:: P0] <!-- smuggled -->",
+        spec: "s",
+        definitionOfDone: "d",
+        stoppingPoint: "x",
+        scope: ["src/"],
+      },
+      authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write" },
+      registries,
+    });
+    assert.equal(r.ok, true);
+    const onDisk = readFileSync(boardPath, "utf8");
+    const parsed = parseBoard(onDisk);
+    assert.equal(parsed.ok, true, parsed.errors.join("; "));
+    const card = parsed.cards[0];
+    assert.equal(card.cardId, "T-0001");
+    assert.ok(!card.flags.includes("blocked"), "injected flag must not parse");
+    assert.equal(card.priority, null, "injected priority must not parse");
+    assert.ok(!onDisk.includes("T-9999"));
+    assert.ok(!onDisk.includes("<!-- smuggled -->"));
+    // Round-trips: serialized spec/DoD text decodes to the original input.
+    assert.equal(card.specText, "s");
+    assert.equal(card.dodText, "d");
+    // And the persisted card dispatches (hash + text verification all hold).
+    assert.equal(isDispatchable(card, boardIndex(parsed.cards)).dispatchable, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // --- §6 gate 4: reversal proof ------------------------------------------------
 
 test("reversal: no board file means no observation, no registration, no behavior change", () => {
@@ -461,49 +717,111 @@ test("reversal: provider observation gates registration on a real board file", (
   }
 });
 
+test("B7 regression: the extension resolves the board path from the workspace", async () => {
+  const extensionModule = await import("../extensions/task-board.ts");
+  // Documented locations are supported.
+  assert.equal(extensionModule.resolveBoardPath("/nonexistent-xyz"), null);
+  assert.equal(extensionModule.resolveBoardPath(""), null);
+  assert.equal(extensionModule.resolveBoardPath(undefined), null);
+
+  // No board in the workspace: nothing registers, observation is absent.
+  const emptyDir = mkdtempSync(join(tmpdir(), "board1-"));
+  try {
+    const registered = [];
+    const result = await extensionModule.default({ registerTool: (t) => registered.push(t.name), ctx: { cwd: emptyDir } });
+    assert.deepEqual(registered, []);
+    assert.deepEqual(result.registered, []);
+    assert.equal(result.observation.present, false);
+  } finally {
+    rmSync(emptyDir, { recursive: true, force: true });
+  }
+
+  // A TASKS.md board in the workspace root: the tool registers.
+  const tasksDir = mkdtempSync(join(tmpdir(), "board1-"));
+  try {
+    writeFileSync(join(tasksDir, "TASKS.md"), serializeBoard([baseCard()], { surface: "tasks" }));
+    const registered = [];
+    const result = await extensionModule.default({ registerTool: (t) => registered.push(t.name), ctx: { cwd: tasksDir } });
+    assert.deepEqual(registered, ["agentic_kanban_board"]);
+    assert.deepEqual(result.registered, ["agentic_kanban_board"]);
+    assert.equal(result.observation.present, true);
+  } finally {
+    rmSync(tasksDir, { recursive: true, force: true });
+  }
+
+  // A board.md board in the workspace root: the tool registers.
+  const obsidianDir = mkdtempSync(join(tmpdir(), "board1-"));
+  try {
+    writeFileSync(join(obsidianDir, "board.md"), serializeBoard([baseCard()], { surface: "obsidian" }));
+    const registered = [];
+    await extensionModule.default({ registerTool: (t) => registered.push(t.name), ctx: { cwd: obsidianDir } });
+    assert.deepEqual(registered, ["agentic_kanban_board"]);
+  } finally {
+    rmSync(obsidianDir, { recursive: true, force: true });
+  }
+});
+
 // --- §6 gate 1 fixture: agent comprehension gate fixture board ----------------
 
+// Fixture cards are built as full semantic cards and serialized by the
+// canonical serializer, so the persisted [hash:: ...] field matches exactly
+// what the parser recomputes — the gate exercises the real §3.3 conjunction.
+const SPEC = "implement the fix per the design";
+const DOD = "focused tests green";
+
+function fixtureCard(overrides = {}) {
+  return baseCard({
+    title: overrides.title ?? "Do the thing",
+    specText: SPEC,
+    dodText: DOD,
+    specHash: computeSpecHash(SPEC),
+    dodHash: computeSpecHash(DOD),
+    ...overrides,
+  });
+}
+
 test("comprehension gate fixture: a real rich Obsidian-style board parses cleanly", () => {
-  const md = [
-    "# Coordination board",
-    "",
-    "## backlog",
-    "",
-    "- [ ] 🔴 Fix login race condition [id:: T-0004] [priority:: P0] [blockedBy:: T-0003] [role:: implementer] [capabilities:: fs-write, run-tests] [scope:: src/auth/session.ts] [stopping:: focused auth tests green] [specHash:: " + SHA + "] [dodHash:: " + SHA + "]",
-    "- [ ] 🟡 Write onboarding docs [id:: T-0005] [priority:: P2] [flag:: proposed] [scope:: docs/] [stopping:: docs reviewed] [specHash:: " + SHA + "] [dodHash:: " + SHA + "]",
-    "## in-progress",
-    "",
-    "- [ ] 🟡 Extract session helper [id:: T-0003] [priority:: P1] [base:: " + SHA + "] [scope:: src/auth/] [stopping:: unit tests green] [specHash:: " + SHA + "] [dodHash:: " + SHA + "]",
-    "## done",
-    "",
-    "- [x] ✅ Bootstrap module [id:: T-0001] [priority:: P3] [scope:: src/] [stopping:: scaffold complete] [specHash:: " + SHA + "] [dodHash:: " + SHA + "]",
-    "- [x] ✅ Add CI workflow [id:: T-0002] [priority:: P3] [scope:: .github/] [stopping:: workflow green] [specHash:: " + SHA + "] [dodHash:: " + SHA + "]",
-  ].join("\n");
+  const md = serializeBoard([
+    fixtureCard({ cardId: "T-0004", title: "Fix login race condition", priority: "P0", role: "implementer", capabilities: ["fs-write", "run-tests"] }),
+    fixtureCard({ cardId: "T-0005", title: "Write onboarding docs", priority: "P2", flags: ["proposed"] }),
+    fixtureCard({ cardId: "T-0003", title: "Extract session helper", priority: "P1", lane: "in-progress", base: SHA }),
+    fixtureCard({ cardId: "T-0001", title: "Bootstrap module", priority: "P3", lane: "done", done: true }),
+  ], { surface: "obsidian" });
   const parsed = validateBoard(md, registries);
   assert.equal(parsed.ok, true, parsed.errors.join("; "));
-  // The gate answers, from this fixture alone:
+  // The gate answers, from this fixture alone, via the module API:
   const index = boardIndex(parsed.cards);
   const candidates = parsed.cards.filter((card) => isDispatchable(card, index).dispatchable);
-  // T-0004 is highest priority but blocked by T-0003 (in-progress, not done);
-  // T-0005 is proposed. So nothing is dispatchable yet — the fixture proves
-  // the dependency and flag gates are readable from the file.
-  assert.equal(candidates.length, 0);
-  const t4 = parsed.cards.find((c) => c.cardId === "T-0004");
-  assert.deepEqual(t4.dependencies, ["T-0003"]);
-  assert.equal(t4.priority, "P0");
-  assert.deepEqual(t4.scope, ["src/auth/session.ts"]);
-  assert.equal(t4.stoppingPoint, "focused auth tests green");
-  assert.equal(t4.role, "implementer");
-  assert.deepEqual(t4.capabilities, ["fs-write", "run-tests"]);
+  // T-0004 is P0 and its only dependency T-0001 is done: it is the
+  // highest-priority dispatchable card. T-0005 is proposed and never
+  // dispatchable; T-0003 sits in in-progress.
+  assert.deepEqual(candidates.map((c) => c.cardId), ["T-0004"]);
+  const t4parsed = parsed.cards.find((c) => c.cardId === "T-0004");
+  assert.deepEqual(t4parsed.dependencies, []);
+  assert.equal(t4parsed.priority, "P0");
+  assert.deepEqual(t4parsed.scope, ["src/"]);
+  assert.equal(t4parsed.stoppingPoint, "tests green");
+  assert.equal(t4parsed.role, "implementer");
+  assert.deepEqual(t4parsed.capabilities, ["fs-write", "run-tests"]);
+  const t5parsed = parsed.cards.find((c) => c.cardId === "T-0005");
+  assert.ok(t5parsed.flags.includes("proposed"));
+  assert.equal(isDispatchable(t5parsed, index).dispatchable, false);
 });
 
 test("comprehension gate fixture: simple vogelkop-style board parses cleanly", () => {
-  const md = [
-    "## backlog",
-    "",
-    "- [ ] Fix login race <!-- id: T-0004 --> [priority:: P0] [scope:: src/auth/session.ts] [stopping:: tests green] [specHash:: " + SHA + "] [dodHash:: " + SHA + "]",
-  ].join("\n");
+  const md = serializeBoard([
+    fixtureCard({ cardId: "T-0004", title: "Fix login race", priority: "P0" }),
+    fixtureCard({ cardId: "T-0005", title: "Propose follow-up", priority: "P2", flags: ["proposed"] }),
+    fixtureCard({ cardId: "T-0001", title: "Bootstrap module", priority: "P3", lane: "done", done: true }),
+  ], { surface: "tasks" });
   const parsed = validateBoard(md, registries);
   assert.equal(parsed.ok, true, parsed.errors.join("; "));
-  assert.equal(isDispatchable(parsed.cards[0], boardIndex(parsed.cards)).dispatchable, true);
+  const index = boardIndex(parsed.cards);
+  // Highest-priority dispatchable card is identifiable via the module API.
+  const candidates = parsed.cards.filter((card) => isDispatchable(card, index).dispatchable);
+  assert.deepEqual(candidates.map((c) => c.cardId), ["T-0004"]);
+  // A proposed card can be proposed in this encoding and is non-dispatchable.
+  const t5parsed = parsed.cards.find((c) => c.cardId === "T-0005");
+  assert.ok(t5parsed.flags.includes("proposed"));
+  assert.equal(isDispatchable(t5parsed, index).dispatchable, false);
 });
