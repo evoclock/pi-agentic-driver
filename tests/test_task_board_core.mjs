@@ -922,10 +922,12 @@ test("reversal: provider observation happens per call on a real board file", asy
 
 test("B7 regression: the extension resolves the board path from the workspace", async () => {
   const extensionModule = await import("../extensions/task-board.ts");
-  // Documented locations are supported.
-  assert.equal(extensionModule.resolveBoardPath("/nonexistent-xyz"), null);
+  // Documented behavior: a known workspace always yields a candidate path
+  // (existing board, or the canonical TASKS.md for bootstrap); unknown
+  // workspace input yields null.
   assert.equal(extensionModule.resolveBoardPath(""), null);
   assert.equal(extensionModule.resolveBoardPath(undefined), null);
+  assert.ok(extensionModule.resolveBoardPath("/nonexistent-xyz") !== null);
 
   // No board in the workspace: both tools still register (registration is
   // unconditional; observation is per call) and calls report unavailable.

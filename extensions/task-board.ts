@@ -11,16 +11,21 @@ import { join } from "node:path";
 
 const BOARD_FILENAMES = ["board.md", "TASKS.md"];
 
+// Returns the board path for the workspace: an existing board file if one is
+// present, otherwise the canonical TASKS.md candidate (the write tool
+// bootstraps a fresh board there). Null only when the workspace is unknown.
 export function resolveBoardPath(cwd) {
   if (typeof cwd !== "string" || cwd === "") return null;
   for (const name of BOARD_FILENAMES) {
     const candidate = join(cwd, name);
     if (existsSync(candidate)) return candidate;
   }
-  return null;
+  return join(cwd, "TASKS.md");
 }
 
 export default async function taskBoardPi(pi) {
   const module = await import(new URL("../scripts/enforcement/task_board_core_pi.js", import.meta.url).href);
-  return module.registerKanbanBoardTools(pi, { resolveBoardPath });
+  return module.registerKanbanBoardTools(pi, {
+    resolveBoardPath: (ctx) => resolveBoardPath(typeof ctx === "string" ? ctx : ctx?.cwd || process.cwd()),
+  });
 }
