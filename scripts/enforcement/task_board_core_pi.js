@@ -11,8 +11,8 @@
 // hashes; presentation is excluded from the hash; every disagreement between
 // surfaces fails closed.
 
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, openSync, closeSync, unlinkSync, statSync as fsStatSync } from "node:fs";
+import { createHash, createHmac, randomBytes } from "node:crypto";
+import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, openSync, closeSync, unlinkSync, chmodSync, statSync as fsStatSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -42,6 +42,21 @@ export const OBSIDIAN_PRIORITY_MAP = Object.freeze({
 });
 
 const FIELD_RE = /\[([A-Za-z][A-Za-z0-9_-]*)::[ \t]([^\][]*)\]/g;
+
+// Field-key aliases the parser accepts (F5). Duplicate detection and the
+// semantic mapping both go through the canonical key, so semantic aliases
+// ([specHash:: x] vs [spec-hash:: x]) collide as duplicates fail-closed.
+export const FIELD_KEY_ALIASES = Object.freeze({
+  "stopping-point": "stopping",
+  "spec-hash": "specHash",
+  "dod-hash": "dodHash",
+  "spec-text": "specText",
+  "dod-text": "dodText",
+});
+
+export function canonicalFieldKey(key) {
+  return FIELD_KEY_ALIASES[key] ?? key;
+}
 const HTML_ID_MARKER_RE = /<!--\s*id:\s*([^>]*?)\s*-->/g;
 // Tasks-plugin presentation emoji (optional; never required, never hashed).
 const EMOJI_RE = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{2194}-\u{21AA}]/gu;
@@ -101,10 +116,16 @@ export function encodeFieldText(text) {
   return Buffer.from(String(text ?? ""), "utf8").toString("base64url");
 }
 
+// F2: only the canonical base64url encoding is accepted. The decoded bytes
+// are re-encoded and compared to the original string exactly, so a permissive
+// decoder cannot smuggle non-canonical input ('***' and friends decode to
+// nothing usable and are rejected).
 export function decodeFieldText(encoded) {
   if (typeof encoded !== "string" || encoded === "") return null;
   try {
-    return Buffer.from(encoded, "base64url").toString("utf8");
+    const decoded = Buffer.from(encoded, "base64url").toString("utf8");
+    if (Buffer.from(decoded, "utf8").toString("base64url") !== encoded) return null;
+    return decoded;
   } catch {
     return null;
   }
@@ -177,7 +198,7 @@ function parseCardLine(line, surface, checkboxState = null) {
   }
 
   for (const match of line.matchAll(FIELD_RE)) {
-    const key = match[1];
+    const key = canonicalFieldKey(match[1]);
     const value = match[2].trim();
     if (key === "id") {
       if (idField !== null) errors.push("duplicate [id:: ...] field");
@@ -185,12 +206,17 @@ function parseCardLine(line, surface, checkboxState = null) {
     } else if (key === "flag") {
       if (!FLAGS.includes(value)) {
         errors.push(`unknown flag "${value}" (closed enum: ${FLAGS.join(", ")})`);
+      } else if (flags.includes(value)) {
+        // F5: a repeated flag is a duplicate error; distinct flags on one
+        // card are fine.
+        errors.push(`duplicate [flag:: ${value}] field on one card line (injection rejected)`);
       } else {
         flags.push(value);
       }
     } else {
       // Duplicate authority-bearing fields are ambiguous (last-value-wins is
-      // an injection vector); reject fail-closed (M2).
+      // an injection vector); reject fail-closed (M2). Keys are compared
+      // through the canonical alias map so semantic aliases collide too (F5).
       if (Object.hasOwn(fields, key)) duplicateKeys.add(key);
       fields[key] = value;
     }
@@ -287,11 +313,12 @@ function semanticCard(raw, errors) {
     due: f.due ?? null,
     role: f.role ?? null,
     capabilities: f.capabilities ? f.capabilities.split(/[\s,]+/).filter(Boolean) : [],
-    stoppingPoint: f.stopping ?? f["stopping-point"] ?? null,
-    specHash: f.specHash ?? f["spec-hash"] ?? null,
-    dodHash: f.dodHash ?? f["dod-hash"] ?? null,
-    specText: decodeFieldText(f.specText ?? f["spec-text"]),
-    dodText: decodeFieldText(f.dodText ?? f["dod-text"]),
+    // Field keys are already canonicalized by the parser (F5).
+    stoppingPoint: f.stopping ?? null,
+    specHash: f.specHash ?? null,
+    dodHash: f.dodHash ?? null,
+    specText: decodeFieldText(f.specText),
+    dodText: decodeFieldText(f.dodText),
     scope: f.scope ? f.scope.split(/[\s,]+/).filter(Boolean) : [],
     unchangedPaths: f.unchanged ? f.unchanged.split(/[\s,]+/).filter(Boolean) : [],
     repositories: f.repos ? f.repos.split(/[\s,]+/).filter(Boolean) : [],
@@ -300,6 +327,7 @@ function semanticCard(raw, errors) {
     importedId: f.importedId ?? null,
     hash: f.hash ?? null,
     authoritySource: f.authority ? safeJsonParse(f.authority) : null,
+    authorityWriterHmac: f.authorityHmac ?? null,
     fields: { ...f },
     description: raw.description.join("\n"),
     done: raw.done ?? false,
@@ -313,15 +341,24 @@ function semanticCard(raw, errors) {
 }
 
 // §3.5: an authority-source record is a reference — {source: "instruction" |
-// "report-proposal", sessionOrReportId, quotedInstruction-or-digest}. A
-// malformed or absent record is never dispatchable.
+// "report-proposal", sessionOrReportId, quotedInstruction-or-digest}. The
+// shape is closed (F1): exactly these three fields, and exactly one of
+// quotedInstruction or digest. A malformed or absent record is never
+// dispatchable.
 export function isValidAuthoritySource(record) {
   if (record === null || typeof record !== "object" || Array.isArray(record)) return false;
+  if (typeof record === "object" && "writerHmac" in record) return false;
+  const keys = Object.keys(record);
+  if (keys.length !== 3) return false;
+  for (const key of keys) {
+    if (key !== "source" && key !== "sessionOrReportId" && key !== "quotedInstruction" && key !== "digest") return false;
+  }
   if (record.source !== "instruction" && record.source !== "report-proposal") return false;
   if (typeof record.sessionOrReportId !== "string" || record.sessionOrReportId.trim() === "") return false;
   const hasInstruction = typeof record.quotedInstruction === "string" && record.quotedInstruction.trim() !== "";
   const hasDigest = typeof record.digest === "string" && /^[0-9a-f]{64}$/.test(record.digest);
-  return hasInstruction || hasDigest;
+  // Exactly one of quotedInstruction or digest — never both, never neither.
+  return hasInstruction !== hasDigest;
 }
 
 function safeJsonParse(text) {
@@ -465,6 +502,7 @@ export function serializeObsidianCard(card) {
   if (card.provenance) parts.push(fieldText("provenance", card.provenance));
   if (card.importedId) parts.push(fieldText("importedId", card.importedId));
   if (card.authoritySource) parts.push(fieldText("authority", JSON.stringify(card.authoritySource)));
+  if (card.authorityWriterHmac) parts.push(fieldText("authorityHmac", card.authorityWriterHmac));
   let out = `- ${parts.join(" ")}`;
   if (card.description) out += `\n  ${card.description.replace(/\n/g, "\n  ")}`;
   return out;
@@ -493,6 +531,7 @@ export function serializeTasksCard(card) {
   if (card.provenance) parts.push(fieldText("provenance", card.provenance));
   if (card.importedId) parts.push(fieldText("importedId", card.importedId));
   if (card.authoritySource) parts.push(fieldText("authority", JSON.stringify(card.authoritySource)));
+  if (card.authorityWriterHmac) parts.push(fieldText("authorityHmac", card.authorityWriterHmac));
   let out = `- ${parts.join(" ")}`;
   if (card.description) out += `\n  ${card.description.replace(/\n/g, "\n  ")}`;
   return out;
@@ -523,25 +562,84 @@ export function allocateCardId(cards, { prefix = "T" } = {}) {
   return `${prefix}-${String(max + 1).padStart(4, "0")}`;
 }
 
-// The high-water mark is tracked durably in a writer state file next to the
-// board so deleting the highest card can never cause ID reuse (§3.5: IDs are
-// minted by the writer and never reused).
+// The high-water mark, the per-board HMAC secret, and the issued-cardId
+// ledger are tracked durably in a writer state file next to the board
+// (§3.5: IDs are minted by the writer and never reused).
+//
+// TRUST MODEL (F1, stated honestly): the user who owns the machine can edit
+// both the board and this state file and can always forge a valid-looking
+// authority record. That is accepted — the machine owner is trusted. The
+// boundary this scheme enforces is against AGENT and other-figure edits:
+// cards not written through the trusted writer cannot dispatch, because
+// dispatch requires (a) the cardId to appear in the writer's issued-IDs
+// ledger in the state file, and (b) the authority record's HMAC-SHA256,
+// keyed by the state-file secret, to verify. A hand-edited card with a new
+// cardId is not in the ledger; a hand-edited card reusing an issued cardId
+// fails the HMAC or the hash comparison. An agent that edits only the board
+// file cannot manufacture dispatch eligibility.
 export function writerStatePath(boardPath) {
   return `${boardPath}.writer-state.json`;
 }
 
-function readHighWaterMark(statePath) {
+function readWriterState(statePath) {
   try {
     const state = JSON.parse(readFileSync(statePath, "utf8"));
     const value = Number(state?.highWaterMark);
-    return Number.isInteger(value) && value >= 0 ? value : 0;
+    return {
+      highWaterMark: Number.isInteger(value) && value >= 0 ? value : 0,
+      secret: typeof state?.secret === "string" && state.secret !== "" ? state.secret : null,
+      issuedCardIds: Array.isArray(state?.issuedCardIds) ? state.issuedCardIds.filter((id) => typeof id === "string") : [],
+    };
   } catch {
-    return 0;
+    return { highWaterMark: 0, secret: null, issuedCardIds: [] };
   }
 }
 
-function nextCardNumber(cards, prefix, statePath) {
-  let max = readHighWaterMark(statePath);
+// HMAC over the canonical JSON form of {authority record, card hash}, keyed
+// by the per-board secret held in the writer state file (F1). Binding the
+// card hash into the HMAC means a hand-edited card that reuses an issued
+// cardId and copies the record fails: any hash-bearing edit changes the card
+// hash and the HMAC no longer verifies. The digest is stored beside the
+// record — the record itself keeps exactly its three closed fields.
+export function authorityRecordHmac(record, secret, cardHash) {
+  return createHmac("sha256", secret)
+    .update(canonicalJsonString({ record, cardHash }), "utf8")
+    .digest("hex");
+}
+
+// Dispatch-time authority verification (F1): the record must be well-formed,
+// carry a writerHmac that verifies against the state file's secret AND the
+// card's recomputed hash, and the cardId must appear in the writer's
+// issued-IDs ledger. A hand-edited card fails at least one of these.
+export function verifyAuthorityProvenance({ authoritySource, cardId, cardHash, statePath }) {
+  const state = readWriterState(statePath);
+  // The writerHmac travels beside the record; validate the bare record.
+  const { writerHmac, ...bareRecord } = authoritySource ?? {};
+  if (!isValidAuthoritySource(bareRecord)) {
+    return { ok: false, reason: "no well-formed authority-source record (fails closed)" };
+  }
+  if (state.secret === null) {
+    return { ok: false, reason: "writer state file has no secret (fails closed)" };
+  }
+  const expected = authorityRecordHmac(bareRecord, state.secret, cardHash);
+  if (writerHmac !== expected) {
+    return { ok: false, reason: "authority-source HMAC does not verify against the writer state (fails closed)" };
+  }
+  if (!state.issuedCardIds.includes(cardId)) {
+    return { ok: false, reason: `cardId "${cardId}" was not issued by the trusted writer (fails closed)` };
+  }
+  return { ok: true, reason: null };
+}
+
+function writeWriterState(statePath, state) {
+  const tmpPath = `${statePath}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmpPath, JSON.stringify(state, null, 2) + "\n", "utf8");
+  chmodSync(tmpPath, 0o600);
+  renameSync(tmpPath, statePath);
+}
+
+function nextCardNumber(cards, prefix, state) {
+  let max = state.highWaterMark;
   const re = new RegExp(`^${prefix}-(\\d+)$`);
   for (const card of cards) {
     const match = typeof card.cardId === "string" ? card.cardId.match(re) : null;
@@ -555,22 +653,52 @@ export function formatCardId(prefix, number) {
 }
 
 // Writer serialization (§6 gate 2): a lock file created exclusively next to
-// the board. A stale lock (older than the TTL) is removed only under the
-// same exclusive-create discipline; anything else fails closed.
+// the board. The lock content is a random owner token (F3): a stale lock is
+// reclaimed only by compare-and-delete — the reclaimer reads the observed
+// token, and unlinks only if the content still equals that token at unlink
+// time. Each writer's finally unlinks only if the content still equals its
+// own token, so a second writer can never unlink a live lock out from under
+// the first, and the first can never unlink the second's.
 const LOCK_TTL_MS = 30_000;
 
 export function writerLockPath(boardPath) {
   return `${boardPath}.lock`;
 }
 
+function readLockToken(lockPath) {
+  try {
+    return readFileSync(lockPath, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+// Compare-and-delete: unlink only if the content still equals the expected
+// token. Returns true when this caller removed the lock.
+function unlinkIfToken(lockPath, expectedToken) {
+  const observed = readLockToken(lockPath);
+  if (observed === null || observed !== expectedToken) return false;
+  try {
+    unlinkSync(lockPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function withWriterLock(boardPath, fn) {
   const lockPath = writerLockPath(boardPath);
   mkdirSync(dirname(boardPath), { recursive: true });
   for (;;) {
+    const token = randomBytes(16).toString("hex") + "\n";
     let fd = null;
     try {
       fd = openSync(lockPath, "wx");
+      writeFileSync(lockPath, token, { flag: "r+" });
     } catch (error) {
+      if (fd !== null) {
+        try { closeSync(fd); } catch {}
+      }
       if (error?.code !== "EEXIST") throw error;
       let age = null;
       try {
@@ -579,12 +707,13 @@ export function withWriterLock(boardPath, fn) {
         age = null;
       }
       if (age === null || age > LOCK_TTL_MS) {
-        try {
-          unlinkSync(lockPath);
-        } catch {
-          // Another writer reclaimed or removed it; retry the exclusive create.
-        }
-        continue;
+        // F3: reclaim a stale lock by compare-and-delete against the token
+        // observed now. If another writer replaced it in the meantime, the
+        // token no longer matches and we retry without unlinking anything.
+        const observedToken = readLockToken(lockPath);
+        if (observedToken !== null && unlinkIfToken(lockPath, observedToken)) continue;
+        if (observedToken === null) continue; // vanished; retry the create
+        throw Object.assign(new Error("board writer lock is held by another writer"), { code: "writer-lock-held" });
       }
       throw Object.assign(new Error("board writer lock is held by another writer"), { code: "writer-lock-held" });
     }
@@ -594,9 +723,8 @@ export function withWriterLock(boardPath, fn) {
       try {
         closeSync(fd);
       } catch {}
-      try {
-        unlinkSync(lockPath);
-      } catch {}
+      // Only unlink if the lock still holds OUR token (F3).
+      unlinkIfToken(lockPath, token);
     }
   }
 }
@@ -611,8 +739,7 @@ export function recordAuthoritySource({ source, sessionOrReportId, quotedInstruc
     throw Object.assign(new Error("sessionOrReportId is required"), { code: "authority-source-invalid" });
   }
   if (typeof quotedInstruction === "string" && quotedInstruction.trim() !== "") {
-    const record = { source, sessionOrReportId, quotedInstruction };
-    return record;
+    return { source, sessionOrReportId, quotedInstruction };
   } else if (typeof quotedInstruction === "string" && quotedInstruction.trim() === "") {
     throw Object.assign(new Error("an authority source requires a quoted instruction or a digest of it"), {
       code: "authority-source-invalid",
@@ -624,7 +751,6 @@ export function recordAuthoritySource({ source, sessionOrReportId, quotedInstruc
       code: "authority-source-invalid",
     });
   }
-  return record;
 }
 
 // The board's declared ID prefix: the first cardId on the board, else "T".
@@ -653,7 +779,7 @@ function writeCardLocked({ boardPath, input, authority, registries, surface, now
   const markdown = existsSync(boardPath) ? readFileSync(boardPath, "utf8") : "";
   // Existing boards are validated against the complete persisted
   // representation, not merely parsed (§6 gate 2).
-  const validatedBoard = validateBoard(markdown);
+  const validatedBoard = validateBoard(markdown, registries);
   if (!validatedBoard.ok) {
     return { ok: false, code: "board-invalid", errors: validatedBoard.errors, persisted: false };
   }
@@ -669,13 +795,32 @@ function writeCardLocked({ boardPath, input, authority, registries, surface, now
     };
   }
   const statePath = writerStatePath(boardPath);
-  const nextNumber = nextCardNumber(parsed.cards, prefix, statePath);
+  let state = readWriterState(statePath);
+  // F7(a): if the state file is missing but the board is non-empty, recover
+  // the high-water mark from the board and write the state file immediately
+  // under the lock. Deleting BOTH the board and the state file is out of
+  // scope — that is a fresh board.
+  if (state.secret === null && parsed.cards.length > 0) {
+    state = { highWaterMark: state.highWaterMark, secret: randomBytes(32).toString("hex"), issuedCardIds: [] };
+    writeWriterState(statePath, state);
+  } else if (state.secret === null) {
+    state = { highWaterMark: 0, secret: randomBytes(32).toString("hex"), issuedCardIds: [] };
+  }
+  const nextNumber = nextCardNumber(parsed.cards, prefix, state);
   const cardId = formatCardId(prefix, nextNumber);
   if (parsed.cards.some((card) => card.cardId === cardId)) {
     return { ok: false, code: "duplicate-card-id", errors: [`cardId "${cardId}" already exists`], persisted: false };
   }
-  const specText = input.spec !== undefined ? nfc(String(input.spec)) : null;
-  const dodText = input.definitionOfDone !== undefined ? nfc(String(input.definitionOfDone)) : null;
+  const specText = input.spec !== undefined && input.spec !== null ? nfc(String(input.spec)) : null;
+  const dodText = input.definitionOfDone !== undefined && input.definitionOfDone !== null ? nfc(String(input.definitionOfDone)) : null;
+  // F2: spec/DoD text must be non-empty — an empty specification can never
+  // dispatch.
+  if (specText !== null && specText.trim() === "") {
+    return { ok: false, code: "empty-specification", errors: ["specification text must be non-empty"], persisted: false };
+  }
+  if (dodText !== null && dodText.trim() === "") {
+    return { ok: false, code: "empty-definition-of-done", errors: ["definition-of-done text must be non-empty"], persisted: false };
+  }
   const card = {
     cardId,
     lane: input.lane ?? "backlog",
@@ -709,11 +854,15 @@ function writeCardLocked({ boardPath, input, authority, registries, surface, now
     return { ok: false, code: "validation-failed", errors: validation.errors, persisted: false, cardId };
   }
   card.hash = computeCardHash(card);
+  card.hash = computeCardHash(card);
+  // F1: writer-authenticated provenance — HMAC over {record, cardHash} keyed
+  // by the state-file secret, stored beside the record.
+  card.authorityWriterHmac = authorityRecordHmac(card.authoritySource, state.secret, card.hash);
   const existingCards = parsed.cards.map((existing) => ({ ...existing, hash: existing.hash ?? computeCardHash(existing) }));
   const serialized = serializeBoard([...existingCards, card], { surface });
   // The complete resulting board representation is validated before the
   // atomic rename (§6 gate 2) — not just the in-memory new card.
-  const roundTrip = validateBoard(serialized);
+  const roundTrip = validateBoard(serialized, registries);
   if (!roundTrip.ok) {
     return { ok: false, code: "serialization-invalid", errors: roundTrip.errors, persisted: false, cardId };
   }
@@ -721,7 +870,12 @@ function writeCardLocked({ boardPath, input, authority, registries, surface, now
   const tmpPath = `${boardPath}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(tmpPath, serialized, "utf8");
   renameSync(tmpPath, boardPath);
-  writeFileSync(statePath, JSON.stringify({ highWaterMark: nextNumber }, null, 2) + "\n", "utf8");
+  // F1: the issued-IDs ledger is updated atomically with the card write,
+  // under the same lock. The HMAC over the authority record is computed
+  // against the state-file secret and stored beside the record.
+  state.highWaterMark = nextNumber;
+  if (!state.issuedCardIds.includes(cardId)) state.issuedCardIds.push(cardId);
+  writeWriterState(statePath, state);
   return { ok: true, cardId, card: Object.freeze({ ...card }), persisted: true, ...(now ? { now } : {}) };
 }
 
@@ -749,17 +903,47 @@ export function isDispatchable(card, boardIndex) {
   // compared; a mismatch or absent text fails closed.
   if (card.specText === null || card.specText === undefined) {
     failed.push("specification text missing (hash cannot be verified)");
+  } else if (String(card.specText).trim() === "") {
+    // F2: an empty specification never dispatches.
+    failed.push("specification text is empty (fails closed)");
   } else if (computeSpecHash(card.specText) !== card.specHash) {
     failed.push("specification hash does not match the persisted specification text (fails closed)");
   }
   if (card.dodText === null || card.dodText === undefined) {
     failed.push("definition-of-done text missing (hash cannot be verified)");
+  } else if (String(card.dodText).trim() === "") {
+    // F2: an empty definition of done never dispatches.
+    failed.push("definition-of-done text is empty (fails closed)");
   } else if (computeSpecHash(card.dodText) !== card.dodHash) {
     failed.push("definition-of-done hash does not match the persisted text (fails closed)");
   }
   // B4: dispatch requires a well-formed authority-source record (§3.5).
-  if (!isValidAuthoritySource(card.authoritySource)) {
+  // F1: when the writer state is available, the record must additionally
+  // verify against it — the HMAC over {record, cardHash} must match the
+  // state-file secret, and the cardId must be in the writer's issued-IDs
+  // ledger. Cards not written through the trusted writer cannot dispatch.
+  if (card.authoritySource === null || card.authoritySource === undefined) {
     failed.push("no well-formed authority-source record (fails closed)");
+  } else if (typeof card.statePath === "string" && card.statePath !== "") {
+    const provenance = verifyAuthorityProvenance({
+      authoritySource: { ...card.authoritySource, writerHmac: card.authorityWriterHmac },
+      cardId: card.cardId,
+      cardHash: card.hash ?? null,
+      statePath: card.statePath,
+    });
+    if (!provenance.ok) failed.push(provenance.reason);
+  } else {
+    // No writer state available: the bare record must still be well-formed
+    // and writer-authenticated.
+    const bare = { ...card.authoritySource };
+    delete bare.writerHmac;
+    if (!isValidAuthoritySource(bare)) {
+      failed.push("no well-formed authority-source record (fails closed)");
+    } else if (card.authorityWriterHmac === undefined || card.authorityWriterHmac === null || "writerHmac" in card.authoritySource) {
+      // The HMAC lives beside the record; a record carrying it inline was not
+      // written by the trusted writer.
+      failed.push("authority-source provenance missing or malformed (fails closed)");
+    }
   }
   if (!card.stoppingPoint) failed.push("stopping point not declared");
   if (!(card.scope ?? []).length) failed.push("scope paths not declared");
@@ -800,6 +984,21 @@ export function registerKanbanBoardTools(pi, { boardPath } = {}) {
       description: "Read-only view of the validated task board: lanes, flags, priorities, dependencies, and dispatchability. The board is additive and grants no authority; agents read it and act within card states.",
       parameters: { type: "object", additionalProperties: false, properties: {} },
       async execute() {
+        // F7(b): every tool call re-observes the board. If the board file was
+        // removed after registration, return an observed board-unavailable
+        // result instead of silently serving a stale board. Registration
+        // stays; the surface is gated per call.
+        if (!existsSync(observation.boardPath)) {
+          const value = {
+            ok: false,
+            nonAuthorizing: true,
+            persisted: false,
+            boardUnavailable: true,
+            cards: [],
+            errors: ["board file is no longer present (board-unavailable)"],
+          };
+          return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+        }
         let value;
         try {
           const markdown = readFileSync(observation.boardPath, "utf8");

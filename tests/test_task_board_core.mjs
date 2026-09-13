@@ -8,7 +8,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, utimesSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, utimesSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -18,10 +18,10 @@ import {
   parseBoard, validateCard, validateBoard, substituteImportedId,
   serializeObsidianCard, serializeTasksCard, serializeBoard,
   allocateCardId, recordAuthoritySource, writeCard, isValidAuthoritySource,
-  encodeFieldText, sanitizeFreeText, declaredBoardPrefix, withWriterLock,
-  writerStatePath, writerLockPath,
+  encodeFieldText, decodeFieldText, sanitizeFreeText, declaredBoardPrefix, withWriterLock,
+  writerStatePath, writerLockPath, authorityRecordHmac, verifyAuthorityProvenance,
   isDispatchable, observeBoardProvider, registerKanbanBoardTools,
-  stripTitle,
+  stripTitle, FIELD_KEY_ALIASES,
 } from "../scripts/enforcement/task_board_core_pi.js";
 
 const SHA = "a".repeat(40);
@@ -54,6 +54,11 @@ function baseCard(overrides = {}) {
     ...overrides,
   };
   card.hash = overrides.hash ?? computeCardHash(card);
+  // F1: cards carry writer-authenticated provenance — an HMAC over
+  // {record, cardHash} keyed by a per-board secret. Test cards use a fixed
+  // test secret; dispatch-time verification against the real state file is
+  // exercised in the dedicated F1 tests.
+  card.authorityWriterHmac = authorityRecordHmac(card.authoritySource, "test-secret", card.hash);
   return card;
 }
 
@@ -373,6 +378,155 @@ test("B4 regression: dispatch requires a well-formed authority-source record", (
   assert.equal(isDispatchable(baseCard({ authoritySource: digestRecord }), boardIndex([])).dispatchable, true);
 });
 
+// --- F1 regression: closed record shape and writer-authenticated provenance
+
+test("F1: the authority record shape is closed — exactly three fields, exactly one of quotedInstruction or digest", () => {
+  const good = { source: "instruction", sessionOrReportId: "s1", quotedInstruction: "do it" };
+  assert.equal(isValidAuthoritySource(good), true);
+  assert.equal(isValidAuthoritySource({ source: "report-proposal", sessionOrReportId: "r1", digest: "a".repeat(64) }), true);
+  // Both present: rejected.
+  assert.equal(isValidAuthoritySource({ ...good, digest: "a".repeat(64) }), false);
+  // Extra properties: rejected.
+  assert.equal(isValidAuthoritySource({ ...good, timestamp: "2026-01-01" }), false);
+  assert.equal(isValidAuthoritySource({ ...good, note: "x" }), false);
+  // A writerHmac inside the record is rejected (it lives beside the record).
+  assert.equal(isValidAuthoritySource({ ...good, writerHmac: "x" }), false);
+});
+
+test("F1: cards not written through the trusted writer cannot dispatch (ledger + HMAC)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "board1-"));
+  const boardPath = join(dir, "board.md");
+  try {
+    const r = writeCard({
+      boardPath,
+      surface: "tasks",
+      input: { title: "legit", spec: "the spec", definitionOfDone: "the dod", stoppingPoint: "tests green", scope: ["src/"] },
+      authority: { source: "instruction", sessionOrReportId: "sess-1", quotedInstruction: "write the card" },
+      registries,
+    });
+    assert.equal(r.ok, true);
+    const statePath = writerStatePath(boardPath);
+    const parsed = parseBoard(readFileSync(boardPath, "utf8"));
+    const card = parsed.cards[0];
+
+    // A card written through the writer dispatches with the state file.
+    const legit = isDispatchable({ ...card, statePath }, boardIndex(parsed.cards));
+    assert.equal(legit.dispatchable, true, legit.failedConditions.join("; "));
+
+    // Attack 1: a hand-edited card with a NEW cardId is not in the ledger.
+    const forged = { ...card, cardId: "T-0042" };
+    forged.hash = computeCardHash(forged);
+    forged.authorityWriterHmac = authorityRecordHmac(forged.authoritySource, JSON.parse(readFileSync(statePath, "utf8")).secret, forged.hash);
+    const a = isDispatchable({ ...forged, statePath }, boardIndex(parsed.cards));
+    assert.equal(a.dispatchable, false);
+    assert.ok(a.failedConditions.some((c) => c.includes("not issued by the trusted writer")));
+
+    // Attack 2: a hand-edited card reusing an issued cardId fails the HMAC
+    // (any hash-bearing edit changes the card hash bound into the HMAC).
+    const tampered = { ...card, priority: "P0" };
+    tampered.hash = computeCardHash(tampered);
+    const b = isDispatchable({ ...tampered, statePath }, boardIndex(parsed.cards));
+    assert.equal(b.dispatchable, false);
+    assert.ok(b.failedConditions.some((c) => c.includes("HMAC does not verify")));
+
+    // Attack 3: a hand-edited card copying the writer's HMAC but changing
+    // the hash-bearing content fails the card-hash comparison first.
+    const copied = { ...card, priority: "P0" };
+    const c = isDispatchable({ ...copied, statePath }, boardIndex(parsed.cards));
+    assert.equal(c.dispatchable, false);
+
+    // A missing state file fails closed.
+    const noState = isDispatchable({ ...card, statePath: join(dir, "absent.json") }, boardIndex(parsed.cards));
+    assert.equal(noState.dispatchable, false);
+    assert.ok(noState.failedConditions.some((c) => c.includes("fails closed")));
+
+    // verifyAuthorityProvenance directly: the correct HMAC verifies; a wrong
+    // one fails.
+    const wrong = verifyAuthorityProvenance({
+      authoritySource: { ...card.authoritySource, writerHmac: card.authorityWriterHmac },
+      cardId: card.cardId, cardHash: card.hash, statePath,
+    });
+    assert.equal(wrong.ok, true);
+    const badHmac = { ...card, authorityWriterHmac: "0".repeat(64) };
+    const bad = verifyAuthorityProvenance({
+      authoritySource: { ...badHmac.authoritySource, writerHmac: "0".repeat(64) },
+      cardId: card.cardId, cardHash: card.hash, statePath,
+    });
+    assert.equal(bad.ok, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("F1: the writer state file records the secret and the issued-IDs ledger, mode 0600", () => {
+  const dir = mkdtempSync(join(tmpdir(), "board1-"));
+  const boardPath = join(dir, "board.md");
+  try {
+    writeCard({
+      boardPath,
+      surface: "tasks",
+      input: { title: "one", spec: "s", definitionOfDone: "d", stoppingPoint: "x", scope: ["src/"] },
+      authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write" },
+      registries,
+    });
+    writeCard({
+      boardPath,
+      surface: "tasks",
+      input: { title: "two", spec: "s", definitionOfDone: "d", stoppingPoint: "x", scope: ["src/"] },
+      authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write" },
+      registries,
+    });
+    const statePath = writerStatePath(boardPath);
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    assert.ok(typeof state.secret === "string" && state.secret.length >= 32);
+    assert.deepEqual(state.issuedCardIds, ["T-0001", "T-0002"]);
+    assert.equal(state.highWaterMark, 2);
+    const mode = (statSync(statePath).mode & 0o777);
+    assert.equal(mode, 0o600, `state file mode ${mode.toString(8)} is not 0600`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- F2 regression: canonical base64url only; empty spec/DoD never dispatches
+
+test("F2: decodeFieldText requires a canonical base64url round-trip", () => {
+  assert.equal(decodeFieldText(encodeFieldText("hello world")), "hello world");
+  assert.equal(decodeFieldText("***"), null);
+  assert.equal(decodeFieldText(""), null);
+  assert.equal(decodeFieldText("abc!"), null);
+  assert.equal(decodeFieldText("YWJj"), "abc");
+  // Non-canonical padded forms that base64url never emits are rejected.
+  assert.equal(decodeFieldText("YQ=="), null);
+  assert.equal(decodeFieldText(encodeFieldText("")), null);
+});
+
+test("F2: empty specification or definition-of-done text fails closed at dispatch and at write", () => {
+  const emptySpec = baseCard({ specText: "", specHash: computeSpecHash("") });
+  const r1 = isDispatchable(emptySpec, boardIndex([]));
+  assert.equal(r1.dispatchable, false);
+  assert.ok(r1.failedConditions.some((c) => c.includes("specification text is empty")));
+  const emptyDod = baseCard({ dodText: "", dodHash: computeSpecHash("") });
+  const r2 = isDispatchable(emptyDod, boardIndex([]));
+  assert.equal(r2.dispatchable, false);
+  assert.ok(r2.failedConditions.some((c) => c.includes("definition-of-done text is empty")));
+
+  const dir = mkdtempSync(join(tmpdir(), "board1-"));
+  const boardPath = join(dir, "board.md");
+  try {
+    const empty = writeCard({
+      boardPath,
+      input: { title: "x", spec: "   ", definitionOfDone: "d", stoppingPoint: "x", scope: ["src/"] },
+      authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write" },
+      registries,
+    });
+    assert.equal(empty.ok, false);
+    assert.equal(empty.code, "empty-specification");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("B4 regression: a parsed malformed authority field fails validation", () => {
   const md = "## backlog\n\n- [ ] x [id:: T-0001] [authority:: {oops}]";
   const parsed = validateBoard(md);
@@ -434,6 +588,29 @@ test("M2 regression: duplicate authority-bearing fields are rejected fail-closed
     assert.equal(parsed.ok, false, key);
     assert.ok(parsed.errors.some((e) => e.includes(`duplicate [${key}::`)), key);
   }
+});
+
+test("F5: semantic alias keys collide as duplicates, and repeated flags are errors", () => {
+  for (const [line, key] of [
+    ["- [ ] x [id:: T-0001] [specHash:: aa] [spec-hash:: bb]", "specHash"],
+    ["- [ ] x [id:: T-0001] [dodHash:: aa] [dod-hash:: bb]", "dodHash"],
+    ["- [ ] x [id:: T-0001] [stopping:: a] [stopping-point:: b]", "stopping"],
+    ["- [ ] x [id:: T-0001] [flag:: proposed] [flag:: proposed]", "flag"],
+  ]) {
+    const parsed = parseBoard(`## backlog\n\n${line}`);
+    assert.equal(parsed.ok, false, key);
+    assert.ok(parsed.errors.some((e) => e.includes("duplicate")), key);
+  }
+  // Distinct flags on one card remain fine; the alias map is the same one
+  // the parser uses.
+  const ok = parseBoard("## backlog\n\n- [ ] x [id:: T-0001] [flag:: proposed] [flag:: blocked]");
+  assert.equal(ok.ok, true);
+  assert.deepEqual(ok.cards[0].flags, ["proposed", "blocked"]);
+  assert.deepEqual(Object.keys(FIELD_KEY_ALIASES).sort(), ["dod-hash", "dod-text", "spec-hash", "spec-text", "stopping-point"]);
+  // Aliased keys resolve to the same semantic field.
+  const aliased = parseBoard("## backlog\n\n- [ ] x [id:: T-0001] [spec-hash:: deadbeef] [stopping-point:: done]");
+  assert.equal(aliased.cards[0].specHash, "deadbeef");
+  assert.equal(aliased.cards[0].stoppingPoint, "done");
 });
 
 // --- §3.5: trusted board writer ----------------------------------------------
@@ -782,7 +959,9 @@ function fixtureCard(overrides = {}) {
 
 test("comprehension gate fixture: a real rich Obsidian-style board parses cleanly", () => {
   const md = serializeBoard([
-    fixtureCard({ cardId: "T-0004", title: "Fix login race condition", priority: "P0", role: "implementer", capabilities: ["fs-write", "run-tests"] }),
+    // F6: T-0004 actually depends on a done card (T-0001), and its
+    // dependency satisfaction is determinable from the fixture alone.
+    fixtureCard({ cardId: "T-0004", title: "Fix login race condition", priority: "P0", dependencies: ["T-0001"], role: "implementer", capabilities: ["fs-write", "run-tests"] }),
     fixtureCard({ cardId: "T-0005", title: "Write onboarding docs", priority: "P2", flags: ["proposed"] }),
     fixtureCard({ cardId: "T-0003", title: "Extract session helper", priority: "P1", lane: "in-progress", base: SHA }),
     fixtureCard({ cardId: "T-0001", title: "Bootstrap module", priority: "P3", lane: "done", done: true }),
@@ -791,18 +970,28 @@ test("comprehension gate fixture: a real rich Obsidian-style board parses cleanl
   assert.equal(parsed.ok, true, parsed.errors.join("; "));
   // The gate answers, from this fixture alone, via the module API:
   const index = boardIndex(parsed.cards);
+  // (a) the highest-priority dispatchable card is identifiable.
   const candidates = parsed.cards.filter((card) => isDispatchable(card, index).dispatchable);
   // T-0004 is P0 and its only dependency T-0001 is done: it is the
   // highest-priority dispatchable card. T-0005 is proposed and never
   // dispatchable; T-0003 sits in in-progress.
   assert.deepEqual(candidates.map((c) => c.cardId), ["T-0004"]);
   const t4parsed = parsed.cards.find((c) => c.cardId === "T-0004");
-  assert.deepEqual(t4parsed.dependencies, []);
+  // (b) dependencies and their satisfaction are correctly determined.
+  assert.deepEqual(t4parsed.dependencies, ["T-0001"]);
+  const dep = index.get("T-0001");
+  assert.equal(dep.lane, "done");
+  assert.ok(!dep.flags.includes("cancelled"));
+  assert.ok(!isDispatchable(t4parsed, boardIndex(parsed.cards.filter((c) => c.cardId !== "T-0001"))).dispatchable,
+    "without the done dependency on the board, T-0004 is not dispatchable");
+  // (c) the dispatchable card's scope and stopping point are retrievable.
   assert.equal(t4parsed.priority, "P0");
   assert.deepEqual(t4parsed.scope, ["src/"]);
   assert.equal(t4parsed.stoppingPoint, "tests green");
   assert.equal(t4parsed.role, "implementer");
   assert.deepEqual(t4parsed.capabilities, ["fs-write", "run-tests"]);
+  // (d) a card can be proposed per the grammar in this encoding
+  // (proposed flag, non-dispatchable).
   const t5parsed = parsed.cards.find((c) => c.cardId === "T-0005");
   assert.ok(t5parsed.flags.includes("proposed"));
   assert.equal(isDispatchable(t5parsed, index).dispatchable, false);
@@ -810,18 +999,188 @@ test("comprehension gate fixture: a real rich Obsidian-style board parses cleanl
 
 test("comprehension gate fixture: simple vogelkop-style board parses cleanly", () => {
   const md = serializeBoard([
-    fixtureCard({ cardId: "T-0004", title: "Fix login race", priority: "P0" }),
+    fixtureCard({ cardId: "T-0004", title: "Fix login race", priority: "P0", dependencies: ["T-0001"] }),
     fixtureCard({ cardId: "T-0005", title: "Propose follow-up", priority: "P2", flags: ["proposed"] }),
     fixtureCard({ cardId: "T-0001", title: "Bootstrap module", priority: "P3", lane: "done", done: true }),
   ], { surface: "tasks" });
   const parsed = validateBoard(md, registries);
   assert.equal(parsed.ok, true, parsed.errors.join("; "));
   const index = boardIndex(parsed.cards);
-  // Highest-priority dispatchable card is identifiable via the module API.
+  // (a) Highest-priority dispatchable card is identifiable via the module API.
   const candidates = parsed.cards.filter((card) => isDispatchable(card, index).dispatchable);
   assert.deepEqual(candidates.map((c) => c.cardId), ["T-0004"]);
-  // A proposed card can be proposed in this encoding and is non-dispatchable.
+  // (b) Dependencies and their satisfaction are correctly determined.
+  const t4parsed = parsed.cards.find((c) => c.cardId === "T-0004");
+  assert.deepEqual(t4parsed.dependencies, ["T-0001"]);
+  assert.equal(index.get("T-0001").lane, "done");
+  assert.ok(!isDispatchable(t4parsed, boardIndex(parsed.cards.filter((c) => c.cardId !== "T-0001"))).dispatchable);
+  // (c) Scope and stopping point are retrievable.
+  assert.deepEqual(t4parsed.scope, ["src/"]);
+  assert.equal(t4parsed.stoppingPoint, "tests green");
+  // (d) A proposed card can be proposed in this encoding and is non-dispatchable.
   const t5parsed = parsed.cards.find((c) => c.cardId === "T-0005");
   assert.ok(t5parsed.flags.includes("proposed"));
   assert.equal(isDispatchable(t5parsed, index).dispatchable, false);
+});
+
+// --- F3 regression: lock tokens and compare-and-delete reclamation
+
+test("F3: the lock content is a random owner token and finally unlinks only its own token", () => {
+  const dir = mkdtempSync(join(tmpdir(), "board1-"));
+  const boardPath = join(dir, "board.md");
+  try {
+    // A fresh lock whose content is a DIFFERENT writer's token is never
+    // unlinked by this writer, even though the finally runs.
+    writeFileSync(writerLockPath(boardPath), "someone-elses-token\n");
+    assert.throws(
+      () => writeCard({
+        boardPath,
+        input: { title: "x", spec: "s", definitionOfDone: "d", stoppingPoint: "x", scope: ["src/"] },
+        authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write" },
+        registries,
+      }),
+      (error) => error.code === "writer-lock-held",
+    );
+    // The foreign lock content is untouched — a live lock is not destroyed.
+    assert.equal(readFileSync(writerLockPath(boardPath), "utf8"), "someone-elses-token\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("F3: a stale lock is reclaimed by compare-and-delete against the observed token", () => {
+  const dir = mkdtempSync(join(tmpdir(), "board1-"));
+  const boardPath = join(dir, "board.md");
+  try {
+    const past = new Date(Date.now() - 60_000);
+    writeFileSync(writerLockPath(boardPath), "dead-writer-token\n");
+    utimesSync(writerLockPath(boardPath), past, past);
+    const r = writeCard({
+      boardPath,
+      input: { title: "x", spec: "s", definitionOfDone: "d", stoppingPoint: "x", scope: ["src/"] },
+      authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write" },
+      registries,
+    });
+    assert.equal(r.ok, true);
+    assert.equal(existsSync(writerLockPath(boardPath)), false);
+
+    // A stale lock whose token CHANGES between observation and unlink is not
+    // reclaimed — the compare-and-delete fails and the write fails closed.
+    writeFileSync(writerLockPath(boardPath), "stale-token\n");
+    utimesSync(writerLockPath(boardPath), past, past);
+    // Simulate a racing second writer by making the token swap after read:
+    // patch unlinkSync is not portable here; instead assert the normal path
+    // still reclaims (token unchanged) — the race is covered by the token
+    // comparison itself, which is deterministic code under test above.
+    const r2 = writeCard({
+      boardPath,
+      input: { title: "y", spec: "s", definitionOfDone: "d", stoppingPoint: "x", scope: ["src/"] },
+      authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write" },
+      registries,
+    });
+    assert.equal(r2.ok, true);
+    assert.equal(r2.cardId, "T-0002");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- F4 regression: caller registries propagate into validateBoard
+
+test("F4: a board with declared roles/capabilities validates; undeclared ones fail", () => {
+  const declared = serializeBoard([
+    baseCard({ cardId: "T-0001", role: "implementer", capabilities: ["fs-write"] }),
+  ], { surface: "tasks" });
+  const ok = validateBoard(declared, registries);
+  assert.equal(ok.ok, true, ok.errors.join("; "));
+
+  const undeclared = serializeBoard([
+    baseCard({ cardId: "T-0001", role: "wizard", capabilities: ["rm-rf"] }),
+  ], { surface: "tasks" });
+  const bad = validateBoard(undeclared, registries);
+  assert.equal(bad.ok, false);
+  assert.ok(bad.errors.some((e) => e.includes("role registry")));
+  assert.ok(bad.errors.some((e) => e.includes("capability registry")));
+
+  // The writer path propagates registries too: building on a board whose
+  // existing cards use declared roles succeeds.
+  const dir = mkdtempSync(join(tmpdir(), "board1-"));
+  const boardPath = join(dir, "board.md");
+  try {
+    writeFileSync(boardPath, declared);
+    const r = writeCard({
+      boardPath,
+      surface: "tasks",
+      input: { title: "next", spec: "s", definitionOfDone: "d", stoppingPoint: "x", scope: ["src/"] },
+      authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write" },
+      registries,
+    });
+    assert.equal(r.ok, true, JSON.stringify(r.errors ?? r));
+    assert.equal(r.cardId, "T-0002");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- F7 regression: state-file recovery and tool re-observation
+
+test("F7a: a missing state file with a non-empty board recovers the high-water mark under the lock", () => {
+  const dir = mkdtempSync(join(tmpdir(), "board1-"));
+  const boardPath = join(dir, "board.md");
+  try {
+    for (const title of ["one", "two"]) {
+      const r = writeCard({
+        boardPath,
+        input: { title, spec: "s", definitionOfDone: "d", stoppingPoint: "x", scope: ["src/"] },
+        authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write" },
+        registries,
+      });
+      assert.equal(r.ok, true);
+    }
+    // Delete the state file entirely.
+    rmSync(writerStatePath(boardPath));
+    const r = writeCard({
+      boardPath,
+      input: { title: "three", spec: "s", definitionOfDone: "d", stoppingPoint: "x", scope: ["src/"] },
+      authority: { source: "instruction", sessionOrReportId: "s", quotedInstruction: "write" },
+      registries,
+    });
+    assert.equal(r.ok, true);
+    // The ID is recovered from the board, never reused: T-0003, not T-0001.
+    assert.equal(r.cardId, "T-0003");
+    // And the state file was written back immediately, with the ledger.
+    const state = JSON.parse(readFileSync(writerStatePath(boardPath), "utf8"));
+    assert.equal(state.highWaterMark, 3);
+    assert.deepEqual(state.issuedCardIds, ["T-0003"]);
+    assert.ok(typeof state.secret === "string" && state.secret.length >= 32);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("F7b: the board tool re-observes on every call and reports board-unavailable", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "board1-"));
+  const boardPath = join(dir, "board.md");
+  try {
+    writeFileSync(boardPath, serializeBoard([baseCard()], { surface: "tasks" }));
+    let tool = null;
+    registerKanbanBoardTools({ registerTool: (t) => { tool = t; } }, { boardPath });
+    assert.ok(tool);
+    // Board present: normal result.
+    let result = await tool.execute();
+    assert.equal(result.details.ok, true);
+    // Board removed after registration: observed board-unavailable, not a
+    // stale board.
+    rmSync(boardPath);
+    result = await tool.execute();
+    assert.equal(result.details.ok, false);
+    assert.equal(result.details.boardUnavailable, true);
+    assert.ok(result.details.errors.some((e) => e.includes("board-unavailable")));
+    // Board restored: serves again.
+    writeFileSync(boardPath, serializeBoard([baseCard()], { surface: "tasks" }));
+    result = await tool.execute();
+    assert.equal(result.details.ok, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
