@@ -13,6 +13,7 @@
 
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, openSync, closeSync, unlinkSync, chmodSync, statSync as fsStatSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -486,6 +487,10 @@ export function serializeObsidianCard(card) {
   const checkbox = card.flags?.includes("cancelled") ? "[-]" : card.done ? "[x]" : "[ ]";
   const parts = [checkbox, card.title];
   parts.push(fieldText("id", card.cardId));
+  // §3.6: a live claim is published through the derived projection as the
+  // card being active. Presentation only — the claim record in dispatcher
+  // state is canonical for run authority, never this field.
+  if (card.activeClaim) parts.push(fieldText("active", card.activeClaim));
   if (card.hash) parts.push(fieldText("hash", card.hash));
   if (card.priority) parts.push(fieldText("priority", card.priority));
   for (const flag of card.flags ?? []) parts.push(fieldText("flag", flag));
@@ -582,11 +587,19 @@ export function projectionPath(boardPath) {
 // Recompute the projection from the canonical cards. Best-effort relative to
 // the authoritative write: a projection failure is reported but never rolls
 // back or invalidates the canonical persist.
-export function writeProjection(boardPath, cards) {
+export function writeProjection(boardPath, cards, claims = []) {
   const path = projectionPath(boardPath);
   try {
+    const claimedIds = new Set((Array.isArray(claims) ? claims : [])
+      .map((claim) => claim?.cardId)
+      .filter((id) => typeof id === "string"));
+    const annotated = cards.map((card) => {
+      if (!claimedIds.has(card.cardId)) return card;
+      const claim = (Array.isArray(claims) ? claims : []).find((entry) => entry?.cardId === card.cardId);
+      return { ...card, activeClaim: typeof claim?.role === "string" ? claim.role : "claimed" };
+    });
     const frontmatter = "---\nkanban-plugin: board\n---\n\n";
-    const body = serializeBoard(cards, { surface: "obsidian" })
+    const body = serializeBoard(annotated, { surface: "obsidian" })
       .replace(/^## backlog$/m, "## Backlog")
       .replace(/^## in-progress$/m, "## In Progress")
       .replace(/^## review$/m, "## Review")
@@ -632,13 +645,26 @@ function readWriterState(statePath) {
   try {
     const state = JSON.parse(readFileSync(statePath, "utf8"));
     const value = Number(state?.highWaterMark);
+    const generation = Number(state?.claimsGeneration);
     return {
       highWaterMark: Number.isInteger(value) && value >= 0 ? value : 0,
       secret: typeof state?.secret === "string" && state.secret !== "" ? state.secret : null,
       issuedCardIds: Array.isArray(state?.issuedCardIds) ? state.issuedCardIds.filter((id) => typeof id === "string") : [],
+      // Monotonic claims-generation anchor (deletion/rollback guard): the
+      // generation and digest of the LAST claims state this writer issued.
+      // A missing claims file is "fresh" only while no generation was ever
+      // issued; a lower generation or digest mismatch is replay/deletion.
+      claimsGeneration: Number.isInteger(generation) && generation >= 0 ? generation : 0,
+      claimsDigest: typeof state?.claimsDigest === "string" && state.claimsDigest !== "" ? state.claimsDigest : null,
+      // A complete next claims state is staged here before either authority
+      // file changes. Recovery always rolls it forward; it never guesses
+      // whether an older claims file is legitimate.
+      pendingClaimsState: state?.pendingClaimsState && typeof state.pendingClaimsState === "object"
+        ? state.pendingClaimsState
+        : null,
     };
   } catch {
-    return { highWaterMark: 0, secret: null, issuedCardIds: [] };
+    return { highWaterMark: 0, secret: null, issuedCardIds: [], claimsGeneration: 0, claimsDigest: null, pendingClaimsState: null };
   }
 }
 
@@ -1255,6 +1281,912 @@ export function isDispatchable(card, boardIndex) {
 }
 
 // ---------------------------------------------------------------------------
+// Dispatcher state (§3.6, §4): claims and assignment envelopes live OUTSIDE
+// the Markdown, beside the board, under the same writer lock as card writes.
+// Claim creation, envelope creation, and active-state publication happen in
+// one atomic operation. The claims file is canonical for run authority; the
+// Markdown stays canonical for task semantics.
+// ---------------------------------------------------------------------------
+
+export const CLAIMS_SCHEMA = "agentic-driver.board-claims.v2";
+export const ENVELOPE_SCHEMA = "agentic-driver.assignment-envelope.v1";
+export const AUTOMATION_POLICY_SCHEMA = "agentic-driver.automation-policy.v1";
+export const PLACEMENTS = Object.freeze(["container", "host"]);
+export const RISK_LEVELS = Object.freeze(["low", "medium", "high"]);
+export const DEFAULT_ENVELOPE_EXPIRY_HOURS = 12;
+
+// F1: the claims file is AUTHENTICATED exactly like the writer state — an
+// HMAC-SHA256 over its content, keyed by the writer-state secret, verified on
+// every read. Malformed, tampered, or HMAC-failing claims files fail closed:
+// dispatch is REFUSED, never treated as an empty claims list.
+
+export function claimsPath(boardPath) {
+  return `${boardPath}.claims.json`;
+}
+
+export function automationPolicyPath(boardPath) {
+  return `${boardPath}.automation-policy.json`;
+}
+
+function readJsonFile(path) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeJsonFileAtomic(path, value) {
+  const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmpPath, JSON.stringify(value, null, 2) + "\n", "utf8");
+  chmodSync(tmpPath, 0o600);
+  renameSync(tmpPath, path);
+}
+
+// HMAC over the canonical JSON form of the claims content, keyed by the
+// writer-state secret (F1). Covers claims, consumed-claim records, and the
+// transaction record — every authority-bearing field of the file.
+function claimsFileHmac(value, secret) {
+  return createHmac("sha256", secret)
+    .update(canonicalJsonString({
+      schema: value.schema,
+      generation: value.generation,
+      transaction: value.transaction ?? null,
+      claims: value.claims ?? [],
+      consumedClaims: value.consumedClaims ?? [],
+    }), "utf8")
+    .digest("hex");
+}
+
+// Item 6: CLOSED, strictly validated shapes. Every record trusted by the
+// dispatcher has an exact key set and typed/pattern-checked values — unknown
+// or missing keys fail closed before anything is trusted.
+const ISO_TS_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+
+function exactKeys(value, keys) {
+  const actual = Object.keys(value ?? {}).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, i) => key === expected[i]);
+}
+
+const ENVELOPE_FIELDS = Object.freeze([
+  "schema", "envelopeId", "cardId", "cardHash", "repository", "startingRevision",
+  "baseRevision", "branch", "allowedPaths", "unchangedPaths", "capabilities",
+  "stoppingPoint", "acceptance", "placement", "interactionProfile", "risk",
+  "riskCeiling", "mode", "createdAt", "expiry",
+]);
+
+export function wellFormedEnvelope(env) {
+  if (env === null || typeof env !== "object" || Array.isArray(env) || !exactKeys(env, ENVELOPE_FIELDS)) return false;
+  if (env.schema !== ENVELOPE_SCHEMA) return false;
+  if (typeof env.envelopeId !== "string" || !/^[0-9a-f]{32}$/.test(env.envelopeId)) return false;
+  if (typeof env.cardId !== "string" || !CARD_ID_RE.test(env.cardId)) return false;
+  if (env.cardHash !== null && !/^[0-9a-f]{64}$/.test(env.cardHash)) return false;
+  if (typeof env.repository !== "string" || env.repository === "") return false;
+  if (env.startingRevision !== null && !COMMIT_SHA_RE.test(env.startingRevision)) return false;
+  if (env.baseRevision !== null && !COMMIT_SHA_RE.test(env.baseRevision)) return false;
+  if (typeof env.branch !== "string" || !/^board\//.test(env.branch)) return false;
+  if (!Array.isArray(env.allowedPaths) || !env.allowedPaths.every((p) => SAFE_PATH_RE.test(p))) return false;
+  if (!Array.isArray(env.unchangedPaths) || !env.unchangedPaths.every((p) => SAFE_PATH_RE.test(p))) return false;
+  if (!Array.isArray(env.capabilities) || !env.capabilities.every((c) => CAPABILITY_NAME_RE.test(c))) return false;
+  if (env.stoppingPoint !== null && typeof env.stoppingPoint !== "string") return false;
+  if (env.acceptance === null || typeof env.acceptance !== "object" || !exactKeys(env.acceptance, ["specHash", "dodHash"])) return false;
+  if (env.acceptance.specHash !== null && !/^[0-9a-f]{64}$/.test(env.acceptance.specHash)) return false;
+  if (env.acceptance.dodHash !== null && !/^[0-9a-f]{64}$/.test(env.acceptance.dodHash)) return false;
+  if (!PLACEMENTS.includes(env.placement)) return false;
+  if (!PLACEMENTS.includes(env.interactionProfile)) return false;
+  if (!RISK_LEVELS.includes(env.risk)) return false;
+  if (env.riskCeiling !== null && !RISK_LEVELS.includes(env.riskCeiling)) return false;
+  if (env.mode !== "automated") return false;
+  if (!ISO_TS_RE.test(env.createdAt) || !ISO_TS_RE.test(env.expiry)) return false;
+  return true;
+}
+
+const CLAIM_FIELDS = Object.freeze(["cardId", "claimedAt", "role", "envelopeId", "envelope"]);
+const CONSUMED_FIELDS = Object.freeze(["cardId", "envelopeId", "consumedAt", "reason"]);
+const CONSUMED_REASONS = Object.freeze([
+  "expired", "reclaimed", "completed", "exhausted", "cancelled", "failed",
+  "waiting-approval", "role-blocked", "worker-unresponsive",
+]);
+const TRANSACTION_FIELDS = Object.freeze(["op", "cardId", "envelopeId", "at", "phase"]);
+const CLAIMS_STATE_FIELDS = Object.freeze(["schema", "generation", "transaction", "claims", "consumedClaims", "hmac"]);
+
+function wellFormedClaim(claim) {
+  return claim !== null && typeof claim === "object" && !Array.isArray(claim) && exactKeys(claim, CLAIM_FIELDS)
+    && CARD_ID_RE.test(claim.cardId)
+    && ISO_TS_RE.test(claim.claimedAt)
+    && ROLE_NAME_RE.test(claim.role)
+    && /^[0-9a-f]{32}$/.test(claim.envelopeId)
+    && wellFormedEnvelope(claim.envelope)
+    && claim.envelope.envelopeId === claim.envelopeId
+    && claim.envelope.cardId === claim.cardId;
+}
+
+function wellFormedConsumedClaim(claim) {
+  return claim !== null && typeof claim === "object" && !Array.isArray(claim) && exactKeys(claim, CONSUMED_FIELDS)
+    && CARD_ID_RE.test(claim.cardId)
+    && /^[0-9a-f]{32}$/.test(claim.envelopeId)
+    && ISO_TS_RE.test(claim.consumedAt)
+    && CONSUMED_REASONS.includes(claim.reason);
+}
+
+function wellFormedTransaction(tx) {
+  return tx === null
+    || (typeof tx === "object" && !Array.isArray(tx) && exactKeys(tx, TRANSACTION_FIELDS)
+      && tx.op === "claim" && CARD_ID_RE.test(tx.cardId)
+      && /^[0-9a-f]{32}$/.test(tx.envelopeId) && ISO_TS_RE.test(tx.at)
+      && tx.phase === "claims-written");
+}
+
+// Read and VERIFY the claims file. Missing file → fresh ONLY while the
+// authenticated writer state proves no claims generation was ever issued;
+// once a generation is anchored, deletion fails closed. A generation older
+// than the anchored one, or a digest that does not match the anchored latest
+// digest, is replay of older correctly signed state — rejected. Malformed
+// JSON, wrong shape, or an HMAC that does not verify → {ok: false, reason};
+// the caller MUST fail closed (refuse dispatch).
+export function readClaimsState(boardPath) {
+  const path = claimsPath(boardPath);
+  const writerState = readWriterState(writerStatePath(boardPath));
+  if (writerState.pendingClaimsState !== null) {
+    return { ok: false, recoverable: true, reason: "a staged claims-anchor transaction requires recovery under the writer lock (fails closed)" };
+  }
+  if (!existsSync(path)) {
+    if (writerState.claimsDigest !== null || writerState.claimsGeneration > 0) {
+      return { ok: false, reason: "the claims file is missing but the writer state anchors issued claims state — deletion is rejected (fails closed)" };
+    }
+    return { ok: true, missing: true, state: { generation: 0, transaction: null, claims: [], consumedClaims: [] } };
+  }
+  const value = readJsonFile(path);
+  if (value === null || typeof value !== "object" || Array.isArray(value) || !exactKeys(value, CLAIMS_STATE_FIELDS)) {
+    return { ok: false, reason: "the claims file is malformed or has an unknown shape (fails closed)" };
+  }
+  if (!Array.isArray(value.claims) || !Array.isArray(value.consumedClaims)
+    || !Number.isInteger(value.generation) || value.generation < 0
+    || !wellFormedTransaction(value.transaction)
+    || !value.claims.every(wellFormedClaim)
+    || !value.consumedClaims.every(wellFormedConsumedClaim)) {
+    return { ok: false, reason: "the claims file contains a malformed record (fails closed)" };
+  }
+  // F2 integrity: an ACTIVE claim may never reference a consumed envelope —
+  // a consumed envelope cannot be reused; only a new envelopeId is valid.
+  const consumedIds = new Set(value.consumedClaims.map((entry) => entry.envelopeId));
+  if (value.claims.some((claim) => consumedIds.has(claim.envelopeId))) {
+    return { ok: false, reason: "an active claim references a consumed envelope — the claims file is inconsistent (fails closed)" };
+  }
+  if (writerState.secret === null) {
+    return { ok: false, reason: "writer state file has no secret to verify the claims file (fails closed)" };
+  }
+  if (typeof value.hmac !== "string" || value.hmac !== claimsFileHmac(value, writerState.secret)) {
+    return { ok: false, reason: "the claims file HMAC does not verify — tampered or forged (fails closed)" };
+  }
+  // Deletion/rollback guard: the generation must be exactly the anchored
+  // latest (older = replay even if correctly signed; newer = not ours).
+  if (value.generation !== writerState.claimsGeneration) {
+    return { ok: false, reason: `claims generation ${value.generation} does not match the anchored generation ${writerState.claimsGeneration} — deletion or replay is rejected (fails closed)` };
+  }
+  if (writerState.claimsDigest !== claimsAnchorDigest(value, writerState.secret)) {
+    return { ok: false, reason: "the claims content does not match the writer-state anchor — rollback is rejected (fails closed)" };
+  }
+  return {
+    ok: true,
+    state: {
+      generation: value.generation,
+      transaction: value.transaction,
+      claims: value.claims,
+      consumedClaims: value.consumedClaims,
+    },
+  };
+}
+
+// Convenience reader. Throws a coded error on corruption so a caller cannot
+// silently treat tampered state as an empty claims list (Sol minor 3).
+export function readClaims(boardPath) {
+  const result = readClaimsState(boardPath);
+  if (!result.ok) {
+    throw Object.assign(new Error(result.reason), { code: "claims-corrupt" });
+  }
+  return result.state.claims;
+}
+
+function claimsAnchorDigest(value, secret) {
+  return createHmac("sha256", secret)
+    .update(canonicalJsonString({ generation: value.generation, hmac: value.hmac }), "utf8")
+    .digest("hex");
+}
+
+// Recover the two-file claims/anchor commit. The complete authenticated next
+// claims state is staged in writer state first, so either crash window rolls
+// forward deterministically rather than accepting an older file.
+function recoverClaimsAnchorLocked(boardPath) {
+  const statePath = writerStatePath(boardPath);
+  const writerState = readWriterState(statePath);
+  const pending = writerState.pendingClaimsState;
+  if (pending === null) return { ok: true, recovered: false };
+  if (writerState.secret === null || !pending || typeof pending !== "object"
+    || !exactKeys(pending, CLAIMS_STATE_FIELDS)
+    || pending.hmac !== claimsFileHmac(pending, writerState.secret)) {
+    return { ok: false, reason: "the staged claims-anchor transaction is malformed or unauthenticated (fails closed)" };
+  }
+  writeJsonFileAtomic(claimsPath(boardPath), pending);
+  writeWriterState(statePath, {
+    ...writerState,
+    claimsGeneration: pending.generation,
+    claimsDigest: claimsAnchorDigest(pending, writerState.secret),
+    pendingClaimsState: null,
+  });
+  return { ok: true, recovered: true };
+}
+
+function writeClaims(boardPath, claims, { consumedClaims = null, transaction = null } = {}) {
+  const statePath = writerStatePath(boardPath);
+  let writerState = readWriterState(statePath);
+  if (writerState.secret === null) {
+    throw Object.assign(new Error("writer state file has no secret (fails closed)"), { code: "writer-state-unavailable" });
+  }
+  const recovery = recoverClaimsAnchorLocked(boardPath);
+  if (!recovery.ok) throw Object.assign(new Error(recovery.reason), { code: "claims-anchor-recovery-failed" });
+  writerState = readWriterState(statePath);
+  const previous = readClaimsState(boardPath);
+  if (!previous.ok) throw Object.assign(new Error(previous.reason), { code: "claims-corrupt" });
+  const value = {
+    schema: CLAIMS_SCHEMA,
+    generation: previous.state.generation + 1,
+    transaction,
+    claims,
+    consumedClaims: consumedClaims ?? previous.state.consumedClaims,
+  };
+  value.hmac = claimsFileHmac(value, writerState.secret);
+  // Prepare → claims → commit. Because prepare contains the complete signed
+  // next value, recovery can safely roll forward after either later write.
+  writeWriterState(statePath, { ...writerState, pendingClaimsState: value });
+  writeJsonFileAtomic(claimsPath(boardPath), value);
+  writeWriterState(statePath, {
+    ...writerState,
+    claimsGeneration: value.generation,
+    claimsDigest: claimsAnchorDigest(value, writerState.secret),
+    pendingClaimsState: null,
+  });
+}
+
+// The automation policy (§3.2, §4): an explicit, revocable record the USER
+// sets. No policy file = no overnight dispatch, ever (fails closed). Shape:
+// { roles: [...], placement: "container" | "host", maxConcurrent: N,
+//   expiry: ISO yyyy-mm-dd (or full ISO timestamp), envelopeExpiryHours? }.
+export function readAutomationPolicy(boardPath, { configPath = null } = {}) {
+  const path = configPath ?? automationPolicyPath(boardPath);
+  const value = readJsonFile(path);
+  if (value === null || typeof value !== "object") return null;
+  return value;
+}
+
+// Validate the policy shape and currency. The shape is CLOSED (F5): unknown
+// fields fail closed with a clear reason. Roles must match ROLE_NAME_RE.
+// The policy is bound to the board file it applies to (F4) and carries a risk
+// ceiling (F4). Returns {ok, policy, reason}.
+const POLICY_FIELDS = Object.freeze([
+  "roles", "placement", "maxConcurrent", "expiry", "envelopeExpiryHours",
+  "board", "riskCeiling", "allowPerCardRiskOverride", "acceptedRepositories",
+]);
+
+export function checkAutomationPolicy(policy, { now = null, boardPath = null } = {}) {
+  const at = now ?? new Date().toISOString();
+  if (policy === null || policy === undefined) {
+    return { ok: false, reason: "no automation policy is set — automated dispatch is refused (fails closed)" };
+  }
+  if (typeof policy !== "object" || Array.isArray(policy)) {
+    return { ok: false, reason: "the automation policy is malformed (fails closed)" };
+  }
+  for (const key of Object.keys(policy)) {
+    if (!POLICY_FIELDS.includes(key)) {
+      return { ok: false, reason: `the automation policy has an unknown field "${key}" — the policy shape is closed (fails closed)` };
+    }
+  }
+  if (!Array.isArray(policy.roles) || policy.roles.length === 0
+    || !policy.roles.every((role) => typeof role === "string" && ROLE_NAME_RE.test(role))) {
+    return { ok: false, reason: `the automation policy declares no valid roles (every role must match ${ROLE_NAME_RE.source}) (fails closed)` };
+  }
+  if (!PLACEMENTS.includes(policy.placement)) {
+    return { ok: false, reason: `the automation policy placement must be one of ${PLACEMENTS.join(", ")} (fails closed)` };
+  }
+  const maxConcurrent = Number(policy.maxConcurrent);
+  if (!Number.isInteger(maxConcurrent) || maxConcurrent < 1) {
+    return { ok: false, reason: "the automation policy maxConcurrent must be a positive integer (fails closed)" };
+  }
+  const expiry = typeof policy.expiry === "string" ? policy.expiry : null;
+  if (expiry === null || Number.isNaN(Date.parse(expiry))) {
+    return { ok: false, reason: "the automation policy has no valid expiry (fails closed)" };
+  }
+  if (Date.parse(expiry) <= Date.parse(at)) {
+    return { ok: false, reason: "the automation policy has expired — new dispatches are refused until it is renewed" };
+  }
+  if (policy.envelopeExpiryHours !== undefined
+    && (!Number.isFinite(Number(policy.envelopeExpiryHours)) || Number(policy.envelopeExpiryHours) <= 0)) {
+    return { ok: false, reason: "the automation policy envelopeExpiryHours must be a positive number (fails closed)" };
+  }
+  if (typeof policy.board !== "string" || policy.board === "") {
+    return { ok: false, reason: "the automation policy does not name the board file it applies to (fails closed)" };
+  }
+  if (boardPath !== null && policy.board !== boardPath) {
+    return { ok: false, reason: `the automation policy is bound to board "${policy.board}", not this board (fails closed)` };
+  }
+  if (typeof policy.riskCeiling !== "string" || !RISK_LEVELS.includes(policy.riskCeiling)) {
+    return { ok: false, reason: `the automation policy riskCeiling must be one of ${RISK_LEVELS.join(", ")} (fails closed)` };
+  }
+  if (policy.allowPerCardRiskOverride !== undefined && typeof policy.allowPerCardRiskOverride !== "boolean") {
+    return { ok: false, reason: "the automation policy allowPerCardRiskOverride must be a boolean (fails closed)" };
+  }
+  // Repository/base policy (item 4): a CLOSED list of accepted repositories.
+  // Dispatch may only run in a repository on this list; arbitrary repository
+  // overrides outside it are rejected.
+  if (!Array.isArray(policy.acceptedRepositories) || policy.acceptedRepositories.length === 0
+    || !policy.acceptedRepositories.every((repo) => typeof repo === "string" && repo !== "" && !repo.includes(".."))) {
+    return { ok: false, reason: "the automation policy acceptedRepositories must be a non-empty closed list of repository paths (fails closed)" };
+  }
+  return { ok: true, policy, reason: null };
+}
+
+// Item 4: a repository override is honored only when it is on the policy's
+// closed acceptedRepositories list (exact match).
+export function repositoryAccepted(policy, repository) {
+  return Array.isArray(policy?.acceptedRepositories) && policy.acceptedRepositories.includes(repository);
+}
+
+// §3.2 assignment envelope: created ONCE per assignment, immutable (deep-
+// frozen, F2), and single-attempt. Retry, drift, or expiry require a NEW
+// envelope — never a mutation of this one. F4: the starting revision comes
+// from the CARD'S repository (resolved from the workspace the board lives
+// in), the card's base revision is bound in when present (branch chaining),
+// and the risk classification comes from the policy (per-card override only
+// when the policy allows).
+export function createEnvelope({ card, policy, now = null, repository = null, startingRevision = null }) {
+  const at = now ?? new Date().toISOString();
+  const envelopeId = randomBytes(16).toString("hex");
+  const expiryHours = Number.isFinite(policy?.envelopeExpiryHours) && policy.envelopeExpiryHours > 0
+    ? policy.envelopeExpiryHours
+    : DEFAULT_ENVELOPE_EXPIRY_HOURS;
+  let expiry = new Date(Date.parse(at) + expiryHours * 3_600_000).toISOString();
+  // The envelope can never outlive the policy that authorized it.
+  if (policy?.expiry && Date.parse(policy.expiry) < Date.parse(expiry)) expiry = policy.expiry;
+  const repo = repository ?? (policy?.board ? dirname(policy.board) : process.cwd());
+  const overrideAllowed = policy?.allowPerCardRiskOverride === true;
+  const cardRisk = typeof card?.risk === "string" && RISK_LEVELS.includes(card.risk) ? card.risk : null;
+  const risk = overrideAllowed && cardRisk !== null ? cardRisk : policy?.riskCeiling ?? "low";
+  // Item 4: work STARTS from the declared base revision where present — the
+  // envelope's starting revision IS the base (branch chaining), not merely a
+  // copied field; execution validation enforces HEAD === startingRevision.
+  const startRev = startingRevision ?? card.base ?? gitHead(repo);
+  return deepFreeze({
+    schema: ENVELOPE_SCHEMA,
+    envelopeId,
+    cardId: card.cardId,
+    cardHash: card.hash ?? null,
+    repository: repo,
+    startingRevision: startRev,
+    baseRevision: card.base ?? null,
+    branch: `board/${card.cardId}-${envelopeId.slice(0, 8)}`,
+    allowedPaths: Object.freeze([...(card.scope ?? [])]),
+    unchangedPaths: Object.freeze([...(card.unchangedPaths ?? [])]),
+    capabilities: Object.freeze([...(card.capabilities ?? [])]),
+    stoppingPoint: card.stoppingPoint ?? null,
+    acceptance: Object.freeze({ specHash: card.specHash ?? null, dodHash: card.dodHash ?? null }),
+    placement: policy?.placement ?? null,
+    interactionProfile: policy?.placement ?? null,
+    risk,
+    riskCeiling: policy?.riskCeiling ?? null,
+    mode: "automated",
+    createdAt: at,
+    expiry,
+  });
+}
+
+function deepFreeze(value) {
+  if (value !== null && typeof value === "object") {
+    for (const key of Object.keys(value)) deepFreeze(value[key]);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+// Read-only git observation for the envelope's starting revision. Git
+// OPERATIONS belong to the git extension (§0.9); reading HEAD is not one.
+export function gitHead(cwd = process.cwd()) {
+  try {
+    return execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+export function gitBranch(cwd = process.cwd()) {
+  try {
+    return execFileSync("git", ["branch", "--show-current"], { cwd, encoding: "utf8" }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// §3.3 + §4 dispatch eligibility, evaluated under the writer lock: the card
+// must be dispatchable per the pure predicate (which already enforces the
+// blocked-by gate, hash validity, and — with statePath set — writer
+// provenance), not already claimed, and its cardId must be in the writer's
+// issued-IDs ledger.
+export function dispatchEligibility({ card, boardIndex, boardPath, activeClaims }) {
+  const claimed = new Set((activeClaims ?? []).map((claim) => claim.cardId));
+  if (claimed.has(card.cardId)) {
+    return { eligible: false, reason: `card ${card.cardId} is already claimed` };
+  }
+  const withState = { ...card, statePath: writerStatePath(boardPath) };
+  const result = isDispatchable(withState, boardIndex);
+  if (!result.dispatchable) {
+    return { eligible: false, reason: result.failedConditions.join("; ") };
+  }
+  return { eligible: true, reason: null };
+}
+
+const PRIORITY_ORDER = Object.freeze({ P0: 0, P1: 1, P2: 2, P3: 3 });
+
+// Select the highest-priority dispatchable, unclaimed, provenance-verified
+// card. Optional cardId restricts selection to that card.
+export function selectDispatchableCard({ cards, boardPath, activeClaims, cardId = null }) {
+  const index = new Map(cards.map((card) => [card.cardId, card]));
+  const candidates = cards
+    .filter((card) => cardId === null || card.cardId === cardId)
+    .map((card) => ({ card, eligibility: dispatchEligibility({ card, boardIndex: index, boardPath, activeClaims }) }))
+    .filter((entry) => entry.eligibility.eligible)
+    .sort((a, b) =>
+      (PRIORITY_ORDER[a.card.priority] ?? 99) - (PRIORITY_ORDER[b.card.priority] ?? 99)
+      || String(a.card.cardId).localeCompare(String(b.card.cardId)));
+  return candidates[0] ?? null;
+}
+
+// §3.6 + §4: THE atomic claim. Under the writer lock, in one operation:
+// eligibility check → envelope creation → claims-file persist → projection
+// republication with the card shown active. A crash leaves either the old or
+// the new complete state (both writes are atomic renames); two concurrent
+// claims can never both win because the entire read-decide-write sequence
+// holds the lock. Expired claims are released first, inside the same lock.
+export function claimCard({ boardPath, cardId = null, role, policy = null, configPath = null, now = null, repository = null, startingRevision = null }) {
+  if (typeof boardPath !== "string" || boardPath === "") {
+    throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
+  }
+  if (typeof role !== "string" || role === "") {
+    throw Object.assign(new Error("role is required"), { code: "role-required" });
+  }
+  // Contended locks (two pulses racing across processes) retry briefly and
+  // then fail as a structured contention error — never a crash. The claim
+  // itself stays atomic: whoever takes the lock first wins the card.
+  const { sleepSync } = { sleepSync: (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) };
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return withWriterLock(boardPath, () =>
+        claimCardLocked({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision }));
+    } catch (error) {
+      if (error?.code === "writer-lock-held" && attempt < 20) {
+        sleepSync(25);
+        continue;
+      }
+      if (error?.code === "writer-lock-held") {
+        return { ok: false, code: "lock-contention", reason: "the board writer lock stayed contended; the claim did not land (no card was double-claimed)" };
+      }
+      throw error;
+    }
+  }
+}
+
+function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision }) {
+  const at = now ?? new Date().toISOString();
+  if (!existsSync(boardPath)) {
+    return { ok: false, code: "board-unavailable", reason: "board file is no longer present (board-unavailable)" };
+  }
+  if (!ROLE_NAME_RE.test(role)) {
+    return { ok: false, code: "role-invalid", reason: `role "${role}" does not match ${ROLE_NAME_RE.source} (fails closed)` };
+  }
+  const anchorRecovery = recoverClaimsAnchorLocked(boardPath);
+  if (!anchorRecovery.ok) {
+    return { ok: false, code: "claims-anchor-recovery-failed", recoverable: true, reason: anchorRecovery.reason };
+  }
+  // F1: read AND verify the claims file. Corruption fails closed.
+  const claimsRead = readClaimsState(boardPath);
+  if (!claimsRead.ok) {
+    return { ok: false, code: "claims-corrupt", reason: claimsRead.reason };
+  }
+  // F3: reconcile an interrupted transaction before anything else. A crash
+  // between the claims-file write and the projection republish leaves a
+  // transaction record; roll it forward (republish the projection) so a live
+  // claim never exists without its active-state publication, and an envelope
+  // never exists without its claim (the envelope is written inside the same
+  // claims record, so claims-file presence IS claim+envelope presence).
+  // If reconciliation itself fails, REFUSE the mutation — never clear or
+  // bypass the pending transaction (item 3).
+  const reconciliation = reconcileTransactionLocked({ boardPath, state: claimsRead.state });
+  if (reconciliation !== null && reconciliation.failed) {
+    return { ok: false, code: "recovery-failed", recoverable: true, reason: reconciliation.reason,
+      errors: [reconciliation.reason] };
+  }
+  // Automation policy first (§4): no policy = no overnight dispatch.
+  const resolvedPolicy = policy ?? readAutomationPolicy(boardPath, { configPath });
+  const policyCheck = checkAutomationPolicy(resolvedPolicy, { now: at, boardPath });
+  if (!policyCheck.ok) {
+    return { ok: false, code: "policy-refused", reason: policyCheck.reason };
+  }
+  if (!policyCheck.policy.roles.includes(role)) {
+    return { ok: false, code: "policy-role-refused", reason: `role "${role}" is not declared in the automation policy (fails closed)` };
+  }
+  // §3.4 mode table: automated placement is container/microVM, always.
+  if (policyCheck.policy.placement !== "container") {
+    return { ok: false, code: "policy-placement-refused", reason: "automated board dispatch requires container placement per the automation policy (§3.4)" };
+  }
+  // F4: the starting revision comes from the card's repository — the
+  // workspace the board lives in, not process.cwd(). A caller-supplied
+  // repository override is honored ONLY when it is on the policy's closed
+  // acceptedRepositories list (item 4).
+  const defaultRepo = dirname(boardPath);
+  const repo = repository !== undefined && repository !== null
+    ? (repositoryAccepted(policyCheck.policy, repository) ? repository : null)
+    : defaultRepo;
+  if (repo === null) {
+    return { ok: false, code: "policy-repository-refused", reason: `repository "${repository}" is not on the automation policy's acceptedRepositories list (fails closed)` };
+  }
+  if (!repositoryAccepted(policyCheck.policy, repo)) {
+    return { ok: false, code: "policy-repository-refused", reason: `repository "${repo}" is not on the automation policy's acceptedRepositories list (fails closed)` };
+  }
+  // Expired envelopes release their claims automatically on check (§4.6).
+  const activeClaims = releaseExpiredClaimsLocked({ boardPath, at, state: claimsRead.state });
+  const concurrency = Number(policyCheck.policy.maxConcurrent);
+  if (activeClaims.length >= concurrency) {
+    return { ok: false, code: "policy-concurrency-refused", reason: `the automation policy allows at most ${concurrency} concurrent claim(s); ${activeClaims.length} are active` };
+  }
+  const validatedBoard = validateBoard(readFileSync(boardPath, "utf8"), {});
+  if (!validatedBoard.ok) {
+    return { ok: false, code: "board-invalid", errors: validatedBoard.errors };
+  }
+  // F2: an envelope whose attempt was consumed (expired, reclaimed, or
+  // completed) can never be reused — the consumed-attempt marker is
+  // HMAC-covered in the claims file, and readClaimsState refuses any active
+  // claim referencing a consumed envelopeId. A retry mints a NEW envelope.
+  const consumedIds = new Set(claimsRead.state.consumedClaims.map((entry) => entry.envelopeId));
+  if (cardId !== null && claimsRead.state.claims.some((claim) => claim.cardId === cardId && consumedIds.has(claim.envelopeId))) {
+    return { ok: false, code: "envelope-consumed", reason: `card ${cardId} has a consumed envelope attempt; a retry requires a new dispatch and a new envelope` };
+  }
+  const selected = selectDispatchableCard({ cards: validatedBoard.cards, boardPath, activeClaims, cardId });
+  if (selected === null) {
+    return { ok: false, code: "no-dispatchable-card", reason: cardId
+      ? `card ${cardId} is not dispatchable, is already claimed, or lacks writer provenance`
+      : "no dispatchable unclaimed card is available" };
+  }
+  const card = selected.card;
+  const envelope = createEnvelope({ card, policy: policyCheck.policy, now: at, repository: repo, startingRevision });
+  const claim = {
+    cardId: card.cardId,
+    claimedAt: at,
+    role,
+    envelopeId: envelope.envelopeId,
+    envelope,
+  };
+  const nextClaims = [...activeClaims, claim];
+  // F3: the transaction record goes into the claims file BEFORE the
+  // projection rename. Both writes are atomic renames under the lock, so a
+  // crash leaves either the old or the new complete state, and the record
+  // drives roll-forward recovery on the next operation.
+  const transaction = { op: "claim", cardId: card.cardId, envelopeId: envelope.envelopeId, at, phase: "claims-written" };
+  writeClaims(boardPath, nextClaims, { transaction });
+  // Active-state publication: the projection is recomputed with the claim
+  // visible, in the same locked operation (§3.6).
+  const projection = writeProjection(boardPath, validatedBoard.cards, nextClaims);
+  // Item 3: a projection failure returns ok:false as a STRUCTURED
+  // RECOVERABLE failure — the claim and envelope are committed in the
+  // authenticated claims file with the transaction retained; the next
+  // operation rolls the projection forward. Never silently ok:true.
+  if (!projection.written) {
+    return {
+      ok: false,
+      claimed: true,
+      code: "claim-recoverable",
+      recoverable: true,
+      reason: `projection publication failed: ${projection.error ?? "unknown"} (claim committed; transaction retained for roll-forward)`,
+      cardId: card.cardId,
+      role,
+      claim,
+      envelope,
+      projection,
+    };
+  }
+  // F3: finalize — clear the transaction record now that the projection is
+  // published.
+  finalizeTransactionLocked({ boardPath, claims: nextClaims, projection });
+  return {
+    ok: true,
+    claimed: true,
+    cardId: card.cardId,
+    role,
+    claim,
+    envelope,
+    projection,
+  };
+}
+
+// F3: roll an interrupted claim transaction forward — the claims (and their
+// envelopes) are already committed in the authenticated claims file, so only
+// the projection publication can be stale; republish it. Returns
+// {failed: true, reason} when roll-forward fails; callers must REFUSE the
+// mutation and never clear the pending transaction (item 3).
+function reconcileTransactionLocked({ boardPath, state }) {
+  const transaction = state.transaction;
+  if (transaction === null || transaction.phase !== "claims-written") return null;
+  if (!existsSync(boardPath)) {
+    return { failed: true, reason: "a pending claim transaction exists but the board file is unavailable — recovery failed (fails closed)" };
+  }
+  const validated = validateBoard(readFileSync(boardPath, "utf8"), {});
+  if (!validated.ok) {
+    return { failed: true, reason: "a pending claim transaction exists but the board is invalid — recovery failed (fails closed)" };
+  }
+  const projection = writeProjection(boardPath, validated.cards, state.claims);
+  if (!projection.written) {
+    return { failed: true, reason: `projection republication failed during recovery: ${projection.error ?? "unknown"} (transaction retained)` };
+  }
+  writeClaims(boardPath, state.claims, { transaction: null });
+  return { failed: false };
+}
+
+// F3: clear the transaction record once the projection is published.
+function finalizeTransactionLocked({ boardPath, claims, projection }) {
+  if (!projection?.written) {
+    // Leave the transaction record in place so the next operation reconciles.
+    return `projection publication failed: ${projection?.error ?? "unknown"} (transaction record retained for recovery)`;
+  }
+  writeClaims(boardPath, claims, { transaction: null });
+  return null;
+}
+
+// F2/Item 2: whether an envelope attempt has been consumed (expired,
+// reclaimed, or completed) — the journey layer checks this before executing
+// an envelope.
+export function isEnvelopeConsumed(boardPath, envelopeId) {
+  const read = readClaimsState(boardPath);
+  if (!read.ok) throw Object.assign(new Error(read.reason), { code: "claims-corrupt" });
+  return read.state.consumedClaims.some((entry) => entry.envelopeId === envelopeId);
+}
+
+// Prepare the one assigned branch before execution. Authentication happens
+// first against the persisted claim; only a missing assigned branch may be
+// created, and only from the envelope's exact starting revision. Existing
+// branch mismatch is drift, not an implicit checkout.
+export function prepareEnvelopeForExecution({ boardPath, envelope }) {
+  if (typeof boardPath !== "string" || boardPath === "" || !wellFormedEnvelope(envelope)) {
+    return { ok: false, code: "envelope-invalid", reason: "a valid board path and envelope are required" };
+  }
+  try {
+    return withWriterLock(boardPath, () => {
+      const recovery = recoverClaimsAnchorLocked(boardPath);
+      if (!recovery.ok) return { ok: false, code: "claims-anchor-recovery-failed", reason: recovery.reason };
+      const guard = validateEnvelopeForExecutionLocked({ boardPath, envelope, requireBranch: false });
+      if (!guard.ok) return guard;
+      const current = gitBranch(envelope.repository);
+      if (current === envelope.branch) return { ok: true, prepared: false, envelope: guard.envelope };
+      if (gitHead(envelope.repository) !== envelope.startingRevision) {
+        return { ok: false, code: "revision-drift", reason: "the repository is not at the envelope starting revision (fails closed)" };
+      }
+      try {
+        execFileSync("git", ["show-ref", "--verify", "--quiet", `refs/heads/${envelope.branch}`], { cwd: envelope.repository });
+        return { ok: false, code: "branch-drift", reason: `assigned branch ${envelope.branch} already exists but is not checked out (fails closed)` };
+      } catch (error) {
+        if (error?.status !== 1) return { ok: false, code: "branch-unreadable", reason: "the assigned branch state could not be verified (fails closed)" };
+      }
+      execFileSync("git", ["switch", "-c", envelope.branch, envelope.startingRevision], { cwd: envelope.repository, stdio: "ignore" });
+      return { ok: true, prepared: true, envelope: guard.envelope };
+    });
+  } catch (error) {
+    return { ok: false, code: error?.code || "branch-prepare-failed", reason: String(error?.message || error).slice(0, 512) };
+  }
+}
+
+// Item 2: the authoritative execution-boundary validation. Before an
+// envelope is executed or resumed, the journey layer MUST call this: it
+// validates authenticated consumption, expiry, card-hash drift, repository
+// drift, and HEAD/base/branch drift against the CURRENT board and repository.
+// Any drift fails closed — retry requires a new envelope.
+export function validateEnvelopeForExecution({ boardPath, envelope, now = null }) {
+  if (typeof boardPath !== "string" || boardPath === "") {
+    return { ok: false, code: "board-path-required", reason: "boardPath is required" };
+  }
+  try {
+    return withWriterLock(boardPath, () => validateEnvelopeForExecutionLocked({ boardPath, envelope, now }));
+  } catch (error) {
+    return { ok: false, code: error?.code || "envelope-validation-failed", reason: String(error?.message || error).slice(0, 512) };
+  }
+}
+
+function validateEnvelopeForExecutionLocked({ boardPath, envelope, now = null, requireBranch = true }) {
+  const at = now ?? new Date().toISOString();
+  if (!wellFormedEnvelope(envelope)) {
+    return { ok: false, code: "envelope-invalid", reason: "the envelope is malformed or has an unknown shape (fails closed)" };
+  }
+  const recovery = recoverClaimsAnchorLocked(boardPath);
+  if (!recovery.ok) return { ok: false, code: "claims-anchor-recovery-failed", reason: recovery.reason };
+  const read = readClaimsState(boardPath);
+  if (!read.ok) return { ok: false, code: "claims-corrupt", reason: read.reason };
+  const claim = read.state.claims.find((entry) => entry.envelopeId === envelope.envelopeId);
+  if (!claim) {
+    const consumed = read.state.consumedClaims.some((entry) => entry.envelopeId === envelope.envelopeId);
+    return { ok: false, code: "envelope-not-active",
+      reason: consumed
+        ? "the envelope attempt was consumed — a retry requires a new envelope (single-attempt lifecycle)"
+        : "the envelope has no active claim on the board (fails closed)" };
+  }
+  // The caller does not get to supply a well-formed variant. Execution uses
+  // exactly the envelope authenticated inside the active claims state.
+  if (canonicalJsonString(envelope) !== canonicalJsonString(claim.envelope)) {
+    return { ok: false, code: "envelope-authentication-failed", reason: "the supplied envelope does not exactly match the authenticated active-claim envelope (fails closed)" };
+  }
+  // Single-attempt lifecycle: expiry.
+  if (Date.parse(envelope.expiry) <= Date.parse(at)) {
+    return { ok: false, code: "envelope-expired", reason: `the envelope expired at ${envelope.expiry} (single-attempt lifecycle)` };
+  }
+  // Card hash drift: the board's current card must still hash to the
+  // envelope's binding.
+  if (!existsSync(boardPath)) {
+    return { ok: false, code: "board-unavailable", reason: "board file is no longer present (board-unavailable)" };
+  }
+  const board = validateBoard(readFileSync(boardPath, "utf8"), {});
+  if (!board.ok) return { ok: false, code: "board-invalid", reason: "the board is invalid (fails closed)" };
+  const card = board.cards.find((entry) => entry.cardId === envelope.cardId);
+  if (!card) {
+    return { ok: false, code: "card-not-found", reason: `card ${envelope.cardId} no longer exists on the board (drift — new envelope required)` };
+  }
+  if ((card.hash ?? computeCardHash(card)) !== envelope.cardHash) {
+    return { ok: false, code: "card-hash-drift", reason: "the card hash drifted from the envelope binding — semantic edits require a new envelope (fails closed)" };
+  }
+  // Repository drift.
+  if (envelope.repository !== dirname(boardPath)) {
+    return { ok: false, code: "repository-drift", reason: `the envelope is bound to repository "${envelope.repository}", not this board's repository (fails closed)` };
+  }
+  // HEAD/base/branch drift: work must start from the declared starting
+  // revision (the card's base revision where present, per item 4) — the
+  // repository's current HEAD must equal it.
+  if (envelope.startingRevision !== null) {
+    const head = gitHead(envelope.repository);
+    if (head === null) {
+      return { ok: false, code: "head-unreadable", reason: "the envelope's repository HEAD could not be read (fails closed)" };
+    }
+    if (head !== envelope.startingRevision) {
+      return { ok: false, code: "revision-drift",
+        reason: `repository HEAD ${head} does not match the envelope's starting revision ${envelope.startingRevision} (drift — new envelope required)` };
+    }
+  }
+  const branch = gitBranch(envelope.repository);
+  if (requireBranch && branch !== envelope.branch) {
+    return { ok: false, code: "branch-drift",
+      reason: `repository branch ${branch ?? "(detached)"} does not match the assigned branch ${envelope.branch} (fails closed)` };
+  }
+  return { ok: true, claim, envelope: claim.envelope, reason: null };
+}
+
+// Item 2: completion consumption — when the work reaches its stopping point,
+// the envelope attempt is consumed ("completed") and its claim released.
+// Never marks the card done (completion is human-only, §3.1).
+export function consumeEnvelope({ boardPath, envelopeId, reason = "completed" } = {}) {
+  if (typeof boardPath !== "string" || boardPath === "") {
+    throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
+  }
+  if (!CONSUMED_REASONS.includes(reason)) {
+    throw Object.assign(new Error(`reason must be one of ${CONSUMED_REASONS.join(", ")}`), { code: "invalid-input" });
+  }
+  return withWriterLock(boardPath, () => {
+    const anchorRecovery = recoverClaimsAnchorLocked(boardPath);
+    if (!anchorRecovery.ok) return { ok: false, code: "claims-anchor-recovery-failed", recoverable: true, reason: anchorRecovery.reason };
+    const read = readClaimsState(boardPath);
+    if (!read.ok) return { ok: false, code: "claims-corrupt", reason: read.reason };
+    const reconciliation = reconcileTransactionLocked({ boardPath, state: read.state });
+    if (reconciliation?.failed) {
+      return { ok: false, code: "recovery-failed", recoverable: true, reason: reconciliation.reason };
+    }
+    const claim = read.state.claims.find((entry) => entry.envelopeId === envelopeId);
+    if (!claim) {
+      return { ok: false, code: "envelope-not-active", reason: "the envelope has no active claim to consume" };
+    }
+    const kept = read.state.claims.filter((entry) => entry.envelopeId !== envelopeId);
+    const consumedClaims = [...read.state.consumedClaims, {
+      cardId: claim.cardId,
+      envelopeId,
+      consumedAt: new Date().toISOString(),
+      reason,
+    }];
+    writeClaims(boardPath, kept, { consumedClaims });
+    if (existsSync(boardPath)) {
+      const validated = validateBoard(readFileSync(boardPath, "utf8"), {});
+      if (validated.ok) writeProjection(boardPath, validated.cards, kept);
+    }
+    return { ok: true, consumed: true, envelopeId, reason, claims: kept };
+  });
+}
+
+// Release every claim whose envelope expiry has passed. Returns the surviving
+// active claims and republishes the projection. Safe to call anytime.
+export function releaseExpiredClaims({ boardPath, now = null } = {}) {
+  if (typeof boardPath !== "string" || boardPath === "") {
+    throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
+  }
+  return withWriterLock(boardPath, () => {
+    const anchorRecovery = recoverClaimsAnchorLocked(boardPath);
+    if (!anchorRecovery.ok) throw Object.assign(new Error(anchorRecovery.reason), { code: "claims-anchor-recovery-failed" });
+    const read = readClaimsState(boardPath);
+    if (!read.ok) throw Object.assign(new Error(read.reason), { code: "claims-corrupt" });
+    // Item 3: every claims mutation reconciles first; refuse on failure.
+    const reconciliation = reconcileTransactionLocked({ boardPath, state: read.state });
+    if (reconciliation?.failed) {
+      throw Object.assign(new Error(reconciliation.reason), { code: "recovery-failed" });
+    }
+    return { released: releaseExpiredClaimsLocked({ boardPath, at: now ?? new Date().toISOString(), state: read.state }) };
+  }).released;
+}
+
+function releaseExpiredClaimsLocked({ boardPath, at, state = null }) {
+  const existing = (state ?? readClaimsState(boardPath).state ?? { claims: [] }).claims;
+  const active = existing.filter((claim) => {
+    const expiry = claim?.envelope?.expiry;
+    return typeof expiry === "string" && Date.parse(expiry) > Date.parse(at);
+  });
+  if (active.length !== existing.length) {
+    // F2: a released envelope's attempt is consumed — it can never be
+    // reused; a retry mints a new envelope.
+    const consumedClaims = [...(state?.consumedClaims ?? readClaimsState(boardPath).state?.consumedClaims ?? []),
+      ...existing.filter((claim) => !active.includes(claim)).map((claim) => ({
+        cardId: claim.cardId,
+        envelopeId: claim.envelopeId,
+        consumedAt: at,
+        reason: "expired",
+      }))];
+    writeClaims(boardPath, active, { consumedClaims });
+    if (existsSync(boardPath)) {
+      const validated = validateBoard(readFileSync(boardPath, "utf8"), {});
+      if (validated.ok) writeProjection(boardPath, validated.cards, active);
+    }
+  }
+  return active;
+}
+
+// Explicit reclaim: drop the claim for one card (or all claims with cardId
+// null). Releases the active-state publication. Never marks anything done.
+export function reclaimClaim({ boardPath, cardId = null, envelopeId = null } = {}) {
+  if (typeof boardPath !== "string" || boardPath === "") {
+    throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
+  }
+  return withWriterLock(boardPath, () => {
+    const anchorRecovery = recoverClaimsAnchorLocked(boardPath);
+    if (!anchorRecovery.ok) throw Object.assign(new Error(anchorRecovery.reason), { code: "claims-anchor-recovery-failed" });
+    const read = readClaimsState(boardPath);
+    if (!read.ok) throw Object.assign(new Error(read.reason), { code: "claims-corrupt" });
+    // Item 3: reconcile first; refuse the mutation when recovery fails.
+    const reconciliation = reconcileTransactionLocked({ boardPath, state: read.state });
+    if (reconciliation?.failed) {
+      throw Object.assign(new Error(reconciliation.reason), { code: "recovery-failed" });
+    }
+    const existing = read.state.claims;
+    const kept = existing.filter((claim) =>
+      (cardId !== null ? claim.cardId !== cardId : true)
+      && (envelopeId !== null ? claim.envelopeId !== envelopeId : true));
+    if (kept.length === existing.length) {
+      return { ok: false, code: "claim-not-found", reason: "no matching claim to reclaim" };
+    }
+    // F2: a reclaimed envelope's attempt is consumed too.
+    const consumedClaims = [...read.state.consumedClaims,
+      ...existing.filter((claim) => !kept.includes(claim)).map((claim) => ({
+        cardId: claim.cardId,
+        envelopeId: claim.envelopeId,
+        consumedAt: new Date().toISOString(),
+        reason: "reclaimed",
+      }))];
+    writeClaims(boardPath, kept, { consumedClaims });
+    if (existsSync(boardPath)) {
+      const validated = validateBoard(readFileSync(boardPath, "utf8"), {});
+      if (validated.ok) writeProjection(boardPath, validated.cards, kept);
+    }
+    return { ok: true, reclaimed: existing.length - kept.length, claims: kept };
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Provider observation (§5 reversibility): everything registers behind the
 // observation that a board file exists. No board file, no behavior change and
 // no new tool.
@@ -1594,6 +2526,64 @@ export function registerKanbanBoardTools(pi, { boardPath = null, resolveBoardPat
       },
     });
     registered.push("agentic_kanban_board_update");
+  }
+  // The dispatch tool (§4): claims the highest-priority dispatchable,
+  // unclaimed, provenance-verified card for a role under the user's
+  // automation policy, creates the assignment envelope, and returns the
+  // binding. The policy is the human decision; no policy = refusal. This
+  // tool wires claim + envelope only — journey execution integration is a
+  // follow-up.
+  if (typeof pi?.registerTool === "function") {
+    pi.registerTool({
+      name: "agentic_kanban_board_dispatch",
+      label: "Kanban Board Dispatch",
+      description:
+        "Claim the highest-priority dispatchable, unclaimed task-board card for a role and create its assignment envelope. Governed by the user's automation policy (roles, placement, maxConcurrent, expiry): no policy = refused; a role not in the policy = refused. Atomic: two concurrent claims can never claim the same card. Expired envelopes release automatically. Returns {cardId, envelope, branch, scope, stoppingPoint}.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          role: { type: "string", description: "The role claiming the card; must be declared in the automation policy." },
+          cardId: { type: "string", description: "Optional: claim this specific card instead of the highest-priority dispatchable one." },
+        },
+        required: ["role"],
+      },
+      async execute(_toolCallId, input, _signal, _onUpdate, ctx) {
+        const activeBoardPath = boardPathFor(ctx);
+        if (!activeBoardPath || !existsSync(activeBoardPath)) {
+          return unavailableResult();
+        }
+        if (typeof input?.role !== "string" || input.role === "") {
+          const value = { ok: false, code: "invalid-input", reason: "role is required", errors: ["role is required"] };
+          return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+        }
+        let result;
+        try {
+          result = claimCard({ boardPath: activeBoardPath, role: input.role, cardId: input?.cardId ?? null });
+        } catch (error) {
+          const code = typeof error?.code === "string" && error.code !== "claims-corrupt" ? error.code : error.code;
+          const value = { ok: false, code, reason: String(error?.message || error).slice(0, 512), errors: [String(error?.message || error).slice(0, 512)] };
+          return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+        }
+        let value;
+        if (result.ok) {
+          value = {
+            ok: true,
+            claimed: true,
+            cardId: result.cardId,
+            envelope: result.envelope,
+            branch: result.envelope.branch,
+            scope: result.envelope.allowedPaths,
+            stoppingPoint: result.envelope.stoppingPoint,
+            role: result.role,
+          };
+        } else {
+          value = { ok: false, code: result.code, reason: result.reason ?? (result.errors ?? []).join("; "), errors: result.errors ?? [] };
+        }
+        return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+      },
+    });
+    registered.push("agentic_kanban_board_dispatch");
   }
   return { registered, observation: { ...observation, boardPath: observation.boardPath } };
 }

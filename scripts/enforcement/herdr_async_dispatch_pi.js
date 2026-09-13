@@ -16,6 +16,7 @@ import {
   HERDR_COMMUNICATION_ACTIONS,
 } from "./herdr_communication_pi.js";
 import { isNativeTuiContext } from "./native_tui_context.js";
+import { prepareEnvelopeForExecution, validateEnvelopeForExecution, consumeEnvelope } from "./task_board_core_pi.js";
 
 export const WORKER_DISPATCH_TOOL = "agentic_worker_dispatch";
 export const WORKER_DISPATCH_SCHEMA = "agentic-driver.worker-dispatch.v1";
@@ -246,24 +247,53 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   const communicationOptions = options.communication ?? options;
   const replacementRole = options.replacementRole ?? role;
   const replacementModel = options.replacementModel ?? options.model ?? params.model;
-  const finish = (status) => ({
-    schema: WORKER_DISPATCH_SCHEMA,
-    ok: status === "completed" || status === "exhausted" || status === "waiting-approval",
-    action: "dispatch",
-    mode,
-    autonomy,
-    ...(journey.cast ? { cast: journey.cast } : {}),
-    role,
-    status,
-    steps: journey.steps,
-    stepCount: journey.steps.filter((step) => step.status === "done").length,
-    code: journey.code,
-    report: journeyReceipt(journey),
-    reportMarkers: { open: "[WORKER_JOURNEY_REPORT_BEGIN]", close: "[WORKER_JOURNEY_REPORT_END]" },
-    handoff: journey.handoff,
-    nonAuthorizing: true,
-    persisted: false,
-  });
+  const board = options.board && typeof options.board === "object"
+    && typeof options.board.boardPath === "string" && options.board.envelope
+    ? options.board
+    : null;
+  let boardAttemptStarted = false;
+  let envelopeConsumed = false;
+  const finish = async (requestedStatus) => {
+    let status = requestedStatus;
+    if (board && boardAttemptStarted && !envelopeConsumed) {
+      const reason = ["completed", "exhausted", "cancelled", "failed", "waiting-approval", "role-blocked", "worker-unresponsive"].includes(status)
+        ? status
+        : status.startsWith("worker-unresponsive") ? "worker-unresponsive" : "failed";
+      let consumed;
+      try {
+        consumed = consumeEnvelope({ boardPath: board.boardPath, envelopeId: board.envelope.envelopeId, reason });
+      } catch (error) {
+        consumed = { ok: false, code: error?.code, reason: String(error?.message || error) };
+      }
+      if (consumed?.ok !== true) {
+        status = "failed";
+        journey.status = "failed";
+        journey.code = consumed?.code || "envelope-consume-failed";
+        journey.steps.push({ step: journey.steps.length + 1, taskId: null, status: "failed", error: consumed?.reason || "envelope consumption failed closed" });
+      } else {
+        envelopeConsumed = true;
+      }
+    }
+    journey.status = status;
+    return {
+      schema: WORKER_DISPATCH_SCHEMA,
+      ok: status === "completed" || status === "exhausted" || status === "waiting-approval",
+      action: "dispatch",
+      mode,
+      autonomy,
+      ...(journey.cast ? { cast: journey.cast } : {}),
+      role,
+      status,
+      steps: journey.steps,
+      stepCount: journey.steps.filter((step) => step.status === "done").length,
+      code: journey.code,
+      report: journeyReceipt(journey),
+      reportMarkers: { open: "[WORKER_JOURNEY_REPORT_BEGIN]", close: "[WORKER_JOURNEY_REPORT_END]" },
+      handoff: journey.handoff,
+      nonAuthorizing: true,
+      persisted: false,
+    };
+  };
 
   // Explicit unstuck path: with native confirmation, spin up a replacement
   // worker for the same trusted repository/role through the existing
@@ -375,6 +405,35 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   }
   if (signal?.aborted) return finish("cancelled");
 
+  // Board-planned journey: authenticate the persisted envelope, prepare its
+  // assigned branch exactly once, then validate again. Every consequential
+  // prompt below repeats validation so mid-journey drift fails closed.
+  const checkBoardEnvelope = () => board
+    ? validateEnvelopeForExecution({ boardPath: board.boardPath, envelope: board.envelope })
+    : { ok: true };
+  if (board) {
+    let guard;
+    try {
+      const prepared = prepareEnvelopeForExecution({ boardPath: board.boardPath, envelope: board.envelope });
+      if (!prepared.ok) guard = prepared;
+      else {
+        boardAttemptStarted = true;
+        guard = checkBoardEnvelope();
+      }
+    } catch (error) {
+      journey.status = "failed";
+      journey.code = error?.code || "envelope-invalid";
+      journey.steps.push({ step: 0, taskId: null, status: "failed", error: String(error?.message || error).slice(0, 256) });
+      return finish("failed");
+    }
+    if (!guard.ok) {
+      journey.status = "failed";
+      journey.code = guard.code || "envelope-invalid";
+      journey.steps.push({ step: 0, taskId: null, status: "failed", error: guard.reason });
+      return finish("failed");
+    }
+  }
+
   for (let stepIndex = 1; stepIndex <= maxSteps; stepIndex += 1) {
     if (signal?.aborted) { journey.status = "cancelled"; return finish("cancelled"); }
 
@@ -449,6 +508,19 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
         journey.status = "cancelled";
         journey.steps.push({ step: stepIndex, taskId: task.id, status: "cancelled", error: "native confirmation was not granted" });
         return finish("cancelled");
+      }
+    }
+
+    // Revalidate immediately before the consequential prompt. This catches
+    // expiry, card/claim changes, and repository/branch/revision drift that
+    // occurred during pulse, queue observation, or confirmation.
+    if (board) {
+      const guard = checkBoardEnvelope();
+      if (!guard.ok) {
+        journey.status = "failed";
+        journey.code = guard.code || "envelope-invalid";
+        journey.steps.push({ step: stepIndex, taskId: task.id, status: "failed", error: guard.reason });
+        return finish("failed");
       }
     }
 
