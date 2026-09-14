@@ -99,7 +99,8 @@ test("Herdr communication isolates concurrent marked exchanges", async () => {
     assert.equal(prompt[0], "agent");
     assert.equal(prompt[1], "prompt");
     assert.equal(prompt[2], role);
-    assert.match(prompt[3], /Remain strictly read-only; do not modify files, state, or Git\./);
+    assert.match(prompt[3], /Return exactly one complete role report/);
+    assert.doesNotMatch(prompt[3], /MANDATORY ATOMIC EXECUTION CONTRACT|acceptance-checked step|Remain strictly read-only/);
     assert.equal(prompt[4], "--wait");
     assert.deepEqual(prompt.slice(5), [
       "--until", "idle", "--until", "done", "--until", "blocked", "--timeout", "1000",

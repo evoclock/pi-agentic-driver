@@ -1,0 +1,346 @@
+// SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Pulse tests (PULSE_DESIGN_v3 §15): closed policy validation, the five
+// Pulse results, ordering, routing/fallback, and composed capacity.
+
+import test from "node:test";
+import assert from "node:assert/strict";
+import {
+  checkAutomationPolicy, checkPulsePolicy, canonicalJsonString, sha256Hex,
+  computeCardHash, computeSpecHash, authorityRecordHmac,
+} from "../scripts/enforcement/task_board_core_pi.js";
+import {
+  PULSE_RESULTS, PULSE_SCAN_SCHEMA, modelAvailability, modelUsable,
+  freeCapacity, routesForRole, evaluateCard, scanBoard,
+} from "../scripts/enforcement/pulse_core_pi.js";
+
+const basePolicy = {
+  roles: ["implementer", "reviewer"],
+  placement: "container",
+  maxConcurrent: 5,
+  expiry: "2030-01-01T00:00:00.000Z",
+  envelopeExpiryHours: 12,
+  board: "/workspace/TASKS.md",
+  riskCeiling: "medium",
+  allowPerCardRiskOverride: false,
+  acceptedRepositories: ["/workspace"],
+};
+
+const basePulse = {
+  enabled: true,
+  mode: "interactive",
+  intervalSeconds: 300,
+  fillOnStart: true,
+  routing: {
+    implementer: {
+      preferred: [{ model: "zai/glm-5.3", maxConcurrent: 4 }],
+      fallback: [{ model: "opencode-go/glm-5.3", maxConcurrent: 2 }],
+      maxConcurrent: 4,
+    },
+    reviewer: {
+      preferred: [{ model: "openai-codex/gpt-5.6-sol", maxConcurrent: 1 }],
+      fallback: [],
+      maxConcurrent: 1,
+    },
+  },
+  stallTimeoutSeconds: 600,
+  unattendedHostRiskAccepted: false,
+};
+
+function policyWith(pulse) {
+  return { ...basePolicy, pulse };
+}
+
+function card(overrides = {}) {
+  const c = {
+    cardId: "T1", title: "Card one", lane: "backlog", flags: [],
+    priority: "P1", role: "implementer", dependencies: [],
+    capabilities: [], stoppingPoint: "tests green",
+    specHash: computeSpecHash("spec"), dodHash: computeSpecHash("done"),
+    specText: "spec", dodText: "done",
+    scope: ["src/"], unchangedPaths: [], repositories: ["/workspace"],
+    tags: [], description: "", done: false, base: null, due: null,
+    authoritySource: { source: "instruction", sessionOrReportId: "sess-1", quotedInstruction: "do it" },
+    ...overrides,
+  };
+  c.hash = overrides.hash ?? computeCardHash(c);
+  c.authorityWriterHmac = authorityRecordHmac(c.authoritySource, "test-secret", c.hash);
+  return c;
+}
+
+test("policy without pulse object is unchanged and valid", () => {
+  const result = checkAutomationPolicy(basePolicy, { boardPath: "/workspace/TASKS.md" });
+  assert.equal(result.ok, true);
+});
+
+test("closed pulse policy accepts the contract example", () => {
+  const result = checkPulsePolicy(basePulse, { roles: basePolicy.roles });
+  assert.equal(result.ok, true);
+});
+
+test("pulse unknown fields fail closed", () => {
+  const result = checkPulsePolicy({ ...basePulse, cron: "* * * * *" }, { roles: basePolicy.roles });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /fails closed/);
+});
+
+test("pulse requires enabled boolean and rejects bad mode/interval", () => {
+  assert.equal(checkPulsePolicy({ ...basePulse, enabled: "yes" }, { roles: basePolicy.roles }).ok, false);
+  assert.equal(checkPulsePolicy({ ...basePulse, mode: "cron" }, { roles: basePolicy.roles }).ok, false);
+  assert.equal(checkPulsePolicy({ ...basePulse, intervalSeconds: 5 }, { roles: basePolicy.roles }).ok, false);
+  assert.equal(checkPulsePolicy({ ...basePulse, intervalSeconds: 90000 }, { roles: basePolicy.roles }).ok, false);
+});
+
+test("pulse routing roles must be declared in policy roles", () => {
+  const pulse = { ...basePulse, routing: { ghost: basePulse.routing.implementer } };
+  const result = checkPulsePolicy(pulse, { roles: basePolicy.roles });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /absent from the policy roles/);
+});
+
+test("pulse duplicate model across preferred and fallback fails closed", () => {
+  const pulse = JSON.parse(JSON.stringify(basePulse));
+  pulse.routing.implementer.fallback = [{ model: "zai/glm-5.3", maxConcurrent: 2 }];
+  assert.equal(checkPulsePolicy(pulse, { roles: basePolicy.roles }).ok, false);
+});
+
+test("pulse capacities must be integers 1..32", () => {
+  const pulse = JSON.parse(JSON.stringify(basePulse));
+  pulse.routing.implementer.preferred[0].maxConcurrent = 0;
+  assert.equal(checkPulsePolicy(pulse, { roles: basePolicy.roles }).ok, false);
+  pulse.routing.implementer.preferred[0].maxConcurrent = 33;
+  assert.equal(checkPulsePolicy(pulse, { roles: basePolicy.roles }).ok, false);
+  pulse.routing.implementer.preferred[0].maxConcurrent = 32;
+  assert.equal(checkPulsePolicy(pulse, { roles: basePolicy.roles }).ok, true);
+});
+
+test("checkAutomationPolicy rejects a malformed pulse object in place", () => {
+  const result = checkAutomationPolicy(policyWith({ enabled: true }), { boardPath: basePolicy.board });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /pulse/);
+});
+
+test("all five pulse results are the closed set", () => {
+  assert.deepEqual([...PULSE_RESULTS], ["READY_FOR_NEXT", "BLOCKED", "STALE", "DENIED", "REVIEW_REQUIRED"]);
+});
+
+test("model availability resolves declared routes and fails closed otherwise", () => {
+  const observations = { "zai/glm-5.3": { status: "available" } };
+  assert.equal(modelAvailability({ model: "zai/glm-5.3", observations, declaredModels: ["zai/glm-5.3"] }), "available");
+  assert.equal(modelAvailability({ model: "zai/glm-5.3", observations, declaredModels: ["other/model"] }), "unknown");
+  assert.equal(modelAvailability({ model: "zai/glm-5.3", observations: null }), "unknown");
+  assert.equal(modelUsable("available"), true);
+  assert.equal(modelUsable("full"), true);
+  assert.equal(modelUsable("unauthenticated"), false);
+  assert.equal(modelUsable("unknown"), false);
+});
+
+test("free capacity composes route, role, and policy-wide ceilings", () => {
+  const free = freeCapacity({
+    role: "implementer", model: "zai/glm-5.3", pulsePolicy: basePulse,
+    activeClaims: [], activeSessions: [],
+  });
+  assert.equal(free.free, 4);
+  assert.equal(free.configured, 4);
+});
+
+test("free capacity subtracts unique active claims and deduplicates bound sessions", () => {
+  const claims = [
+    { cardId: "T1", role: "implementer", envelopeId: "e1", envelope: { model: "zai/glm-5.3" }, sessionId: "s1" },
+    { cardId: "T2", role: "implementer", envelopeId: "e2", envelope: { model: "zai/glm-5.3" } },
+  ];
+  const sessions = [{ role: "implementer", model: "zai/glm-5.3", sessionId: "s1" }];
+  const free = freeCapacity({
+    role: "implementer", model: "zai/glm-5.3", pulsePolicy: basePulse,
+    activeClaims: claims, activeSessions: sessions,
+  });
+  assert.equal(free.free, 2); // 4 - 2 unique claims; s1 counts once
+});
+
+test("unreconciled orphan sessions consume capacity and block duplicate spawn", () => {
+  const sessions = [{ role: "implementer", model: "zai/glm-5.3", sessionId: "orphan" }];
+  const free = freeCapacity({
+    role: "implementer", model: "zai/glm-5.3", pulsePolicy: basePulse,
+    activeClaims: [], activeSessions: sessions,
+  });
+  assert.equal(free.free, 3);
+});
+
+test("routes order is preferred then declared fallback", () => {
+  const routes = routesForRole("implementer", basePulse);
+  assert.deepEqual(routes.map((r) => r.model), ["zai/glm-5.3", "opencode-go/glm-5.3"]);
+  assert.deepEqual(routes.map((r) => r.tier), ["preferred", "fallback"]);
+});
+
+test("evaluateCard: READY_FOR_NEXT for a dispatchable card under enabled policy", () => {
+  const index = new Map([[ "T1", card() ]]);
+  const result = evaluateCard({
+    card: card(), boardIndex: index,
+    activeClaims: [], pulsePolicy: basePulse,
+    modelObservations: { "zai/glm-5.3": { status: "available" } },
+    declaredModels: ["zai/glm-5.3"],
+    acceptedRepositories: basePolicy.acceptedRepositories,
+  });
+  assert.equal(result.result, "READY_FOR_NEXT");
+});
+
+test("evaluateCard: BLOCKED for claimed card and dependency failure", () => {
+  const claims = [{ cardId: "T1", role: "implementer", envelopeId: "e1", envelope: { model: "zai/glm-5.3" } }];
+  const index = new Map([[ "T1", card() ]]);
+  const claimed = evaluateCard({
+    card: card(), boardIndex: index,
+    activeClaims: claims, pulsePolicy: basePulse,
+    modelObservations: { "zai/glm-5.3": { status: "available" } },
+    acceptedRepositories: basePolicy.acceptedRepositories,
+  });
+  assert.equal(claimed.result, "BLOCKED");
+  const dep = card({ cardId: "T2", dependencies: ["T9"] });
+  const index2 = new Map([[ "T2", dep ]]);
+  const blocked = evaluateCard({
+    card: dep, boardIndex: index2,
+    activeClaims: [], pulsePolicy: basePulse,
+    modelObservations: { "zai/glm-5.3": { status: "available" } },
+    acceptedRepositories: basePolicy.acceptedRepositories,
+  });
+  assert.equal(blocked.result, "BLOCKED");
+});
+
+test("evaluateCard: STALE for a tampered card hash", () => {
+  const stale = card({ hash: "f".repeat(64) });
+  const index = new Map([[ "T1", stale ]]);
+  const result = evaluateCard({
+    card: stale, boardIndex: index,
+    activeClaims: [], pulsePolicy: basePulse,
+    modelObservations: { "zai/glm-5.3": { status: "available" } },
+    acceptedRepositories: basePolicy.acceptedRepositories,
+  });
+  assert.equal(result.result, "STALE");
+});
+
+test("evaluateCard: DENIED for undeclared role route and unaccepted repository", () => {
+  const index = new Map([[ "T1", card() ]]);
+  const noRoute = evaluateCard({
+    card: card({ role: "ghost" }), boardIndex: index,
+    activeClaims: [], pulsePolicy: basePulse,
+    modelObservations: { "zai/glm-5.3": { status: "available" } },
+    acceptedRepositories: basePolicy.acceptedRepositories,
+  });
+  assert.equal(noRoute.result, "DENIED");
+  const badRepo = evaluateCard({
+    card: card({ repositories: ["/elsewhere"] }), boardIndex: index,
+    activeClaims: [], pulsePolicy: basePulse,
+    modelObservations: { "zai/glm-5.3": { status: "available" } },
+    acceptedRepositories: basePolicy.acceptedRepositories,
+  });
+  assert.equal(badRepo.result, "DENIED");
+});
+
+test("evaluateCard: REVIEW_REQUIRED when no usable declared route exists", () => {
+  const index = new Map([[ "T1", card() ]]);
+  const result = evaluateCard({
+    card: card(), boardIndex: index,
+    activeClaims: [], pulsePolicy: basePulse,
+    modelObservations: { "zai/glm-5.3": { status: "unauthenticated" } },
+    acceptedRepositories: basePolicy.acceptedRepositories,
+  });
+  assert.equal(result.result, "REVIEW_REQUIRED");
+});
+
+test("evaluateCard: REVIEW_REQUIRED when Pulse is disabled", () => {
+  const index = new Map([[ "T1", card() ]]);
+  const result = evaluateCard({
+    card: card(), boardIndex: index,
+    activeClaims: [], pulsePolicy: { ...basePulse, enabled: false },
+    modelObservations: { "zai/glm-5.3": { status: "available" } },
+    acceptedRepositories: basePolicy.acceptedRepositories,
+  });
+  assert.equal(result.result, "REVIEW_REQUIRED");
+});
+
+function fixtureCards() {
+  return [
+    card({ cardId: "T2", title: "Second", priority: "P1" }),
+    card({ cardId: "T1", title: "First", priority: "P0" }),
+    card({ cardId: "T3", title: "Third", priority: "P3" }),
+  ];
+}
+
+function fullObservations(models) {
+  const observations = {};
+  for (const model of models) observations[model] = { status: "available" };
+  return observations;
+}
+
+test("scanBoard orders cards P0→P3 then card-ID and proposes in selection order", () => {
+  const { scan } = scanBoard({
+    cards: fixtureCards(),
+    placement: basePolicy.placement,
+    pulsePolicy: basePulse, modelObservations: fullObservations(["zai/glm-5.3"]),
+    acceptedRepositories: basePolicy.acceptedRepositories,
+    observedAt: "2026-01-01T00:00:00.000Z",
+  });
+  assert.equal(scan.schema, PULSE_SCAN_SCHEMA);
+  assert.deepEqual(scan.cards.map((c) => c.title), ["First", "Second", "Third"]);
+  assert.equal(scan.authorityCreated, false);
+  assert.equal(scan.proposedDispatches.length, 3);
+  assert.deepEqual(scan.proposedDispatches[0], { title: "First", role: "implementer", model: "zai/glm-5.3", placement: "container" });
+});
+
+test("scanBoard proposes at most free capacity and keeps card result stable", () => {
+  const claims = [
+    { cardId: "T9", role: "implementer", envelopeId: "e1", envelope: { model: "zai/glm-5.3" } },
+    { cardId: "T8", role: "implementer", envelopeId: "e2", envelope: { model: "zai/glm-5.3" } },
+    { cardId: "T7", role: "implementer", envelopeId: "e3", envelope: { model: "zai/glm-5.3" } },
+    { cardId: "T6", role: "implementer", envelopeId: "e4", envelope: { model: "zai/glm-5.3" } },
+  ];
+  const { scan } = scanBoard({
+    cards: fixtureCards(),
+    pulsePolicy: basePulse, modelObservations: fullObservations(["zai/glm-5.3"]),
+    activeClaims: claims, acceptedRepositories: basePolicy.acceptedRepositories,
+  });
+  // Preferred route is full (4/4); no authorised fallback observed usable.
+  assert.equal(scan.proposedDispatches.length, 0);
+  assert.deepEqual(scan.cards.map((c) => c.result), ["READY_FOR_NEXT", "READY_FOR_NEXT", "READY_FOR_NEXT"]);
+  const capacityEntry = scan.capacity.find((c) => c.model === "zai/glm-5.3");
+  assert.equal(capacityEntry.free, 0);
+  assert.equal(capacityEntry.availability, "available");
+});
+
+test("scanBoard falls back only to declared fallback routes", () => {
+  const claims = [
+    { cardId: "T9", role: "implementer", envelopeId: "e1", envelope: { model: "zai/glm-5.3" } },
+    { cardId: "T8", role: "implementer", envelopeId: "e2", envelope: { model: "zai/glm-5.3" } },
+    { cardId: "T7", role: "implementer", envelopeId: "e3", envelope: { model: "zai/glm-5.3" } },
+    { cardId: "T6", role: "implementer", envelopeId: "e4", envelope: { model: "zai/glm-5.3" } },
+  ];
+  const { scan } = scanBoard({
+    cards: fixtureCards(),
+    pulsePolicy: basePulse,
+    modelObservations: fullObservations(["zai/glm-5.3", "opencode-go/glm-5.3"]),
+    activeClaims: claims, acceptedRepositories: basePolicy.acceptedRepositories,
+  });
+  assert.equal(scan.proposedDispatches.length, 2); // fallback ceiling of 2
+  assert.deepEqual(scan.proposedDispatches.map((p) => p.model),
+    ["opencode-go/glm-5.3", "opencode-go/glm-5.3"]);
+});
+
+test("scanBoard never proposes without enabled pulse and reports capacity shapes", () => {
+  const { scan } = scanBoard({
+    cards: fixtureCards(),
+    pulsePolicy: null, modelObservations: {},
+  });
+  assert.equal(scan.proposedDispatches.length, 0);
+  assert.equal(scan.capacity.length, 0);
+  assert.ok(scan.cards.every((c) => c.result === "REVIEW_REQUIRED"));
+});
+
+test("scanBoard diagnostic hash is canonical-JSON SHA-256 of the public scan", () => {
+  const { scan, diagnosticHash } = scanBoard({
+    cards: fixtureCards(),
+    pulsePolicy: basePulse, modelObservations: fullObservations(["zai/glm-5.3"]),
+    acceptedRepositories: basePolicy.acceptedRepositories,
+    observedAt: "2026-01-01T00:00:00.000Z",
+  });
+  assert.equal(diagnosticHash, sha256Hex(canonicalJsonString(scan)));
+});
