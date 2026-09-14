@@ -468,11 +468,11 @@ function fixedArgv(action, params) {
 
 function promptWithReportRequirement(role, prompt) {
   const marker = reportMarkersForRole(role);
+  // Communication adds transport framing only. Task scope and role behaviour
+  // belong to the caller's current prompt; injecting either here would make a
+  // task-scoped instruction silently bind every later exchange for that role.
   const requirement = [
     "",
-    ...(isReviewerRole(role) ? ["Remain strictly read-only; do not modify files, state, or Git."] : [
-      "MANDATORY ATOMIC EXECUTION CONTRACT: execute one acceptance-checked step only; do not continue to a second file, test group, or follow-up; stop and report incomplete work as CHANGES_REQUIRED before the two-minute boundary.",
-    ]),
     REPORT_CONTRACT_LINE,
     marker.open,
     marker.close,

@@ -16,7 +16,9 @@ import {
   HERDR_COMMUNICATION_ACTIONS,
 } from "./herdr_communication_pi.js";
 import { isNativeTuiContext } from "./native_tui_context.js";
-import { prepareEnvelopeForExecution, validateEnvelopeForExecution, consumeEnvelope } from "./task_board_core_pi.js";
+import { prepareEnvelopeForExecution, validateEnvelopeForExecution, consumeEnvelope, gitHead } from "./task_board_core_pi.js";
+import { sha256Hex } from "./task_board_core_pi.js";
+import { execFileSync } from "node:child_process";
 
 export const WORKER_DISPATCH_TOOL = "agentic_worker_dispatch";
 export const WORKER_DISPATCH_SCHEMA = "agentic-driver.worker-dispatch.v1";
@@ -29,10 +31,17 @@ const MAX_JOURNEY_STEPS = 200;
 const MAX_REPORT_BYTES = 32 * 1024;
 const REGISTRATIONS = new WeakSet();
 
+// The worker-side review-request marker. An implementation journey whose last
+// complete report carries this marker terminates as review_requested (§6.3):
+// it projects review readiness without approval. The board lane transition
+// remains a human/writer decision; Pulse never infers it.
+export const REVIEW_REQUEST_MARKER = "[REVIEW_REQUESTED]";
+
 // Terminal journey states. Only `cancelled` and `failed` are failures; every
 // other terminal state is an observed outcome, and no state is retried.
 export const WORKER_DISPATCH_TERMINAL_STATES = Object.freeze([
   "completed", "exhausted", "role-blocked", "cancelled", "failed", "waiting-approval", "worker-unresponsive",
+  "review_requested",
 ]);
 
 export const WORKER_DISPATCH_PARAMETERS = Object.freeze({
@@ -225,6 +234,46 @@ function journeyReceipt(journey) {
   return body;
 }
 
+// §10.2 progress snapshot: a compact observation attached to the journey
+// step/terminal evidence it belongs to. Not authority, not persisted
+// separately, and not written on every timer tick — only at assignment start
+// and meaningful checkpoints. Repository observations are read-only.
+function progressSnapshot({ taskId = null, envelope = null, repository = null, workerStatus = null, lastReportAt = null }) {
+  const snapshot = {
+    schema: "agentic-driver.progress-snapshot.v1",
+    taskId,
+    at: new Date().toISOString(),
+  };
+  if (envelope) {
+    snapshot.envelopeId = envelope.envelopeId ?? null;
+    snapshot.cardId = envelope.cardId ?? null;
+    snapshot.branch = envelope.branch ?? null;
+  }
+  if (repository) {
+    snapshot.repository = repository;
+    snapshot.head = gitHead(repository);
+    const diff = scopedDiffHash(repository);
+    snapshot.scopedDiffHash = diff.hash;
+    snapshot.changedPaths = diff.paths;
+  }
+  if (workerStatus !== null) snapshot.workerStatus = workerStatus;
+  if (lastReportAt !== null) snapshot.lastCompleteReportAt = lastReportAt;
+  return snapshot;
+}
+
+// Hash of the repository's uncommitted diff (scoped work-in-progress signal).
+// Returns {hash, paths}; a repository where git is unavailable yields nulls.
+function scopedDiffHash(repository) {
+  try {
+    const paths = execFileSync("git", ["status", "--porcelain"], { cwd: repository, encoding: "utf8" })
+      .split("\n").map((line) => line.slice(3).trim()).filter(Boolean);
+    const diff = execFileSync("git", ["diff", "HEAD"], { cwd: repository, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    return { hash: sha256Hex(diff), paths: paths.slice(0, 64) };
+  } catch {
+    return { hash: null, paths: [] };
+  }
+}
+
 // One continuous journey. Each step: pulse (liveness + eligibility), observe
 // the next dispatchable item, one prompt exchange (no retry on any failure),
 // read the marked report, collate. Bounded by maxSteps, never wall-clock.
@@ -256,7 +305,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   const finish = async (requestedStatus) => {
     let status = requestedStatus;
     if (board && boardAttemptStarted && !envelopeConsumed) {
-      const reason = ["completed", "exhausted", "cancelled", "failed", "waiting-approval", "role-blocked", "worker-unresponsive"].includes(status)
+      const reason = ["completed", "exhausted", "cancelled", "failed", "waiting-approval", "role-blocked", "worker-unresponsive", "review_requested"].includes(status)
         ? status
         : status.startsWith("worker-unresponsive") ? "worker-unresponsive" : "failed";
       let consumed;
@@ -277,7 +326,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
     journey.status = status;
     return {
       schema: WORKER_DISPATCH_SCHEMA,
-      ok: status === "completed" || status === "exhausted" || status === "waiting-approval",
+      ok: status === "completed" || status === "exhausted" || status === "waiting-approval" || status === "review_requested",
       action: "dispatch",
       mode,
       autonomy,
@@ -590,8 +639,21 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       status: "done",
       workerStatus: exchange.agentStatus,
       report: exchange.report,
+      // §10.2 progress snapshot at the meaningful checkpoint (step completion).
+      progress: progressSnapshot({
+        taskId: task.id,
+        envelope: board?.envelope ?? null,
+        repository: options.repository ?? null,
+        workerStatus: exchange.agentStatus ?? null,
+        lastReportAt: new Date().toISOString(),
+      }),
     });
     dispatched.add(task.id);
+    // §6.3 review routing: the last complete report requests review.
+    if (typeof exchange.report === "string" && exchange.report.includes(REVIEW_REQUEST_MARKER)) {
+      journey.status = "review_requested";
+      return finish("review_requested");
+    }
   }
 
   journey.status = "completed";

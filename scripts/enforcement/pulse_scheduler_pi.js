@@ -1,0 +1,848 @@
+// SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// Pulse scheduler (PULSE_DESIGN_v3 §2.3, §3.3, §6, §7, §8, §12): session-scoped
+// scheduling composition. Owns the manual `check` action (pure observation),
+// the interactive `run` action with its immutable single-use batch context and
+// one native confirmation, the trusted semantic policy operations
+// (enable/disable/configure), and the optional fixed-interval timer.
+//
+// It never claims, spawns, or mutates policy itself: atomic claims go through
+// the existing dispatcher (claimCard), worker creation through the guarded
+// Herdr lifecycle seam injected as `spawnWorker`, and policy writes through
+// one confirmed semantic operation on the existing board-bound policy file.
+// The timer never sends prompts to a model to make scheduling decisions.
+
+import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+  validateBoard, readAutomationPolicy, checkAutomationPolicy, checkPulsePolicy,
+  readClaims, claimCard, automationPolicyPath, PLACEMENTS,
+} from "./task_board_core_pi.js";
+import { scanBoard } from "./pulse_core_pi.js";
+import { isNativeTuiContext } from "./native_tui_context.js";
+
+// ---------------------------------------------------------------------------
+// Board resolution and observation
+// ---------------------------------------------------------------------------
+
+// Resolve the canonical board for the calling workspace. Mirrors the
+// task-board extension's resolver: canonical TASKS.md first, derived
+// board.md never authoritative.
+export function resolveBoardPath(cwd) {
+  if (typeof cwd !== "string" || cwd === "") return null;
+  for (const name of ["TASKS.md", "board.md"]) {
+    const candidate = join(cwd, name);
+    if (existsSync(candidate)) return candidate;
+  }
+  return join(cwd, "TASKS.md");
+}
+
+// Observe model availability for the policy's declared routes. The adapter
+// resolves exact configured models through the Pi model registry and scoped
+// model list; labels and self-reports never prove availability. Unknown or
+// unresolved models are `unknown` and unusable (fails closed).
+export function observeModelAvailability({ pulsePolicy = null, modelRegistry = null, scopedModels = null } = {}) {
+  const observations = {};
+  const declared = new Set();
+  if (pulsePolicy && typeof pulsePolicy.routing === "object") {
+    for (const entry of Object.values(pulsePolicy.routing)) {
+      for (const route of [...(entry?.preferred ?? []), ...(entry?.fallback ?? [])]) {
+        if (typeof route?.model !== "string") continue;
+        declared.add(route.model);
+        observations[route.model] = { status: "unknown" };
+      }
+    }
+  }
+  const scopedList = Array.isArray(scopedModels) ? scopedModels : [];
+  // scopedModels entries are {model, thinkingLevel?}; an empty list means no
+  // scoping is configured, so every available model is usable (§4.1).
+  const scopedIds = new Set(scopedList.map((entry) => typeof entry === "string" ? entry : entry?.model)
+    .filter((id) => typeof id === "string"));
+  const noScoping = scopedList.length === 0;
+  for (const model of declared) {
+    if (!noScoping && !scopedIds.has(model)) {
+      observations[model] = { status: "unknown" };
+      continue;
+    }
+    try {
+      // Resolve through the registry: an exact model id is resolvable either
+      // as a loaded model (get) or through its provider auth (getProviderAuth
+      // resolves the current API key without requiring a loaded model).
+      // Labels and self-reports never prove availability (§4.1).
+      const api = modelRegistry?.get?.(model) ?? null;
+      if (!api && typeof modelRegistry?.getProviderAuth === "function") {
+        const provider = model.split("/")[0];
+        let auth = null;
+        try { auth = modelRegistry.getProviderAuth(provider); } catch { auth = null; }
+        observations[model] = { status: auth ? "available" : "unknown" };
+        continue;
+      }
+      if (!api) {
+        observations[model] = { status: "unknown" };
+        continue;
+      }
+      // Authentication is checked through the registry, not model self-report.
+      const auth = typeof modelRegistry?.isAuthenticated === "function"
+        ? modelRegistry.isAuthenticated(model)
+        : true;
+      observations[model] = { status: auth ? "available" : "unauthenticated" };
+    } catch {
+      observations[model] = { status: "unavailable" };
+    }
+  }
+  return { observations, declaredModels: [...declared] };
+}
+
+// One pure board scan for the manual check. Returns a structured result; it
+// never claims and never mutates anything.
+export function pulseCheck({ boardPath, modelRegistry = null, scopedModels = null, observedAt = null }) {
+  const base = observeBoardForPulse({ boardPath });
+  if (!base.ok) return base;
+  const { validated, pulsePolicy, effectivePolicy } = base;
+  const activeClaims = readClaims(boardPath);
+  const { observations, declaredModels } = observeModelAvailability({ pulsePolicy, modelRegistry, scopedModels });
+  const { scan, diagnosticHash } = scanBoard({
+    cards: validated.cards,
+    boardPath,
+    boardRevision: null,
+    policyRevision: null,
+    activeClaims,
+    pulsePolicy,
+    modelObservations: observations,
+    declaredModels,
+    observedAt,
+    placement: pulsePolicy ? effectivePolicy.placement : null,
+  });
+  return { ok: true, code: null, reason: null, scan, diagnosticHash, validated, effectivePolicy, pulsePolicy, activeClaims };
+}
+
+// Shared trusted resolution: board parse/validation + policy read/validate.
+function observeBoardForPulse({ boardPath }) {
+  if (typeof boardPath !== "string" || boardPath === "" || !existsSync(boardPath)) {
+    return { ok: false, code: "board-unavailable", reason: "no board file found for this workspace (board-unavailable)" };
+  }
+  let validated;
+  try {
+    validated = validateBoard(readFileSync(boardPath, "utf8"), {});
+  } catch (error) {
+    return { ok: false, code: "board-invalid", reason: String(error?.message || error).slice(0, 512) };
+  }
+  if (!validated.ok) {
+    return { ok: false, code: "board-invalid", reason: (validated.errors ?? []).join("; ").slice(0, 512) };
+  }
+  const policy = readAutomationPolicy(boardPath);
+  // A missing or expired policy means Pulse is OFF, not an error: check is a
+  // pure observation and must still report the board (§8: zero scheduling
+  // effects). A malformed pulse object still fails closed.
+  const policyCheck = checkAutomationPolicy(policy, { boardPath });
+  if (!policyCheck.ok && policy !== null && policy?.pulse !== undefined) {
+    return { ok: false, code: "policy-invalid", reason: policyCheck.reason };
+  }
+  const effectivePolicy = policyCheck.ok ? policyCheck.policy : null;
+  const pulsePolicy = effectivePolicy?.pulse ?? null;
+  return { ok: true, validated, effectivePolicy, pulsePolicy };
+}
+
+// ---------------------------------------------------------------------------
+// Immutable single-use batch context (§6.2)
+// ---------------------------------------------------------------------------
+
+export const PULSE_BATCH_SCHEMA = "agentic-driver.pulse-batch.v1";
+const BATCH_ENTRY_STATES = Object.freeze(["unused", "reserved", "consumed"]);
+const BATCH_INTERACTIVE_TTL_MS = 5 * 60 * 1000;
+
+// Mint one immutable, single-use batch context from a fresh scan. The entry
+// set covers the FULL currently eligible candidate list (every READY_FOR_NEXT
+// card), not only initially free slots; refill consumes it lazily. It is
+// extension-memory state, never model input or durable authority.
+export function mintBatchContext({ scan, cards, policy, instruction, now = null, batchId = null }) {
+  if (scan?.schema !== "agentic-driver.board-pulse.v1") {
+    throw new Error("mintBatchContext requires a pulse scan");
+  }
+  if (typeof instruction !== "string" || instruction.trim() === "") {
+    throw new Error("batch context requires the direct human instruction");
+  }
+  const at = now ?? new Date().toISOString();
+  const issuedMs = Date.parse(at);
+  // The public scan shape is title-keyed (§5): internal card identity comes
+  // from the validated cards list, matched by title. Duplicate titles fail
+  // closed rather than binding the wrong card.
+  const byTitle = new Map();
+  for (const card of cards) {
+    if (byTitle.has(card.title)) byTitle.set(card.title, null);
+    else byTitle.set(card.title, card);
+  }
+  const proposalByTitle = new Map((scan.proposedDispatches ?? []).map((p) => [p.title, p]));
+  const entries = [];
+  for (const cardScan of scan.cards) {
+    if (cardScan.result !== "READY_FOR_NEXT") continue;
+    const card = byTitle.get(cardScan.title);
+    if (!card) continue; // duplicate or missing title fails closed
+    const proposal = proposalByTitle.get(cardScan.title);
+    const model = proposal?.model ?? null;
+    if (!model) continue; // no usable declared route observed this scan
+    const repositories = Array.isArray(card.repositories) ? card.repositories.filter((r) => typeof r === "string" && r !== "") : [];
+    const repository = repositories.length === 1 ? repositories[0]
+      : repositories.length === 0 && Array.isArray(policy?.acceptedRepositories) && policy.acceptedRepositories.length === 1
+        ? policy.acceptedRepositories[0]
+        : null;
+    if (!repository) continue; // ambiguous repository fails closed
+    entries.push({
+      cardId: card.cardId,
+      cardHash: card.hash ?? null,
+      title: card.title,
+      role: cardScan.role,
+      model,
+      repository,
+      placement: proposal?.placement ?? policy?.placement ?? null,
+      state: "unused",
+    });
+  }
+  // Interactive expiry is the earlier of policy expiry or five minutes.
+  const policyExpiryMs = policy?.expiry ? Date.parse(policy.expiry) : NaN;
+  const expiresMs = Number.isFinite(policyExpiryMs)
+    ? Math.min(policyExpiryMs, issuedMs + BATCH_INTERACTIVE_TTL_MS)
+    : issuedMs + BATCH_INTERACTIVE_TTL_MS;
+  return {
+    schema: PULSE_BATCH_SCHEMA,
+    batchId: batchId ?? randomUUID(),
+    instruction,
+    boardPath: scan.board,
+    policyRevision: null,
+    issuedAt: at,
+    expiresAt: new Date(expiresMs).toISOString(),
+    maxConcurrency: Number.isInteger(policy?.maxConcurrent) ? policy.maxConcurrent : null,
+    entries,
+  };
+}
+
+function batchEntry(ctx, cardId) {
+  return (ctx?.entries ?? []).find((entry) => entry.cardId === cardId) ?? null;
+}
+
+export function batchExpired(ctx, now = null) {
+  const at = now ?? new Date().toISOString();
+  return !ctx || typeof ctx.expiresAt !== "string" || Date.parse(ctx.expiresAt) <= Date.parse(at);
+}
+
+// Atomic entry transitions in extension memory. Reuse, expiry, or drift
+// fails closed; a reserved entry returns to unused only when the lifecycle
+// result proves no start occurred.
+export function reserveBatchEntry(ctx, cardId, { now = null } = {}) {
+  const entry = batchEntry(ctx, cardId);
+  if (!entry) return { ok: false, reason: "card is not in the confirmed batch; a fresh preview and confirmation is required" };
+  if (batchExpired(ctx, now)) return { ok: false, reason: "the batch confirmation context has expired; a fresh preview and confirmation is required" };
+  if (entry.state !== "unused") return { ok: false, reason: `batch entry is ${entry.state}, not unused; it cannot be reserved again` };
+  entry.state = "reserved";
+  return { ok: true, entry };
+}
+
+export function consumeBatchEntry(ctx, cardId) {
+  const entry = batchEntry(ctx, cardId);
+  if (!entry) return { ok: false, reason: "card is not in the confirmed batch" };
+  if (entry.state !== "reserved") return { ok: false, reason: `batch entry is ${entry.state}, not reserved; it cannot be consumed` };
+  entry.state = "consumed";
+  return { ok: true, entry };
+}
+
+export function releaseBatchEntry(ctx, cardId) {
+  const entry = batchEntry(ctx, cardId);
+  if (!entry) return { ok: false, reason: "card is not in the confirmed batch" };
+  if (entry.state !== "reserved") return { ok: false, reason: `batch entry is ${entry.state}, not reserved; it cannot be released` };
+  entry.state = "unused";
+  return { ok: true, entry };
+}
+
+// ---------------------------------------------------------------------------
+// Batch execution (claims + guarded spawns)
+// ---------------------------------------------------------------------------
+
+// Execute the confirmed batch: reserve → atomic claim → guarded spawn →
+// consume after verified start. A claim race removes the card from the landed
+// batch and refreshes capacity; an ambiguous spawn leaves the entry reserved
+// and triggers reconciliation, never reuse or another start.
+async function executeBatch({ batch, boardPath, spawnWorker = null, context = null, now = null }) {
+  const landed = [];
+  const capacityTaken = new Set();
+  let terminalReason = "no-eligible-card";
+  for (const entry of batch.entries) {
+    if (batch.maxConcurrency !== null && capacityTaken.size >= batch.maxConcurrency) {
+      terminalReason = "capacity-full";
+      break;
+    }
+    const reserved = reserveBatchEntry(batch, entry.cardId, { now });
+    if (!reserved.ok) continue; // consumed/expired earlier in this batch
+    const claim = claimCard({ boardPath, cardId: entry.cardId, role: entry.role, policy: null });
+    if (!claim.ok) {
+      releaseBatchEntry(batch, entry.cardId);
+      landed.push({
+        title: entry.title, role: entry.role, model: entry.model, placement: entry.placement,
+        status: ["lock-contention", "no-dispatchable-card", "already-claimed"].includes(claim.code) ? "race-lost" : "denied",
+        ...(claim.reason ? { reason: claim.reason } : {}),
+      });
+      continue;
+    }
+    capacityTaken.add(entry.cardId);
+    if (typeof spawnWorker !== "function") {
+      // No guarded spawn seam in this context: the claim landed and the entry
+      // is consumed as a claimed-but-not-started assignment; never spawn
+      // outside the guarded seam.
+      consumeBatchEntry(batch, entry.cardId);
+      landed.push({ title: entry.title, role: entry.role, model: entry.model, placement: entry.placement, status: "claimed" });
+      terminalReason = "spawn-seam-unavailable";
+      continue;
+    }
+    let spawned;
+    try {
+      spawned = await spawnWorker({
+        role: entry.role,
+        repository: entry.repository,
+        model: entry.model,
+        context,
+        signal: null,
+      });
+    } catch (error) {
+      spawned = { ok: false, reason: String(error?.message || error).slice(0, 256) };
+    }
+    if (spawned?.ok === true) {
+      consumeBatchEntry(batch, entry.cardId);
+      landed.push({ title: entry.title, role: entry.role, model: entry.model, placement: entry.placement, status: "started" });
+    } else {
+      // Delivery-unknown, partial start, or ambiguous read-back: the entry
+      // stays reserved and triggers reconciliation — never reuse or another
+      // start (§6.2).
+      landed.push({
+        title: entry.title, role: entry.role, model: entry.model, placement: entry.placement,
+        status: "denied",
+        reason: spawned?.reason ?? spawned?.code ?? "guarded spawn did not verify",
+      });
+      terminalReason = "spawn-unverified";
+    }
+  }
+  return { landed, terminalReason };
+}
+
+// ---------------------------------------------------------------------------
+// Interactive run (§6.2)
+// ---------------------------------------------------------------------------
+
+// One interactive capacity-filling batch under current policy: trusted board
+// resolution, one scan, one semantic preview, one native confirmation, mint
+// the immutable batch context, atomic claims, parallel guarded spawns.
+export async function pulseRun({ boardPath, instruction, context = null, spawnWorker = null, now = null }) {
+  if (typeof instruction !== "string" || instruction.trim() === "") {
+    return { ok: false, code: "instruction-required", reason: "run requires the direct current-turn human instruction (fails closed)", scan: null, landedAssignments: [], batchTerminalReason: "instruction-required" };
+  }
+  const base = observeBoardForPulse({ boardPath });
+  if (!base.ok) {
+    return { ok: false, code: base.code, reason: base.reason, scan: null, landedAssignments: [], batchTerminalReason: base.code };
+  }
+  const { validated, effectivePolicy, pulsePolicy } = base;
+  if (!pulsePolicy || pulsePolicy.enabled !== true) {
+    return { ok: false, code: "pulse-disabled", reason: "Pulse is not enabled for this board (fails closed)", scan: null, landedAssignments: [], batchTerminalReason: "pulse-disabled" };
+  }
+  const check = pulseCheck({ boardPath, modelRegistry: context?.modelRegistry ?? null, scopedModels: context?.scopedModels ?? null, observedAt: now });
+  if (!check.ok) {
+    return { ok: false, code: check.code, reason: check.reason, scan: null, landedAssignments: [], batchTerminalReason: check.code };
+  }
+  const { scan } = check;
+  const batch = mintBatchContext({ scan, cards: validated.cards, policy: effectivePolicy, instruction, now });
+  // One semantic batch preview and one native confirmation for the exact
+  // batch (§6.2 step 3-4). Headless contexts fail closed.
+  if (!isNativeTuiContext(context) || typeof context?.ui?.confirm !== "function") {
+    return { ok: false, code: "native-confirmation-required", reason: "interactive Pulse run requires the native TUI for the one batch confirmation (fails closed)", scan, landedAssignments: [], batchTerminalReason: "no-confirmation" };
+  }
+  const previewLines = batch.entries.map((e) => `- ${e.title} → ${e.role} / ${e.model} (${e.placement})`);
+  let confirmed;
+  try {
+    confirmed = await context.ui.confirm(
+      "Run Pulse batch",
+      [
+        `Board: ${batch.boardPath}`,
+        `Up to ${batch.maxConcurrency ?? "?"} parallel assignments from this confirmation.`,
+        previewLines.length ? previewLines.join("\n") : "(no eligible cards right now)",
+        "One confirmation for this exact batch; cards outside it require a fresh preview.",
+      ].join("\n"),
+    );
+  } catch (error) {
+    return { ok: false, code: "confirmation-failed", reason: String(error?.message || error).slice(0, 256), scan, landedAssignments: [], batchTerminalReason: "no-confirmation" };
+  }
+  if (confirmed !== true) {
+    return { ok: true, cancelled: true, scan, landedAssignments: [], batchTerminalReason: "user-cancelled", batchId: batch.batchId };
+  }
+  const { landed, terminalReason } = await executeBatch({ batch, boardPath, spawnWorker, context, now });
+  return { ok: true, cancelled: false, scan, landedAssignments: landed, batchTerminalReason: terminalReason, batchId: batch.batchId };
+}
+
+// ---------------------------------------------------------------------------
+// Automated tick (§7): deterministic fill without prompts, no model-driven
+// polling. Only runs when the policy enables Pulse in automated mode.
+// ---------------------------------------------------------------------------
+
+export async function pulseTick({ boardPath, spawnWorker = null, context = null, now = null }) {
+  const base = observeBoardForPulse({ boardPath });
+  if (!base.ok) return { ok: false, code: base.code, reason: base.reason, landedAssignments: [] };
+  const { effectivePolicy, pulsePolicy } = base;
+  if (!pulsePolicy || pulsePolicy.enabled !== true) return { ok: true, skipped: true, reason: "pulse-disabled", landedAssignments: [] };
+  if (pulsePolicy.mode !== "automated") return { ok: true, skipped: true, reason: "interactive-mode-tick-is-a-no-op", landedAssignments: [] };
+  const check = pulseCheck({ boardPath, modelRegistry: context?.modelRegistry ?? null, scopedModels: context?.scopedModels ?? null, observedAt: now });
+  if (!check.ok) return { ok: false, code: check.code, reason: check.reason, landedAssignments: [] };
+  const batch = mintBatchContext({ scan: check.scan, cards: check.validated.cards, policy: effectivePolicy, instruction: "automated-tick", now });
+  const { landed, terminalReason } = await executeBatch({ batch, boardPath, spawnWorker, context, now });
+  return { ok: true, skipped: false, scan: check.scan, landedAssignments: landed, batchTerminalReason: terminalReason };
+}
+
+// ---------------------------------------------------------------------------
+// Trusted semantic policy operations (§3.3)
+// ---------------------------------------------------------------------------
+
+const PULSE_DEFAULTS = Object.freeze({
+  enabled: false,
+  mode: "interactive",
+  intervalSeconds: 300,
+  fillOnStart: false,
+  routing: {},
+  stallTimeoutSeconds: 600,
+  unattendedHostRiskAccepted: false,
+});
+
+const CHANGE_KINDS = Object.freeze([
+  "mode", "intervalSeconds", "fillOnStart", "globalMaxConcurrent",
+  "placement", "roleRoute", "stallTimeoutSeconds", "unattendedHostRiskAccepted",
+]);
+
+function writePolicyAtomic(path, policy) {
+  const tmp = `${path}.tmp-${randomUUID()}`;
+  writeFileSync(tmp, `${JSON.stringify(policy, null, 2)}\n`, "utf8");
+  try {
+    renameSync(tmp, path);
+  } catch (error) {
+    try { unlinkSync(tmp); } catch { /* best effort */ }
+    throw error;
+  }
+}
+
+function resolveRouteModels(pulse, { scopedModels = null } = {}) {
+  const models = new Set();
+  for (const entry of Object.values(pulse?.routing ?? {})) {
+    for (const route of [...(entry?.preferred ?? []), ...(entry?.fallback ?? [])]) {
+      if (typeof route?.model === "string") models.add(route.model);
+    }
+  }
+  if (scopedModels === null) return { ok: true, models: [...models] };
+  const scopedList = Array.isArray(scopedModels) ? scopedModels : [];
+  // Empty scoped list means no scoping configured: every model is usable.
+  if (scopedList.length === 0) return { ok: true, models: [...models] };
+  const scopedIds = new Set(scopedList.map((entry) => typeof entry === "string" ? entry : entry?.model).filter((id) => typeof id === "string"));
+  for (const model of models) {
+    if (!scopedIds.has(model)) return { ok: false, reason: `model "${model}" is not in the session's scoped model list (fails closed)` };
+  }
+  return { ok: true, models: [...models] };
+}
+
+// One trusted semantic policy mutation. `instruction` is the direct user
+// request; the operation derives everything else from trusted context,
+// previews the semantic result once natively, and writes atomically after
+// confirmation. Host-risk acceptance always requires native confirmation and
+// fails closed headlessly (§3.3).
+export async function pulsePolicyOperation({ action, instruction, changes = null, boardPath, context = null, scopedModels = null, now = null }) {
+  if (!["enable", "disable", "configure"].includes(action)) {
+    return { ok: false, code: "action-invalid", reason: `unknown policy action "${action}"`, persisted: false };
+  }
+  if (typeof instruction !== "string" || instruction.trim() === "") {
+    return { ok: false, code: "instruction-required", reason: "the policy operation requires the direct current-turn human instruction (fails closed)", persisted: false };
+  }
+  if (typeof boardPath !== "string" || boardPath === "" || !existsSync(boardPath)) {
+    return { ok: false, code: "board-unavailable", reason: "no board file found for this workspace (board-unavailable)", persisted: false };
+  }
+  const policyPath = automationPolicyPath(boardPath);
+  if (!existsSync(policyPath)) {
+    return { ok: false, code: "policy-absent", reason: "no automation policy exists for this board; create one before configuring Pulse (fails closed)", persisted: false };
+  }
+  let policy;
+  try {
+    policy = JSON.parse(readFileSync(policyPath, "utf8"));
+  } catch (error) {
+    return { ok: false, code: "policy-invalid", reason: `the automation policy is unreadable: ${String(error?.message || error).slice(0, 256)}`, persisted: false };
+  }
+  const baseCheck = checkAutomationPolicy(policy, { boardPath });
+  if (!baseCheck.ok) {
+    return { ok: false, code: "policy-invalid", reason: baseCheck.reason, persisted: false };
+  }
+  let pulse = policy.pulse !== undefined
+    ? JSON.parse(JSON.stringify(policy.pulse))
+    : { ...PULSE_DEFAULTS, routing: {} };
+
+  if (action === "enable") {
+    if (policy.pulse === undefined) {
+      return { ok: false, code: "pulse-unconfigured", reason: "no Pulse configuration exists for this board; configure routes first, then enable (fails closed)", persisted: false };
+    }
+    pulse.enabled = true;
+  } else if (action === "disable") {
+    if (policy.pulse === undefined) {
+      return { ok: false, code: "pulse-unconfigured", reason: "Pulse is not configured for this board; nothing to disable", persisted: false };
+    }
+    pulse.enabled = false;
+  } else {
+    if (!Array.isArray(changes) || changes.length === 0) {
+      return { ok: false, code: "changes-required", reason: "configure requires at least one closed change", persisted: false };
+    }
+    for (const change of changes) {
+      if (change === null || typeof change !== "object" || Array.isArray(change)) {
+        return { ok: false, code: "change-invalid", reason: "each change must be an object with a type (fails closed)", persisted: false };
+      }
+      const kind = change.type;
+      if (!CHANGE_KINDS.includes(kind)) {
+        return { ok: false, code: "change-invalid", reason: `unknown change type "${kind}" (fails closed)`, persisted: false };
+      }
+      if (kind === "mode") {
+        if (!["interactive", "automated"].includes(change.value)) {
+          return { ok: false, code: "change-invalid", reason: "mode must be interactive or automated (fails closed)", persisted: false };
+        }
+        pulse.mode = change.value;
+      } else if (kind === "intervalSeconds") {
+        if (!Number.isInteger(change.value) || change.value < 10 || change.value > 86400) {
+          return { ok: false, code: "change-invalid", reason: "intervalSeconds must be an integer from 10 through 86400 (fails closed)", persisted: false };
+        }
+        pulse.intervalSeconds = change.value;
+      } else if (kind === "fillOnStart") {
+        if (typeof change.value !== "boolean") {
+          return { ok: false, code: "change-invalid", reason: "fillOnStart must be a boolean (fails closed)", persisted: false };
+        }
+        pulse.fillOnStart = change.value;
+      } else if (kind === "globalMaxConcurrent") {
+        if (!Number.isInteger(change.value) || change.value < 1 || change.value > 32) {
+          return { ok: false, code: "change-invalid", reason: "globalMaxConcurrent must be an integer from 1 through 32 (fails closed)", persisted: false };
+        }
+        policy = { ...policy, maxConcurrent: change.value };
+      } else if (kind === "placement") {
+        if (!PLACEMENTS.includes(change.value)) {
+          return { ok: false, code: "change-invalid", reason: `placement must be one of ${PLACEMENTS.join(", ")} (fails closed)`, persisted: false };
+        }
+        policy = { ...policy, placement: change.value };
+      } else if (kind === "stallTimeoutSeconds") {
+        if (!Number.isInteger(change.value) || change.value < 30 || change.value > 86400) {
+          return { ok: false, code: "change-invalid", reason: "stallTimeoutSeconds must be an integer from 30 through 86400 (fails closed)", persisted: false };
+        }
+        pulse.stallTimeoutSeconds = change.value;
+      } else if (kind === "unattendedHostRiskAccepted") {
+        if (change.value !== false) {
+          // Host-risk acceptance always requires native interactive
+          // confirmation; it cannot be created headlessly or from vague
+          // language (§3.3).
+          if (!isNativeTuiContext(context) || typeof context?.ui?.confirm !== "function") {
+            return { ok: false, code: "host-risk-headless-denied", reason: "unattended-host risk acceptance requires the native interactive TUI (fails closed; it cannot be recorded headlessly)", persisted: false };
+          }
+          let accepted;
+          try {
+            accepted = await context.ui.confirm(
+              "Accept unattended host risk",
+              [
+                "This enables automated Pulse dispatch directly on the host for THIS board policy only:",
+                `Board: ${boardPath}`,
+                `Repositories: ${(policy.acceptedRepositories ?? []).join(", ")}`,
+                `Roles/models: ${Object.keys(pulse.routing ?? {}).join(", ") || "(none configured)"}`,
+                `Policy expiry: ${policy.expiry}`,
+                "The acceptance is bound to this policy's board, repositories, roles, models, expiry, risk ceiling, and global concurrency. It is not global and cannot be inferred.",
+              ].join("\n"),
+            );
+          } catch (error) {
+            return { ok: false, code: "host-risk-confirmation-failed", reason: String(error?.message || error).slice(0, 256), persisted: false };
+          }
+          if (accepted !== true) {
+            return { ok: false, code: "host-risk-not-accepted", reason: "unattended-host risk was not explicitly accepted (fails closed)", persisted: false };
+          }
+        }
+        pulse.unattendedHostRiskAccepted = change.value === true;
+      } else if (kind === "roleRoute") {
+        const role = change.role;
+        if (typeof role !== "string" || !policy.roles.includes(role)) {
+          return { ok: false, code: "change-invalid", reason: `roleRoute role "${role}" is not declared in the policy roles (fails closed)`, persisted: false };
+        }
+        const normalizeRoutes = (list, label) => {
+          if (!Array.isArray(list)) return { ok: false, reason: `${label} must be a list of routes (fails closed)` };
+          const routes = [];
+          for (const route of list) {
+            if (route === null || typeof route !== "object" || typeof route.model !== "string"
+              || !Number.isInteger(route.maxConcurrent) || route.maxConcurrent < 1 || route.maxConcurrent > 32) {
+              return { ok: false, reason: `${label} entries must be {model, maxConcurrent} with capacity 1..32 (fails closed)` };
+            }
+            routes.push({ model: route.model, maxConcurrent: route.maxConcurrent });
+          }
+          return { ok: true, routes };
+        };
+        const preferred = normalizeRoutes(change.preferred, "preferred");
+        if (!preferred.ok) return { ok: false, code: "change-invalid", reason: preferred.reason, persisted: false };
+        if (preferred.routes.length === 0) {
+          return { ok: false, code: "change-invalid", reason: "preferred must list at least one route (fails closed)", persisted: false };
+        }
+        const fallback = normalizeRoutes(change.fallback ?? [], "fallback");
+        if (!fallback.ok) return { ok: false, code: "change-invalid", reason: fallback.reason, persisted: false };
+        if (!Number.isInteger(change.maxConcurrent) || change.maxConcurrent < 1 || change.maxConcurrent > 32) {
+          return { ok: false, code: "change-invalid", reason: "roleRoute maxConcurrent must be an integer from 1 through 32 (fails closed)", persisted: false };
+        }
+        pulse.routing = { ...(pulse.routing ?? {}), [role]: { preferred: preferred.routes, fallback: fallback.routes, maxConcurrent: change.maxConcurrent } };
+      }
+    }
+    pulse.enabled = pulse.enabled ?? false;
+  }
+
+  // Revalidate the resulting pulse object in place against the declared roles.
+  const pulseCheck = checkPulsePolicy(pulse, { roles: policy.roles });
+  if (!pulseCheck.ok) {
+    return { ok: false, code: "policy-invalid", reason: pulseCheck.reason, persisted: false };
+  }
+  const modelResolution = resolveRouteModels(pulse, { scopedModels });
+  if (!modelResolution.ok) {
+    return { ok: false, code: "model-unresolved", reason: modelResolution.reason, persisted: false };
+  }
+  const nextPolicy = { ...policy, pulse };
+  const after = checkAutomationPolicy(nextPolicy, { boardPath });
+  if (!after.ok) {
+    return { ok: false, code: "policy-invalid", reason: after.reason, persisted: false };
+  }
+
+  // One semantic preview in native UI; write atomically after confirmation.
+  if (!isNativeTuiContext(context) || typeof context?.ui?.confirm !== "function") {
+    return { ok: false, code: "native-confirmation-required", reason: "policy changes require the native TUI for the semantic preview (fails closed)", persisted: false };
+  }
+  const summary = [
+    `Action: ${action} Pulse for board ${boardPath}`,
+    `After: enabled=${pulse.enabled} mode=${pulse.mode} interval=${pulse.intervalSeconds}s fillOnStart=${pulse.fillOnStart}`,
+    `Routing: ${Object.entries(pulse.routing).map(([role, entry]) => `${role}→${[...entry.preferred, ...entry.fallback].map((r) => r.model).join("|")}`).join("; ") || "(none)"}`,
+    `Placement: ${nextPolicy.placement}; globalMaxConcurrent: ${nextPolicy.maxConcurrent}`,
+    `Unattended-host risk accepted: ${pulse.unattendedHostRiskAccepted}`,
+  ].join("\n");
+  let confirmed;
+  try {
+    confirmed = await context.ui.confirm("Pulse policy change", summary);
+  } catch (error) {
+    return { ok: false, code: "confirmation-failed", reason: String(error?.message || error).slice(0, 256), persisted: false };
+  }
+  if (confirmed !== true) {
+    return { ok: false, code: "confirmation-denied", reason: "the semantic preview was not confirmed; nothing was written", persisted: false };
+  }
+  try {
+    writePolicyAtomic(policyPath, nextPolicy);
+  } catch (error) {
+    return { ok: false, code: "policy-write-failed", reason: String(error?.message || error).slice(0, 256), persisted: false };
+  }
+  return {
+    ok: true,
+    persisted: true,
+    policy: {
+      enabled: pulse.enabled,
+      mode: pulse.mode,
+      intervalSeconds: pulse.intervalSeconds,
+      fillOnStart: pulse.fillOnStart,
+      routing: pulse.routing,
+      stallTimeoutSeconds: pulse.stallTimeoutSeconds,
+      unattendedHostRiskAccepted: pulse.unattendedHostRiskAccepted,
+      placement: nextPolicy.placement,
+      maxConcurrent: nextPolicy.maxConcurrent,
+      expiry: nextPolicy.expiry,
+      board: nextPolicy.board,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Timer lifecycle (§8)
+// ---------------------------------------------------------------------------
+
+// One session-scoped fixed-interval timer. Ticks never overlap (single-flight
+// with skip, not queueing); a long tick delays the next tick rather than
+// accumulating work. Missed ticks are never replayed. Injected schedule
+// functions keep the lifecycle deterministically testable.
+export function createPulseTimer({ intervalSeconds, fillOnStart = false, tick, scheduleFn = null, clearFn = null, now = null } = {}) {
+  const setTimeoutFn = scheduleFn ?? setTimeout;
+  const clearTimeoutFn = clearFn ?? clearTimeout;
+  let handle = null;
+  let running = false;
+  let stats = { started: 0, ticks: 0, skippedOverlaps: 0, errors: 0, stopped: false };
+
+  const runTick = async () => {
+    if (running) {
+      stats.skippedOverlaps += 1;
+      scheduleNext();
+      return;
+    }
+    running = true;
+    stats.ticks += 1;
+    try {
+      await tick();
+    } catch {
+      // One compact failure observation; the next ordinary tick is scheduled
+      // unless the tick itself reports policy invalid/revoked via stop=true.
+      stats.errors += 1;
+    } finally {
+      running = false;
+      scheduleNext();
+    }
+  };
+
+  const scheduleNext = () => {
+    if (stats.stopped || handle !== null) return;
+    handle = setTimeoutFn(() => {
+      handle = null;
+      // Returned promise is tracked for deterministic tests via runTick.
+      runTick();
+    }, intervalSeconds * 1000);
+  };
+
+  return {
+    // Awaitable single tick execution (test/observation seam; production
+    // callers use start/clear only).
+    async runTickNow() {
+      // Cancel any pending queued tick first: runTickNow takes over that
+      // occurrence so it cannot double-fire, and the settled tick then
+      // schedules exactly one ordinary next tick.
+      if (handle !== null) {
+        clearTimeoutFn(handle);
+        handle = null;
+      }
+      await runTick();
+    },
+    start() {
+      if (stats.stopped || handle !== null) return { ok: false, reason: "timer already started or stopped" };
+      stats.started += 1;
+      if (fillOnStart) {
+        // One scan after startup initialization; this is not catch-up. It
+        // queues one tick rather than running synchronously.
+        handle = setTimeoutFn(() => {
+          handle = null;
+          void runTick();
+        }, 0);
+      } else {
+        scheduleNext();
+      }
+      return { ok: true };
+    },
+    clear() {
+      stats.stopped = true;
+      if (handle !== null) {
+        clearTimeoutFn(handle);
+        handle = null;
+      }
+      return { ok: true };
+    },
+    stats() {
+      return { ...stats };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Tool registration (§12.2)
+// ---------------------------------------------------------------------------
+
+export function registerPulseTools(pi, { resolveBoardPath: resolveBoardPathFn = null, spawnWorker = null } = {}) {
+  const boardPathFor = (ctx) => {
+    const cwd = typeof ctx === "string" ? ctx : ctx?.cwd;
+    if (typeof resolveBoardPathFn === "function") return resolveBoardPathFn(ctx);
+    return resolveBoardPath(cwd);
+  };
+  const registered = [];
+  if (typeof pi?.registerTool !== "function") return { registered };
+  pi.registerTool({
+    name: "agentic_kanban_pulse",
+    label: "Kanban Pulse",
+    description:
+      "Board Pulse: capacity scheduling for the validated task board. check = pure observation (no claims). run = interactive capacity-filling batch under current policy with one native confirmation. enable/disable/configure = trusted semantic policy mutation with native preview. Pulse is off unless the board policy enables it. This is not worker liveness observation (Herdr pulse).",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        action: { type: "string", enum: ["check", "run", "enable", "disable", "configure"] },
+        instruction: { type: "string", description: "The direct current-turn human request, copied by the coordinator. Required for run/enable/disable/configure; empty or agent-invented instructions fail closed." },
+        changes: {
+          type: "array",
+          description: "configure only: closed semantic change list (mode, intervalSeconds, fillOnStart, globalMaxConcurrent, placement, roleRoute, stallTimeoutSeconds, unattendedHostRiskAccepted).",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              type: { type: "string", enum: ["mode", "intervalSeconds", "fillOnStart", "globalMaxConcurrent", "placement", "roleRoute", "stallTimeoutSeconds", "unattendedHostRiskAccepted"] },
+              value: {},
+              role: { type: "string" },
+              preferred: { type: "array", items: { type: "object", additionalProperties: false, properties: { model: { type: "string" }, maxConcurrent: { type: "integer" } }, required: ["model", "maxConcurrent"] } },
+              fallback: { type: "array", items: { type: "object", additionalProperties: false, properties: { model: { type: "string" }, maxConcurrent: { type: "integer" } }, required: ["model", "maxConcurrent"] } },
+              maxConcurrent: { type: "integer" },
+            },
+            required: ["type"],
+          },
+        },
+      },
+      required: ["action"],
+    },
+    async execute(_toolCallId, input, _signal, _onUpdate, ctx) {
+      const fail = (code, reason) => {
+        const value = { ok: false, code, reason, errors: [reason], nonAuthorizing: true, persisted: false };
+        return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+      };
+      const action = input?.action;
+      const activeBoardPath = boardPathFor(ctx);
+      if (action === "check") {
+        if (!activeBoardPath || !existsSync(activeBoardPath)) {
+          return fail("board-unavailable", "no board file found for this workspace (board-unavailable)");
+        }
+        const result = pulseCheck({
+          boardPath: activeBoardPath,
+          modelRegistry: ctx?.modelRegistry ?? null,
+          scopedModels: ctx?.scopedModels ?? null,
+          observedAt: new Date().toISOString(),
+        });
+        if (!result.ok) return fail(result.code, result.reason);
+        const value = { ok: true, nonAuthorizing: true, persisted: false, scan: result.scan };
+        return {
+          content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
+          details: { ...value, diagnosticHash: result.diagnosticHash },
+        };
+      }
+      if (action === "run") {
+        if (!activeBoardPath || !existsSync(activeBoardPath)) {
+          return fail("board-unavailable", "no board file found for this workspace (board-unavailable)");
+        }
+        const result = await pulseRun({
+          boardPath: activeBoardPath,
+          instruction: input?.instruction,
+          context: ctx,
+          spawnWorker,
+        });
+        if (!result.ok) return fail(result.code, result.reason);
+        const value = {
+          ok: true, nonAuthorizing: true, persisted: false,
+          cancelled: result.cancelled === true,
+          scan: result.scan,
+          landedAssignments: result.landedAssignments,
+          batchTerminalReason: result.batchTerminalReason,
+        };
+        return {
+          content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
+          details: { ...value, batchId: result.batchId ?? null },
+        };
+      }
+      if (["enable", "disable", "configure"].includes(action)) {
+        if (!activeBoardPath || !existsSync(activeBoardPath)) {
+          return fail("board-unavailable", "no board file found for this workspace (board-unavailable)");
+        }
+        const result = await pulsePolicyOperation({
+          action,
+          instruction: input?.instruction,
+          changes: input?.changes ?? null,
+          boardPath: activeBoardPath,
+          context: ctx,
+          scopedModels: ctx?.scopedModels ?? null,
+        });
+        if (!result.ok) return fail(result.code, result.reason);
+        const value = { ok: true, nonAuthorizing: false, persisted: result.persisted, policy: result.policy };
+        return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }], details: value };
+      }
+      return fail("action-invalid", `unknown action "${action}"`);
+    },
+  });
+  registered.push("agentic_kanban_pulse");
+  return { registered };
+}

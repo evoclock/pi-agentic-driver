@@ -18,7 +18,7 @@ import {
   writeCard, updateCard, claimCard, readClaims, readClaimsState, reclaimClaim, releaseExpiredClaims,
   prepareEnvelopeForExecution, validateEnvelopeForExecution, consumeEnvelope,
   readAutomationPolicy, checkAutomationPolicy, createEnvelope, isEnvelopeConsumed,
-  dispatchEligibility, selectDispatchableCard, validateBoard,
+  dispatchEligibility, selectDispatchableCard, validateBoard, replaceAttempt,
   writerStatePath, claimsPath, automationPolicyPath,
   projectionPath, registerKanbanBoardTools, ENVELOPE_SCHEMA,
 } from "../scripts/enforcement/task_board_core_pi.js";
@@ -972,4 +972,46 @@ test("final: both claims-anchor crash windows roll forward the staged signed sta
       assert.equal(writer.claimsGeneration, nextClaims.generation);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   }
+});
+
+test("replaceAttempt: replaces the active attempt with a fresh envelope under one lock", () => {
+  const dir = freshDir();
+  try {
+    const { boardPath, second } = fixtureBoard(dir);
+    withPolicy(boardPath);
+    const claim = claimCard({ boardPath, role: "implementer", cardId: second });
+    assert.equal(claim.ok, true);
+    const r = replaceAttempt({ boardPath, cardId: second, envelopeId: claim.envelope.envelopeId, reason: "worker-unresponsive" });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(isEnvelopeConsumed(boardPath, claim.envelope.envelopeId), true);
+    assert.notEqual(r.envelope.envelopeId, claim.envelope.envelopeId);
+    assert.equal(r.claim.cardId, second);
+    const state = readClaimsState(boardPath).state;
+    assert.equal(state.claims.filter((c) => c.cardId === second).length, 1, "exactly one active claim for the card");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("replaceAttempt: drift, reuse, and policy refusal fail closed without mutation", () => {
+  const dir = freshDir();
+  try {
+    const { boardPath, second } = fixtureBoard(dir);
+    withPolicy(boardPath);
+    const claim = claimCard({ boardPath, role: "implementer", cardId: second });
+    assert.equal(claim.ok, true);
+    // Wrong card ID: fails closed.
+    const drift = replaceAttempt({ boardPath, cardId: "T-999", envelopeId: claim.envelope.envelopeId, reason: "failed" });
+    assert.equal(drift.ok, false);
+    assert.equal(drift.code, "card-drift");
+    // Unknown envelope: fails closed.
+    const missing = replaceAttempt({ boardPath, cardId: second, envelopeId: "0".repeat(32), reason: "failed" });
+    assert.equal(missing.ok, false);
+    assert.equal(missing.code, "envelope-not-active");
+    // A successful replacement consumes the old envelope; a second attempt
+    // against it fails closed (never reuses the old envelope).
+    const first = replaceAttempt({ boardPath, cardId: second, envelopeId: claim.envelope.envelopeId, reason: "failed" });
+    assert.equal(first.ok, true);
+    const again = replaceAttempt({ boardPath, cardId: second, envelopeId: claim.envelope.envelopeId, reason: "failed" });
+    assert.equal(again.ok, false);
+    assert.equal(again.code, "envelope-not-active");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

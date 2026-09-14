@@ -40,6 +40,7 @@
     "extensions/herdr-communication.ts",
     "extensions/herdr-dispatch.ts",
     "extensions/task-board.ts",
+    "extensions/pulse.ts",
     "lib/adapters/diff-scope.mjs",
     "lib/adapters/evidence.mjs",
     "lib/adapters/narrative.mjs",
@@ -66,7 +67,10 @@
     "extensions/aidr.ts",
     "scripts/aidr_writing_review.js",
     "templates/AGENTS.md",
-    "scripts/enforcement/task_board_core_pi.js"
+    "scripts/enforcement/task_board_core_pi.js",
+    "scripts/enforcement/pulse_core_pi.js",
+    "scripts/enforcement/pulse_scheduler_pi.js",
+    "skills/pulse/SKILL.md"
   ],
   "pi": {
     "extensions": [
