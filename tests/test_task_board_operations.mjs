@@ -64,6 +64,29 @@ test("updateCard: lane move persists, recomputes the hash, and re-records author
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("updateCard: review-lane progression is authorised through the board-writer authority seam, without completion authority", () => {
+  const { dir, boardPath, cardId } = makeBoard();
+  try {
+    // The trusted board writer performs the review-lane transition when the
+    // authority record is genuine human authority (PULSE_DESIGN_v3 §6.3,
+    // resolved review question 5). This is the existing updateCard seam —
+    // no new authority owner and no Pulse-side board write.
+    const moved = updateCard({ boardPath, cardId, changes: { lane: "review" }, authority, registries });
+    assert.equal(moved.ok, true, JSON.stringify(moved));
+    assert.equal(readCards(boardPath).find((c) => c.cardId === cardId).lane, "review");
+    // Lane progression never grants completion: done still requires its own
+    // completion-authority check even from the review lane.
+    const doneFromReview = updateCard({
+      boardPath, cardId, changes: { done: true },
+      authority: { source: "agent-report", sessionOrReportId: "rep-9", quotedInstruction: "review passed" },
+      registries,
+    });
+    assert.equal(doneFromReview.ok, false);
+    assert.equal(doneFromReview.code, "completion-authority-required");
+    assert.equal(readCards(boardPath).find((c) => c.cardId === cardId).done, false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("updateCard: done=true sets the done checkbox and the done lane", () => {
   const { dir, boardPath, cardId } = makeBoard();
   try {

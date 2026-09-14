@@ -1389,6 +1389,7 @@ const CONSUMED_REASONS = Object.freeze([
   "waiting-approval", "role-blocked", "worker-unresponsive",
 ]);
 const TRANSACTION_FIELDS = Object.freeze(["op", "cardId", "envelopeId", "at", "phase"]);
+const REPLACE_TRANSACTION_FIELDS = Object.freeze(["op", "cardId", "envelopeId", "at", "phase", "oldEnvelopeId", "oldReason"]);
 const CLAIMS_STATE_FIELDS = Object.freeze(["schema", "generation", "transaction", "claims", "consumedClaims", "hmac"]);
 
 function wellFormedClaim(claim) {
@@ -1411,11 +1412,25 @@ function wellFormedConsumedClaim(claim) {
 }
 
 function wellFormedTransaction(tx) {
-  return tx === null
-    || (typeof tx === "object" && !Array.isArray(tx) && exactKeys(tx, TRANSACTION_FIELDS)
-      && tx.op === "claim" && CARD_ID_RE.test(tx.cardId)
+  if (tx === null) return true;
+  if (typeof tx !== "object" || Array.isArray(tx)) return false;
+  if (tx.op === "claim") {
+    return exactKeys(tx, TRANSACTION_FIELDS)
+      && CARD_ID_RE.test(tx.cardId)
       && /^[0-9a-f]{32}$/.test(tx.envelopeId) && ISO_TS_RE.test(tx.at)
-      && tx.phase === "claims-written");
+      && tx.phase === "claims-written";
+  }
+  // §10.4 replace-attempt transaction: the pre-recorded replacement identity
+  // plus the old envelope ID and terminal reason it replaces.
+  if (tx.op === "replace-attempt") {
+    return exactKeys(tx, REPLACE_TRANSACTION_FIELDS)
+      && CARD_ID_RE.test(tx.cardId)
+      && /^[0-9a-f]{32}$/.test(tx.envelopeId) && /^[0-9a-f]{32}$/.test(tx.oldEnvelopeId)
+      && ISO_TS_RE.test(tx.at)
+      && tx.phase === "claims-written"
+      && CONSUMED_REASONS.includes(tx.oldReason);
+  }
+  return false;
 }
 
 // Read and VERIFY the claims file. Missing file → fresh ONLY while the
@@ -1567,7 +1582,103 @@ export function readAutomationPolicy(boardPath, { configPath = null } = {}) {
 const POLICY_FIELDS = Object.freeze([
   "roles", "placement", "maxConcurrent", "expiry", "envelopeExpiryHours",
   "board", "riskCeiling", "allowPerCardRiskOverride", "acceptedRepositories",
+  "pulse",
 ]);
+
+// Pulse policy v1 (PULSE_DESIGN_v3 §3): one optional closed `pulse` object
+// inside the existing board-bound automation policy. No second policy store:
+// the pulse record is validated here, beside the shipped policy fields, and
+// a policy without `pulse` behaves exactly as before (Pulse disabled).
+const PULSE_FIELDS = Object.freeze([
+  "enabled", "mode", "intervalSeconds", "fillOnStart", "routing",
+  "stallTimeoutSeconds", "unattendedHostRiskAccepted",
+]);
+const PULSE_ROUTE_FIELDS = Object.freeze(["model", "maxConcurrent"]);
+const PULSE_MODES = Object.freeze(["interactive", "automated"]);
+const PULSE_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function pulseCapacityOk(value) {
+  return Number.isInteger(value) && value >= 1 && value <= 32;
+}
+
+function checkPulseRouteEntry(entry, { seen }) {
+  if (entry === null || typeof entry !== "object" || Array.isArray(entry)
+    || !exactKeys(entry, PULSE_ROUTE_FIELDS)) {
+    return "each routing entry must have exactly {model, maxConcurrent}";
+  }
+  if (typeof entry.model !== "string" || !PULSE_MODEL_RE.test(entry.model)) {
+    return `route model "${entry.model}" is not an exact provider/model identifier`;
+  }
+  if (seen.has(entry.model)) {
+    return `model "${entry.model}" appears more than once for this role`;
+  }
+  seen.add(entry.model);
+  if (!pulseCapacityOk(entry.maxConcurrent)) {
+    return `route maxConcurrent for "${entry.model}" must be an integer from 1 through 32`;
+  }
+  return null;
+}
+
+// Validate the optional `pulse` object. Returns {ok, pulse, reason}. Fails
+// closed on unknown fields, duplicate models, routing roles absent from the
+// policy's declared roles, and invalid capacities.
+export function checkPulsePolicy(pulse, { roles = null } = {}) {
+  if (pulse === null || pulse === undefined) return { ok: true, pulse: null, reason: null };
+  if (typeof pulse !== "object" || Array.isArray(pulse) || !exactKeys(pulse, PULSE_FIELDS)) {
+    return { ok: false, pulse: null, reason: "the automation policy pulse object has unknown or missing fields — the pulse shape is closed (fails closed)" };
+  }
+  if (typeof pulse.enabled !== "boolean") {
+    return { ok: false, pulse: null, reason: "pulse.enabled is required and must be a boolean (fails closed)" };
+  }
+  if (!PULSE_MODES.includes(pulse.mode)) {
+    return { ok: false, pulse: null, reason: `pulse.mode must be one of ${PULSE_MODES.join(", ")} (fails closed)` };
+  }
+  if (!Number.isInteger(pulse.intervalSeconds) || pulse.intervalSeconds < 10 || pulse.intervalSeconds > 86400) {
+    return { ok: false, pulse: null, reason: "pulse.intervalSeconds must be an integer from 10 through 86400 (fails closed)" };
+  }
+  if (typeof pulse.fillOnStart !== "boolean") {
+    return { ok: false, pulse: null, reason: "pulse.fillOnStart must be a boolean (fails closed)" };
+  }
+  if (pulse.routing === null || typeof pulse.routing !== "object" || Array.isArray(pulse.routing)) {
+    return { ok: false, pulse: null, reason: "pulse.routing must be an object keyed by declared policy role (fails closed)" };
+  }
+  const declared = Array.isArray(roles) ? roles : [];
+  for (const role of Object.keys(pulse.routing)) {
+    if (!declared.includes(role)) {
+      return { ok: false, pulse: null, reason: `pulse.routing declares role "${role}", which is absent from the policy roles (fails closed)` };
+    }
+    const entry = pulse.routing[role];
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)
+      || !exactKeys(entry, ["preferred", "fallback", "maxConcurrent"])) {
+      return { ok: false, pulse: null, reason: `pulse.routing["${role}"] must have exactly {preferred, fallback, maxConcurrent} (fails closed)` };
+    }
+    if (!Array.isArray(entry.preferred) || entry.preferred.length === 0) {
+      return { ok: false, pulse: null, reason: `pulse.routing["${role}"].preferred must list at least one route (fails closed)` };
+    }
+    if (!Array.isArray(entry.fallback)) {
+      return { ok: false, pulse: null, reason: `pulse.routing["${role}"].fallback must be a list (fails closed)` };
+    }
+    const seen = new Set();
+    for (const route of entry.preferred) {
+      const reason = checkPulseRouteEntry(route, { seen });
+      if (reason) return { ok: false, pulse: null, reason: `pulse.routing["${role}"].preferred: ${reason} (fails closed)` };
+    }
+    for (const route of entry.fallback) {
+      const reason = checkPulseRouteEntry(route, { seen });
+      if (reason) return { ok: false, pulse: null, reason: `pulse.routing["${role}"].fallback: ${reason} (fails closed)` };
+    }
+    if (!pulseCapacityOk(entry.maxConcurrent)) {
+      return { ok: false, pulse: null, reason: `pulse.routing["${role}"].maxConcurrent must be an integer from 1 through 32 (fails closed)` };
+    }
+  }
+  if (!Number.isInteger(pulse.stallTimeoutSeconds) || pulse.stallTimeoutSeconds < 30 || pulse.stallTimeoutSeconds > 86400) {
+    return { ok: false, pulse: null, reason: "pulse.stallTimeoutSeconds must be an integer from 30 through 86400 (fails closed)" };
+  }
+  if (typeof pulse.unattendedHostRiskAccepted !== "boolean") {
+    return { ok: false, pulse: null, reason: "pulse.unattendedHostRiskAccepted must be a boolean (fails closed)" };
+  }
+  return { ok: true, pulse, reason: null };
+}
 
 export function checkAutomationPolicy(policy, { now = null, boardPath = null } = {}) {
   const at = now ?? new Date().toISOString();
@@ -1623,6 +1734,14 @@ export function checkAutomationPolicy(policy, { now = null, boardPath = null } =
     || !policy.acceptedRepositories.every((repo) => typeof repo === "string" && repo !== "" && !repo.includes(".."))) {
     return { ok: false, reason: "the automation policy acceptedRepositories must be a non-empty closed list of repository paths (fails closed)" };
   }
+
+  // Pulse (§3): the optional closed pulse object is validated in place. A
+  // policy without `pulse` is unchanged and means Pulse is disabled.
+  if (policy.pulse !== undefined) {
+    const pulse = checkPulsePolicy(policy.pulse, { roles: policy.roles });
+    if (!pulse.ok) return { ok: false, reason: pulse.reason };
+  }
+
   return { ok: true, policy, reason: null };
 }
 
@@ -1746,7 +1865,62 @@ export function selectDispatchableCard({ cards, boardPath, activeClaims, cardId 
 // the new complete state (both writes are atomic renames); two concurrent
 // claims can never both win because the entire read-decide-write sequence
 // holds the lock. Expired claims are released first, inside the same lock.
-export function claimCard({ boardPath, cardId = null, role, policy = null, configPath = null, now = null, repository = null, startingRevision = null }) {
+export function claimCard({ boardPath, cardId = null, role, policy = null, configPath = null, now = null, repository = null, startingRevision }) {
+  return claimCardInternal({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision, confirmedBatch: null });
+}
+
+// ---------------------------------------------------------------------------
+// Trusted Pulse-internal confirmed-batch claim path. Host placement is
+// claimable ONLY here, and only for a batch context object this module has
+// registered after one native confirmation (registerConfirmedBatchForClaims),
+// matched by object identity — never by batchId string, user/model field, or
+// durable state. Each confirmed entry is single-use: one claim consumes it,
+// and a claim for a card outside the confirmed set is refused.
+// ---------------------------------------------------------------------------
+
+// batch context object (WeakMap key) -> Set of cardIds still claimable from it.
+const confirmedBatchClaims = new WeakMap();
+
+export function registerConfirmedBatchForClaims(batch) {
+  if (batch?.schema !== "agentic-driver.pulse-batch.v1" || typeof batch.batchId !== "string" || !Array.isArray(batch.entries)) {
+    throw new Error("registerConfirmedBatchForClaims requires a minted pulse batch context");
+  }
+  confirmedBatchClaims.set(batch, new Set(batch.entries.map((entry) => entry.cardId)));
+  return batch.batchId;
+}
+
+export function claimCardForConfirmedBatch({ boardPath, cardId = null, role, policy = null, configPath = null, now = null, repository = null, startingRevision = null, confirmedBatch = null }) {
+  if (confirmedBatch === null || !confirmedBatchClaims.has(confirmedBatch)) {
+    return { ok: false, code: "confirmed-batch-required", reason: "host placement is claimable only through the Pulse confirmed-batch path with a batch registered after native confirmation (fails closed)" };
+  }
+  if (typeof cardId !== "string" || cardId === "") {
+    return { ok: false, code: "confirmed-batch-card-required", reason: "a confirmed-batch claim requires an explicit cardId from the confirmed batch (fails closed)" };
+  }
+  const expiresMs = Date.parse(confirmedBatch.expiresAt);
+  const nowMs = Date.parse(now ?? new Date().toISOString());
+  if (!Number.isFinite(expiresMs) || !Number.isFinite(nowMs)) {
+    return { ok: false, code: "confirmed-batch-time-invalid", reason: "the confirmed batch expiry or current time is invalid (fails closed)" };
+  }
+  if (nowMs >= expiresMs) {
+    return { ok: false, code: "confirmed-batch-expired", reason: "the confirmed batch context has expired; a fresh preview and confirmation is required" };
+  }
+  const entry = confirmedBatch.entries.find((e) => e.cardId === cardId);
+  if (!entry || entry.placement !== "host") {
+    return { ok: false, code: "confirmed-batch-card-mismatch", reason: "the requested card is not a host entry in the confirmed batch; confirmations cannot be crossed between batch entries" };
+  }
+  if (entry.state !== "reserved") {
+    return { ok: false, code: "confirmed-batch-entry-not-reserved", reason: `confirmed batch entry is ${entry.state}, not reserved; it cannot be claimed again (single-use)` };
+  }
+  const claimable = confirmedBatchClaims.get(confirmedBatch);
+  if (!claimable.has(cardId)) {
+    return { ok: false, code: "confirmed-batch-entry-consumed", reason: "the confirmed batch entry was already claimed; confirmation is single-use" };
+  }
+  const result = claimCardInternal({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision, confirmedBatch });
+  if (result.ok) claimable.delete(cardId); // consume the single-use confirmation
+  return result;
+}
+
+function claimCardInternal({ boardPath, cardId = null, role, policy = null, configPath = null, now = null, repository = null, startingRevision = null, confirmedBatch = null }) {
   if (typeof boardPath !== "string" || boardPath === "") {
     throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
   }
@@ -1760,7 +1934,7 @@ export function claimCard({ boardPath, cardId = null, role, policy = null, confi
   for (let attempt = 0; ; attempt += 1) {
     try {
       return withWriterLock(boardPath, () =>
-        claimCardLocked({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision }));
+        claimCardLocked({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision, confirmedBatch }));
     } catch (error) {
       if (error?.code === "writer-lock-held" && attempt < 20) {
         sleepSync(25);
@@ -1774,7 +1948,7 @@ export function claimCard({ boardPath, cardId = null, role, policy = null, confi
   }
 }
 
-function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision }) {
+function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision, confirmedBatch = null }) {
   const at = now ?? new Date().toISOString();
   if (!existsSync(boardPath)) {
     return { ok: false, code: "board-unavailable", reason: "board file is no longer present (board-unavailable)" };
@@ -1813,9 +1987,17 @@ function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, rep
   if (!policyCheck.policy.roles.includes(role)) {
     return { ok: false, code: "policy-role-refused", reason: `role "${role}" is not declared in the automation policy (fails closed)` };
   }
-  // §3.4 mode table: automated placement is container/microVM, always.
-  if (policyCheck.policy.placement !== "container") {
-    return { ok: false, code: "policy-placement-refused", reason: "automated board dispatch requires container placement per the automation policy (§3.4)" };
+  // §3.4 mode table: ordinary claims are contained-only (container/microVM),
+  // always. Host placement is claimable ONLY through the trusted Pulse-internal
+  // confirmed-batch path (claimCardForConfirmedBatch), which requires a batch
+  // context registered after one native confirmation. Static pulse.mode=
+  // "interactive" plus host placement is never enough on its own; automated
+  // dispatch may never use host placement.
+  if (confirmedBatch === null && policyCheck.policy.placement !== "container") {
+    return { ok: false, code: "policy-placement-refused", reason: "ordinary board dispatch requires container placement per the automation policy (§3.4); host placement is claimable only through the Pulse confirmed-batch path" };
+  }
+  if (confirmedBatch !== null && policyCheck.policy.placement !== "host") {
+    return { ok: false, code: "policy-placement-refused", reason: "the Pulse confirmed-batch claim path requires host placement (fails closed)" };
   }
   // F4: the starting revision comes from the card's repository — the
   // workspace the board lives in, not process.cwd(). A caller-supplied
@@ -2184,6 +2366,162 @@ export function reclaimClaim({ boardPath, cardId = null, envelopeId = null } = {
     }
     return { ok: true, reclaimed: existing.length - kept.length, claims: kept };
   });
+}
+
+// §10.4 dispatcher-owned recoverable replaceAttempt: one transition under the
+// writer lock that replaces a failed/unresponsive attempt with a new attempt
+// (new envelope, new claim) for the same card. Trusted input: the expected
+// active card ID, old envelope ID, terminal reason, and replacement route
+// (role/repository/starting revision). Not a public model action.
+//
+// Transaction shape: a prepared transaction is durably staged (HMAC-covered
+// via the claims file's own authentication) containing the old terminal
+// evidence and the pre-recorded new attempt identity. Only then is the old
+// envelope consumed and the new claim published; the transaction record
+// clears once the projection is republished. Recovery is idempotent and runs
+// first: if only the old consumption landed, the replacement rolls forward
+// only while all bound identities still match; otherwise it returns
+// REVIEW_REQUIRED. Recovery never creates another envelope.
+const REPLACE_TRANSACTION_OPS = Object.freeze(["replace-attempt"]);
+const REPLACE_TRANSACTION_PHASES = Object.freeze(["prepared", "committed"]);
+
+export function replaceAttempt({ boardPath, cardId, envelopeId, reason, replacement = {}, now = null } = {}) {
+  if (typeof boardPath !== "string" || boardPath === "") {
+    throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
+  }
+  if (typeof cardId !== "string" || !CARD_ID_RE.test(cardId)) {
+    throw Object.assign(new Error("cardId must be a well-formed card ID"), { code: "invalid-input" });
+  }
+  if (typeof envelopeId !== "string" || !/^[0-9a-f]{32}$/.test(envelopeId)) {
+    throw Object.assign(new Error("envelopeId must be a 32-hex envelope ID"), { code: "invalid-input" });
+  }
+  if (!CONSUMED_REASONS.includes(reason)) {
+    throw Object.assign(new Error(`reason must be one of ${CONSUMED_REASONS.join(", ")}`), { code: "invalid-input" });
+  }
+  const at = now ?? new Date().toISOString();
+  return withWriterLock(boardPath, () => replaceAttemptLocked({ boardPath, cardId, envelopeId, reason, replacement, at }));
+}
+
+function replaceAttemptLocked({ boardPath, cardId, envelopeId, reason, replacement, at }) {
+  // Recovery first (idempotent): roll any interrupted prior transaction
+  // forward before observing state, never creating another envelope.
+  const anchorRecovery = recoverClaimsAnchorLocked(boardPath);
+  if (!anchorRecovery.ok) {
+    return { ok: false, code: "claims-anchor-recovery-failed", recoverable: true, reason: anchorRecovery.reason };
+  }
+  const read = readClaimsState(boardPath);
+  if (!read.ok) return { ok: false, code: "claims-corrupt", reason: read.reason };
+  const reconciliation = reconcileTransactionLocked({ boardPath, state: read.state });
+  if (reconciliation?.failed) {
+    return { ok: false, code: "recovery-failed", recoverable: true, reason: reconciliation.reason };
+  }
+
+  // The old attempt must be the exact active authenticated claim for this
+  // card. Drift, reuse, or a consumed old envelope fails closed.
+  const oldClaim = read.state.claims.find((claim) => claim.envelopeId === envelopeId);
+  if (!oldClaim) {
+    return { ok: false, code: "envelope-not-active",
+      reason: read.state.consumedClaims.some((entry) => entry.envelopeId === envelopeId)
+        ? "the old envelope attempt was already consumed — a replacement requires a fresh dispatch (single-attempt lifecycle)"
+        : `no active claim for envelope ${envelopeId} (fails closed)` };
+  }
+  if (oldClaim.cardId !== cardId) {
+    return { ok: false, code: "card-drift", reason: `envelope ${envelopeId} is bound to card ${oldClaim.cardId}, not ${cardId} (fails closed)` };
+  }
+
+  // Re-evaluate current observations under the lock: card identity/hash,
+  // policy validity, and capacity for the replacement route.
+  if (!existsSync(boardPath)) {
+    return { ok: false, code: "board-unavailable", reason: "board file is no longer present (board-unavailable)" };
+  }
+  const validatedBoard = validateBoard(readFileSync(boardPath, "utf8"), {});
+  if (!validatedBoard.ok) return { ok: false, code: "board-invalid", errors: validatedBoard.errors };
+  const card = validatedBoard.cards.find((entry) => entry.cardId === cardId);
+  if (!card) return { ok: false, code: "card-not-found", reason: `card ${cardId} no longer exists on the board (drift — REVIEW_REQUIRED)` };
+  const currentHash = card.hash ?? computeCardHash(card);
+  if (currentHash !== oldClaim.envelope.cardHash) {
+    return { ok: false, code: "card-hash-drift", reason: "the card hash drifted from the old envelope binding — semantic edits require human review (REVIEW_REQUIRED)" };
+  }
+
+  const resolvedPolicy = readAutomationPolicy(boardPath);
+  const policyCheck = checkAutomationPolicy(resolvedPolicy, { now: at, boardPath });
+  if (!policyCheck.ok) {
+    return { ok: false, code: "policy-refused", reason: policyCheck.reason };
+  }
+  const replacementRole = typeof replacement.role === "string" && replacement.role !== "" ? replacement.role : oldClaim.role;
+  if (!policyCheck.policy.roles.includes(replacementRole)) {
+    return { ok: false, code: "policy-role-refused", reason: `replacement role "${replacementRole}" is not declared in the automation policy (fails closed)` };
+  }
+  if (policyCheck.policy.placement !== "container") {
+    return { ok: false, code: "policy-placement-refused", reason: "automated board dispatch requires container placement per the automation policy (§3.4)" };
+  }
+  const replacementRepository = typeof replacement.repository === "string" && replacement.repository !== ""
+    ? replacement.repository
+    : dirname(boardPath);
+  if (!repositoryAccepted(policyCheck.policy, replacementRepository)) {
+    return { ok: false, code: "policy-repository-refused", reason: `repository "${replacementRepository}" is not on the automation policy's acceptedRepositories list (fails closed)` };
+  }
+  const activeClaims = releaseExpiredClaimsLocked({ boardPath, at, state: read.state });
+  const concurrency = Number(policyCheck.policy.maxConcurrent);
+  // Capacity: the old claim is being replaced, so it frees exactly one slot.
+  if (activeClaims.filter((claim) => claim.envelopeId !== envelopeId).length >= concurrency) {
+    return { ok: false, code: "policy-concurrency-refused", reason: `the automation policy allows at most ${concurrency} concurrent claim(s); no free slot for the replacement` };
+  }
+
+  // Pre-record the replacement identity, then durably stage the prepared
+  // transaction BEFORE consuming the old envelope. The staged claims state
+  // carries the complete signed next value, so either crash window rolls
+  // forward deterministically (the same prepare→claims→commit scheme as
+  // claimCard, extended with the replace op and phase).
+  const newEnvelope = createEnvelope({ card, policy: policyCheck.policy, now: at, repository: replacementRepository, startingRevision: replacement.startingRevision ?? undefined });
+  const newClaim = {
+    cardId,
+    claimedAt: at,
+    role: replacementRole,
+    envelopeId: newEnvelope.envelopeId,
+    envelope: newEnvelope,
+  };
+  const keptClaims = activeClaims.filter((claim) => claim.envelopeId !== envelopeId);
+  const nextClaims = [...keptClaims, newClaim];
+  const consumedClaims = [...read.state.consumedClaims, {
+    cardId, envelopeId, consumedAt: at, reason,
+  }];
+  const transaction = {
+    op: "replace-attempt",
+    cardId,
+    envelopeId: newEnvelope.envelopeId,
+    at,
+    phase: "claims-written",
+    oldEnvelopeId: envelopeId,
+    oldReason: reason,
+  };
+  writeClaims(boardPath, nextClaims, { consumedClaims, transaction });
+  const projection = writeProjection(boardPath, validatedBoard.cards, nextClaims);
+  if (!projection.written) {
+    return {
+      ok: false,
+      replaced: true,
+      code: "replace-recoverable",
+      recoverable: true,
+      reason: `projection publication failed: ${projection.error ?? "unknown"} (replacement committed; transaction retained for roll-forward)`,
+      cardId,
+      oldEnvelopeId: envelopeId,
+      claim: newClaim,
+      envelope: newEnvelope,
+      projection,
+    };
+  }
+  finalizeTransactionLocked({ boardPath, claims: nextClaims, projection });
+  return {
+    ok: true,
+    replaced: true,
+    cardId,
+    oldEnvelopeId: envelopeId,
+    oldReason: reason,
+    claim: newClaim,
+    envelope: newEnvelope,
+    projection,
+  };
 }
 
 // ---------------------------------------------------------------------------

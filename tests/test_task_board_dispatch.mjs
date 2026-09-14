@@ -12,15 +12,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { createHmac } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import {
   writeCard, updateCard, claimCard, readClaims, readClaimsState, reclaimClaim, releaseExpiredClaims,
   prepareEnvelopeForExecution, validateEnvelopeForExecution, consumeEnvelope,
   readAutomationPolicy, checkAutomationPolicy, createEnvelope, isEnvelopeConsumed,
-  dispatchEligibility, selectDispatchableCard, validateBoard,
+  dispatchEligibility, selectDispatchableCard, validateBoard, replaceAttempt,
   writerStatePath, claimsPath, automationPolicyPath,
-  projectionPath, registerKanbanBoardTools, ENVELOPE_SCHEMA,
+  projectionPath, registerKanbanBoardTools, ENVELOPE_SCHEMA, canonicalJsonString, withWriterLock,
 } from "../scripts/enforcement/task_board_core_pi.js";
 
 const authority = { source: "instruction", sessionOrReportId: "sess-test", quotedInstruction: "write the card" };
@@ -970,6 +971,104 @@ test("final: both claims-anchor crash windows roll forward the staged signed sta
       const writer = JSON.parse(readFileSync(writerStatePath(boardPath), "utf8"));
       assert.equal(writer.pendingClaimsState, null);
       assert.equal(writer.claimsGeneration, nextClaims.generation);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test("replaceAttempt: replaces the active attempt with a fresh envelope under one lock", () => {
+  const dir = freshDir();
+  try {
+    const { boardPath, second } = fixtureBoard(dir);
+    withPolicy(boardPath);
+    const claim = claimCard({ boardPath, role: "implementer", cardId: second });
+    assert.equal(claim.ok, true);
+    const r = replaceAttempt({ boardPath, cardId: second, envelopeId: claim.envelope.envelopeId, reason: "worker-unresponsive" });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(isEnvelopeConsumed(boardPath, claim.envelope.envelopeId), true);
+    assert.notEqual(r.envelope.envelopeId, claim.envelope.envelopeId);
+    assert.equal(r.claim.cardId, second);
+    const state = readClaimsState(boardPath).state;
+    assert.equal(state.claims.filter((c) => c.cardId === second).length, 1, "exactly one active claim for the card");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("replaceAttempt: drift, reuse, and policy refusal fail closed without mutation", () => {
+  const dir = freshDir();
+  try {
+    const { boardPath, second } = fixtureBoard(dir);
+    withPolicy(boardPath);
+    const claim = claimCard({ boardPath, role: "implementer", cardId: second });
+    assert.equal(claim.ok, true);
+    // Wrong card ID: fails closed.
+    const drift = replaceAttempt({ boardPath, cardId: "T-999", envelopeId: claim.envelope.envelopeId, reason: "failed" });
+    assert.equal(drift.ok, false);
+    assert.equal(drift.code, "card-drift");
+    // Unknown envelope: fails closed.
+    const missing = replaceAttempt({ boardPath, cardId: second, envelopeId: "0".repeat(32), reason: "failed" });
+    assert.equal(missing.ok, false);
+    assert.equal(missing.code, "envelope-not-active");
+    // A successful replacement consumes the old envelope; a second attempt
+    // against it fails closed (never reuses the old envelope).
+    const first = replaceAttempt({ boardPath, cardId: second, envelopeId: claim.envelope.envelopeId, reason: "failed" });
+    assert.equal(first.ok, true);
+    const again = replaceAttempt({ boardPath, cardId: second, envelopeId: claim.envelope.envelopeId, reason: "failed" });
+    assert.equal(again.ok, false);
+    assert.equal(again.code, "envelope-not-active");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("replaceAttempt: crash-injection in both claims-anchor windows rolls forward the staged signed replacement", () => {
+  for (const claimsWritten of [false, true]) {
+    const dir = freshDir();
+    try {
+      const { boardPath, second } = fixtureBoard(dir);
+      withPolicy(boardPath);
+      const claim = claimCard({ boardPath, role: "implementer", cardId: second });
+      assert.equal(claim.ok, true);
+      // Drive replaceAttempt under an injected crash inside the claims write:
+      // the complete signed next state is staged in writer state, then the
+      // claims file is either left stale (prepare crash) or written but not
+      // anchored (post-claims/pre-anchor crash). Recovery must roll forward
+      // the exact pre-recorded replacement, never mint another envelope.
+      const injected = withWriterLock(boardPath, () => {
+        const read = readClaimsState(boardPath);
+        assert.equal(read.ok, true);
+        const card = validateBoard(readFileSync(boardPath, "utf8"), {}).cards.find((c) => c.cardId === second);
+        const newEnvelope = createEnvelope({ card, policy: checkAutomationPolicy(readAutomationPolicy(boardPath), { boardPath }).policy, now: new Date().toISOString(), repository: dir });
+        const kept = read.state.claims.filter((c) => c.envelopeId !== claim.envelope.envelopeId);
+        const nextClaims = [...kept, { cardId: second, claimedAt: new Date().toISOString(), role: "implementer", envelopeId: newEnvelope.envelopeId, envelope: newEnvelope }];
+        const consumedClaims = [...read.state.consumedClaims, { cardId: second, envelopeId: claim.envelope.envelopeId, consumedAt: new Date().toISOString(), reason: "worker-unresponsive" }];
+        const transaction = { op: "replace-attempt", cardId: second, envelopeId: newEnvelope.envelopeId, at: new Date().toISOString(), phase: "claims-written", oldEnvelopeId: claim.envelope.envelopeId, oldReason: "worker-unresponsive" };
+        const statePath = writerStatePath(boardPath);
+        const writer = JSON.parse(readFileSync(statePath, "utf8"));
+        const value = { schema: "agentic-driver.board-claims.v2", generation: read.state.generation + 1, transaction, claims: nextClaims, consumedClaims };
+        value.hmac = createHmac("sha256", writer.secret)
+          .update(canonicalJsonString({ schema: value.schema, generation: value.generation, transaction: value.transaction, claims: value.claims, consumedClaims: value.consumedClaims }), "utf8")
+          .digest("hex");
+        writeFileSync(statePath, JSON.stringify({ ...writer, pendingClaimsState: value }));
+        if (claimsWritten) writeFileSync(claimsPath(boardPath), JSON.stringify(value));
+        return { newEnvelopeId: newEnvelope.envelopeId };
+      });
+      // Unrecovered public reads fail closed.
+      assert.equal(readClaimsState(boardPath).ok, false);
+      // Recovery runs first inside the next locked operation (any mutation
+      // triggers it; releaseExpiredClaims is the smallest one).
+      releaseExpiredClaims({ boardPath });
+      const state = readClaimsState(boardPath);
+      assert.equal(state.ok, true, readClaimsState(boardPath).reason);
+      assert.equal(state.state.transaction, null, "transaction cleared after roll-forward");
+      assert.equal(state.state.claims.filter((c) => c.cardId === second).length, 1, "exactly one active claim for the card");
+      assert.equal(state.state.claims[0].envelopeId, injected.newEnvelopeId, "the pre-recorded replacement rolled forward, not a new envelope");
+      assert.equal(isEnvelopeConsumed(boardPath, claim.envelope.envelopeId), true, "old attempt consumed");
+      const writer = JSON.parse(readFileSync(writerStatePath(boardPath), "utf8"));
+      assert.equal(writer.pendingClaimsState, null, "anchor cleared");
+      assert.equal(writer.claimsGeneration, state.state.generation);
+      // The rolled-forward replacement envelope is executable (not consumed),
+      // and a subsequent replaceAttempt against it works — recovery never
+      // minted a second envelope.
+      const r = replaceAttempt({ boardPath, cardId: second, envelopeId: injected.newEnvelopeId, reason: "failed" });
+      assert.equal(r.ok, true, JSON.stringify(r));
+      assert.notEqual(r.envelope.envelopeId, injected.newEnvelopeId);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   }
 });

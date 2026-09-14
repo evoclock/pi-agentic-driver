@@ -12,6 +12,7 @@ import {
   WORKER_DISPATCH_SCHEMA,
   DEFAULT_MODE,
   WORKER_DISPATCH_MODES,
+  WORKER_DISPATCH_TERMINAL_STATES,
 } from "../scripts/enforcement/herdr_async_dispatch_pi.js";
 
 function markerPairFor(role) {
@@ -628,4 +629,34 @@ test("AJ-cast: cast-less dispatch defaults to the dispatched role", async () => 
   );
   assert.ok(journey.cast, "the default cast is materialized");
   assert.deepEqual(journey.cast.roles, ["worker"]);
+});
+
+test("review_requested: a report carrying the review marker terminates the journey as review_requested", async () => {
+  const fixture = herdrFixture({ reportFor: () => "implementation complete [REVIEW_REQUESTED] for handoff" });
+  const journey = await runWorkerJourney(
+    { action: "dispatch", role: "worker", stepPrompt: "x" },
+    tuiContext(),
+    { runProcess: fixture.runProcess, taskStore: taskStore([{ id: "1", status: "pending" }]) },
+  );
+  assert.equal(journey.ok, true);
+  assert.equal(journey.status, "review_requested");
+  assert.ok(WORKER_DISPATCH_TERMINAL_STATES.includes("review_requested"));
+  assert.match(journey.report, /status: review_requested/);
+});
+
+test("progress snapshot: each completed step carries a compact observation, not authority", async () => {
+  const fixture = herdrFixture();
+  const journey = await runWorkerJourney(
+    { action: "dispatch", role: "worker", stepPrompt: "x" },
+    tuiContext(),
+    { runProcess: fixture.runProcess, taskStore: taskStore([{ id: "1", status: "pending" }]), repository: root },
+  );
+  const step = journey.steps.find((s) => s.status === "done");
+  assert.ok(step?.progress, "the completed step carries a progress snapshot");
+  assert.equal(step.progress.schema, "agentic-driver.progress-snapshot.v1");
+  assert.equal(step.progress.taskId, "1");
+  assert.equal(typeof step.progress.head, "string");
+  assert.equal(typeof step.progress.scopedDiffHash, "string");
+  assert.ok(Array.isArray(step.progress.changedPaths));
+  assert.equal(journey.persisted, false);
 });
