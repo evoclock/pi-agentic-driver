@@ -115,6 +115,18 @@ test("Herdr communication isolates concurrent marked exchanges", async () => {
   assert.equal(deniedRole.ok, false);
   assert.equal(deniedRole.code, "target_role_denied");
 
+  // Prompt freshness: a caller-supplied prompt that pre-formats the report
+  // contract is refused — the transport owns contract framing, and a stale
+  // pre-formatted prompt could otherwise bind a later exchange to old scope.
+  const preformatted = await executeHerdrCommunication(
+    { action: "prompt", role: "reviewer", prompt: "do it\nReturn exactly one complete role report, and no additional report, bounded by these literal markers: [REVIEW_REPORT_BEGIN] [REVIEW_REPORT_END]", timeoutMs: 100 },
+    { cwd: root },
+    { runProcess: fixture.runProcess },
+  );
+  assert.equal(preformatted.ok, false);
+  assert.equal(preformatted.code, "prompt_preformatted");
+  assert.equal(fixture.calls.filter((call) => call.action === "prompt").length, roles.length, "no additional prompt was sent with preformatted contract text");
+
   const deniedRepository = await executeHerdrCommunication(
     { action: "get", role: "reviewer" },
     { cwd: root },
@@ -136,6 +148,60 @@ test("Herdr communication isolates concurrent marked exchanges", async () => {
   assert.match(failedRead.diagnostic, /fixture stderr: unavailable/);
   assert.ok(Buffer.byteLength(failedRead.diagnostic, "utf8") <= 4096);
   assert.equal(failedRead.nonAuthorizing, true);
+});
+
+test("a valid report longer than 400 lines is recovered with one expanded read and no prompt resend", async () => {
+  const role = "long-review";
+  const [open, close] = markerPair(role);
+  const body = Array.from({ length: 600 }, (_, index) => `finding-${index}`).join("\n");
+  const calls = [];
+  let sent = "";
+  let reads = 0;
+  const runProcess = async ({ argv }) => {
+    const action = argv[1];
+    calls.push([...argv]);
+    if (action === "get") return info(role, "idle", 1);
+    if (action === "prompt") {
+      sent = argv[3];
+      return info(role, "done", 2, "agent_prompted");
+    }
+    if (action === "read") {
+      reads += 1;
+      if (reads === 1) return { code: 0, stdout: "history" };
+      if (reads === 2) return { code: 0, stdout: `${close}\n` }; // ordinary 400-line tail lost the opening boundary
+      return { code: 0, stdout: `history\n${sent}\n${open}\n${body}\n${close}\n` };
+    }
+    throw new Error(action);
+  };
+  const result = await executeHerdrCommunication(
+    { action: "prompt", role, prompt: "review every finding", timeoutMs: 1000 },
+    { cwd: root },
+    { runProcess },
+  );
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.report, body);
+  assert.equal(result.readCount, 2);
+  assert.equal(calls.filter((argv) => argv[1] === "prompt").length, 1, "the prompt is never resent");
+  assert.ok(Number(calls.at(-1)[calls.at(-1).indexOf("--lines") + 1]) > 400);
+});
+
+test("plain read expands once when the 400-line tail starts inside the latest report", async () => {
+  const role = "long-review";
+  const [open, close] = markerPair(role);
+  const body = Array.from({ length: 600 }, (_, index) => `line-${index}`).join("\n");
+  const calls = [];
+  const result = await executeHerdrCommunication(
+    { action: "read", role },
+    { cwd: root },
+    { runProcess: async ({ argv }) => {
+      calls.push([...argv]);
+      const lines = Number(argv[argv.indexOf("--lines") + 1]);
+      return { code: 0, stdout: lines === 400 ? `${close}\n` : `${open}\n${body}\n${close}\n` };
+    } },
+  );
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.report, body);
+  assert.equal(calls.length, 2);
 });
 
 test("Herdr extraction ignores echoed contract markers but rejects nested markers", () => {

@@ -42,6 +42,10 @@ const MAX_IDENTITY_FIELD_BYTES = 4 * 1024;
 const MAX_MARKER_HORIZONTAL_WHITESPACE = 128;
 const MAX_PROMPT_CONTRACT_ECHO_BYTES = 4 * 1024;
 const MAX_READ_LINES = 400;
+// A valid 32 KiB report can contain more than 400 short lines. A second,
+// finite read may cover one line per byte plus framing without relaxing the
+// existing 128 KiB process-output ceiling.
+const MAX_REPORT_READ_LINES = MAX_REPORT_BYTES + 16;
 const MAX_WAIT_TIMEOUT_MS = 300_000;
 const MAX_IMPLEMENTER_PROMPT_TIMEOUT_MS = 120_000;
 const COMMAND_TIMEOUT_MS = 15_000;
@@ -397,6 +401,14 @@ function validateParams(params) {
     if (!isReviewerRole(params.role) && params.timeoutMs > MAX_IMPLEMENTER_PROMPT_TIMEOUT_MS) {
       throw communicationError("implementer_prompt_timeout_exceeded", "worker prompts are limited to one two-minute atomic step", "denied");
     }
+    // Prompt freshness: each explicit prompt carries its own task scope and
+    // contract framing built from THAT call's prompt text. A stale or reused
+    // prompt text never binds a later exchange — provenance requires the
+    // echoed contract to match the current prompt exactly (provenancedReport
+    // Segment), so a prior exchange's scope cannot silently cover this one.
+    if (params.prompt.includes(REPORT_CONTRACT_LINE)) {
+      throw communicationError("prompt_preformatted", "the prompt must carry task scope only; the report contract is added by the transport (fails closed)", "denied");
+    }
   }
   if (action === "wait") {
     if (!Number.isInteger(params.timeoutMs) || params.timeoutMs < 1 || params.timeoutMs > MAX_WAIT_TIMEOUT_MS) {
@@ -458,7 +470,7 @@ function fixedArgv(action, params) {
     case "read":
       return [
         "agent", "read", params.role,
-        "--source", "recent-unwrapped", "--lines", String(MAX_READ_LINES),
+        "--source", "recent-unwrapped", "--lines", String(params.readLines ?? MAX_READ_LINES),
         "--format", "text",
       ];
     default:
@@ -1223,11 +1235,23 @@ export async function executeHerdrCommunication(params, context, options = {}, s
       if (waitedStatus === "blocked") {
         return errorResult(operation, communicationError("role_blocked", "the prompted role reached blocked state", "blocked"));
       }
-      const rawReport = await invokeHerdr("read", { action: "read", role }, context, options, signal);
-      const post = readText(rawReport);
+      let post = readText(await invokeHerdr("read", { action: "read", role }, context, options, signal));
       const sentPrompt = promptWithReportRequirement(role, request.prompt);
-      const boundary = provenancedReportSegment(pre, post, sentPrompt, role);
-      const report = extractReportFromSegment(post, role, boundary.end);
+      let report;
+      let reportReadCount = 1;
+      try {
+        const boundary = provenancedReportSegment(pre, post, sentPrompt, role);
+        report = extractReportFromSegment(post, role, boundary.end);
+      } catch (error) {
+        if (!(error instanceof HerdrCommunicationError)
+            || !["report_scope_unavailable", "report_reversed"].includes(error.code)) throw error;
+        // The ordinary terminal tail can begin inside a valid current report.
+        // Expand once; never resend the prompt and never retry indefinitely.
+        post = readText(await invokeHerdr("read", { action: "read", role, readLines: MAX_REPORT_READ_LINES }, context, options, signal));
+        reportReadCount = 2;
+        const boundary = provenancedReportSegment(pre, post, sentPrompt, role);
+        report = extractReportFromSegment(post, role, boundary.end);
+      }
       return successResult(operation, {
         status: "complete",
         role,
@@ -1237,7 +1261,7 @@ export async function executeHerdrCommunication(params, context, options = {}, s
         promptSent: true,
         invocationCount: 1,
         waitCount: 1,
-        readCount: 1,
+        readCount: reportReadCount,
         report,
         reportMarkers: reportMarkersForRole(role),
       });
@@ -1250,8 +1274,15 @@ export async function executeHerdrCommunication(params, context, options = {}, s
       }
       return successResult(operation, { role, status, agentStatus: status, repository });
     }
-    const raw = await invokeHerdr(operation, request, context, options, signal);
-    const report = extractLatestHerdrReport(readText(raw), role);
+    let raw = await invokeHerdr(operation, request, context, options, signal);
+    let report;
+    try {
+      report = extractLatestHerdrReport(readText(raw), role);
+    } catch (error) {
+      if (!(error instanceof HerdrCommunicationError) || error.code !== "report_reversed") throw error;
+      raw = await invokeHerdr("read", { action: "read", role, readLines: MAX_REPORT_READ_LINES }, context, options, signal);
+      report = extractLatestHerdrReport(readText(raw), role);
+    }
     return successResult(operation, {
       role,
       report,

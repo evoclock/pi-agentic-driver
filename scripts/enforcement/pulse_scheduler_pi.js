@@ -14,11 +14,12 @@
 // The timer never sends prompts to a model to make scheduling decisions.
 
 import { existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   validateBoard, readAutomationPolicy, checkAutomationPolicy, checkPulsePolicy,
-  readClaims, claimCard, automationPolicyPath, PLACEMENTS,
+  readClaims, claimCard, claimCardForConfirmedBatch, registerConfirmedBatchForClaims,
+  automationPolicyPath, PLACEMENTS,
 } from "./task_board_core_pi.js";
 import { scanBoard } from "./pulse_core_pi.js";
 import { isNativeTuiContext } from "./native_tui_context.js";
@@ -259,11 +260,25 @@ export function releaseBatchEntry(ctx, cardId) {
 // Batch execution (claims + guarded spawns)
 // ---------------------------------------------------------------------------
 
+// Containment gate (pre-claim, fail-closed): a container/microvm assignment
+// is NEVER started as an ordinary host Herdr worker. There is no verified
+// containment execution seam that supports assignment workers today, so
+// container/microvm dispatch is denied with a precise result BEFORE any claim
+// is created — no claim means nothing to reconcile and no capacity is leaked,
+// and no envelope attempt is consumed (a retry needs a fresh dispatch once a
+// real containment seam exists). Automated host dispatch stays explicitly
+// high-risk and is never inferred: it is denied unless the caller proves an
+// interactive, natively confirmed run (allowHostDispatch).
+const CONTAINMENT_SEAM_UNAVAILABLE =
+  "containment-seam-unavailable: no verified containment execution seam supports assignment workers; container/microvm assignments are never started as host workers (fails closed)";
+const AUTOMATED_HOST_DENIED =
+  "automated host dispatch is explicitly high-risk and requires explicit authority; it is never inferred (fails closed)";
+
 // Execute the confirmed batch: reserve → atomic claim → guarded spawn →
 // consume after verified start. A claim race removes the card from the landed
 // batch and refreshes capacity; an ambiguous spawn leaves the entry reserved
 // and triggers reconciliation, never reuse or another start.
-async function executeBatch({ batch, boardPath, spawnWorker = null, context = null, now = null }) {
+async function executeBatch({ batch, boardPath, spawnWorker = null, context = null, now = null, allowHostDispatch = false }) {
   const landed = [];
   const capacityTaken = new Set();
   let terminalReason = "no-eligible-card";
@@ -272,9 +287,26 @@ async function executeBatch({ batch, boardPath, spawnWorker = null, context = nu
       terminalReason = "capacity-full";
       break;
     }
+    if (entry.placement !== "host") {
+      // Pre-claim denial: nothing was claimed, so no claim cleanup or
+      // reconciliation is needed and capacity is not leaked.
+      landed.push({ title: entry.title, role: entry.role, model: entry.model, placement: entry.placement, status: "denied", reason: CONTAINMENT_SEAM_UNAVAILABLE });
+      terminalReason = "containment-seam-unavailable";
+      continue;
+    }
+    if (!allowHostDispatch) {
+      landed.push({ title: entry.title, role: entry.role, model: entry.model, placement: entry.placement, status: "denied", reason: AUTOMATED_HOST_DENIED });
+      terminalReason = "host-dispatch-denied";
+      continue;
+    }
     const reserved = reserveBatchEntry(batch, entry.cardId, { now });
     if (!reserved.ok) continue; // consumed/expired earlier in this batch
-    const claim = claimCard({ boardPath, cardId: entry.cardId, role: entry.role, policy: null });
+    // Host entries claim ONLY through the trusted confirmed-batch path; the
+    // batch was registered after the one native confirmation, and each entry
+    // is single-use. Contained entries use the ordinary contained-only claim.
+    const claim = entry.placement === "host"
+      ? claimCardForConfirmedBatch({ boardPath, cardId: entry.cardId, role: entry.role, policy: null, now, confirmedBatch: batch })
+      : claimCard({ boardPath, cardId: entry.cardId, role: entry.role, policy: null });
     if (!claim.ok) {
       releaseBatchEntry(batch, entry.cardId);
       landed.push({
@@ -300,6 +332,7 @@ async function executeBatch({ batch, boardPath, spawnWorker = null, context = nu
         role: entry.role,
         repository: entry.repository,
         model: entry.model,
+        placement: entry.placement,
         context,
         signal: null,
       });
@@ -372,7 +405,12 @@ export async function pulseRun({ boardPath, instruction, context = null, spawnWo
   if (confirmed !== true) {
     return { ok: true, cancelled: true, scan, landedAssignments: [], batchTerminalReason: "user-cancelled", batchId: batch.batchId };
   }
-  const { landed, terminalReason } = await executeBatch({ batch, boardPath, spawnWorker, context, now });
+  // Interactive host spawning is permitted here only because this path has
+  // already required the native TUI and one explicit batch confirmation. The
+  // batch context is registered for the trusted in-memory confirmed-batch
+  // claim path; each host entry is claimable exactly once from it.
+  registerConfirmedBatchForClaims(batch);
+  const { landed, terminalReason } = await executeBatch({ batch, boardPath, spawnWorker, context, now, allowHostDispatch: true });
   return { ok: true, cancelled: false, scan, landedAssignments: landed, batchTerminalReason: terminalReason, batchId: batch.batchId };
 }
 
@@ -390,8 +428,42 @@ export async function pulseTick({ boardPath, spawnWorker = null, context = null,
   const check = pulseCheck({ boardPath, modelRegistry: context?.modelRegistry ?? null, scopedModels: context?.scopedModels ?? null, observedAt: now });
   if (!check.ok) return { ok: false, code: check.code, reason: check.reason, landedAssignments: [] };
   const batch = mintBatchContext({ scan: check.scan, cards: check.validated.cards, policy: effectivePolicy, instruction: "automated-tick", now });
-  const { landed, terminalReason } = await executeBatch({ batch, boardPath, spawnWorker, context, now });
+  // Automated ticks never infer host dispatch: allowHostDispatch stays false.
+  const { landed, terminalReason } = await executeBatch({ batch, boardPath, spawnWorker, context, now, allowHostDispatch: false });
   return { ok: true, skipped: false, scan: check.scan, landedAssignments: landed, batchTerminalReason: terminalReason };
+}
+
+// ---------------------------------------------------------------------------
+// Guarded worker-creation seam (§2.5)
+// ---------------------------------------------------------------------------
+
+// The one Pulse spawn seam. Placement-aware and fail-closed: a host placement
+// goes through the existing guarded Herdr lifecycle boundary (native
+// confirmation, trusted repository, installed model roll, fixed argv,
+// shell:false); any container/microvm placement is denied WITHOUT touching
+// the lifecycle — Pulse never represents a contained assignment as contained
+// while starting an ordinary host worker.
+export function pulseWorkerSpawnSeam({ executeHerdrSpawnWorker } = {}) {
+  if (typeof executeHerdrSpawnWorker !== "function") {
+    throw new Error("pulseWorkerSpawnSeam requires the guarded herdr-lifecycle executeHerdrSpawnWorker");
+  }
+  return async ({ role, repository, model, placement, context, signal }) => {
+    if (placement !== "host") {
+      return { ok: false, code: "containment-seam-unavailable", reason: CONTAINMENT_SEAM_UNAVAILABLE };
+    }
+    // Board policy stores canonical repository paths, while the guarded
+    // lifecycle accepts only registry names. Convert only a canonical sibling
+    // of the coordinator repository; the lifecycle then revalidates the name,
+    // registry membership, real path, and Git root before spawning.
+    const coordinator = context?.cwd;
+    const repositoryName = typeof repository === "string" ? basename(repository) : "";
+    if (typeof coordinator !== "string" || coordinator === ""
+        || typeof repository !== "string" || repository === ""
+        || resolve(repository) !== resolve(coordinator, "..", repositoryName)) {
+      return { ok: false, code: "repository-mismatch", reason: "the assignment repository is not a canonical sibling of the coordinator repository" };
+    }
+    return executeHerdrSpawnWorker({ placement: "tab", role, model, repository: repositoryName }, context, {}, signal);
+  };
 }
 
 // ---------------------------------------------------------------------------

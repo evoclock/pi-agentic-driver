@@ -14,11 +14,12 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
   writeCard, automationPolicyPath, readAutomationPolicy, claimCard,
+  claimCardForConfirmedBatch, registerConfirmedBatchForClaims,
 } from "../scripts/enforcement/task_board_core_pi.js";
 import {
   pulseRun, pulseTick, mintBatchContext, reserveBatchEntry, consumeBatchEntry,
   releaseBatchEntry, batchExpired, pulsePolicyOperation, createPulseTimer,
-  registerPulseTools,
+  registerPulseTools, pulseWorkerSpawnSeam,
 } from "../scripts/enforcement/pulse_scheduler_pi.js";
 
 const authority = { source: "instruction", sessionOrReportId: "sess-1", quotedInstruction: "plan the work" };
@@ -89,6 +90,27 @@ function tuiContext({ confirmed = true, modelRegistry = null, scopedModels = nul
 
 const registry = { get: (id) => id === "zai/glm-5.3" ? { id } : null, isAuthenticated: () => true };
 
+test("host spawn seam converts a canonical policy path to its trusted registry name", async () => {
+  const calls = [];
+  const seam = pulseWorkerSpawnSeam({
+    executeHerdrSpawnWorker: async (params) => { calls.push(params); return { ok: true }; },
+  });
+  const result = await seam({
+    role: "implementer", model: "zai/glm-5.3", placement: "host",
+    repository: "/workspace/pi-dev-env", context: { cwd: "/workspace/pi-dev-env" }, signal: null,
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, [{ placement: "tab", role: "implementer", model: "zai/glm-5.3", repository: "pi-dev-env" }]);
+
+  const mismatch = await seam({
+    role: "implementer", model: "zai/glm-5.3", placement: "host",
+    repository: "/untrusted/pi-dev-env", context: { cwd: "/workspace/pi-dev-env" }, signal: null,
+  });
+  assert.equal(mismatch.ok, false);
+  assert.equal(mismatch.code, "repository-mismatch");
+  assert.equal(calls.length, 1);
+});
+
 test("run fails closed without a direct human instruction", async () => {
   const dir = freshDir();
   try {
@@ -126,7 +148,9 @@ test("run fails closed headlessly: the one batch confirmation requires the nativ
 test("run with one confirmation claims and starts one card; entry consumed after verified start", async () => {
   const dir = freshDir();
   try {
-    const { boardPath } = fixtureBoard(dir, { cards: 1 });
+    // Host placement is required for an actual start: container placement is
+    // denied with containment-seam-unavailable (no host fallback, ever).
+    const { boardPath } = fixtureBoard(dir, { cards: 1, policyOverrides: { placement: "host" } });
     const spawned = [];
     const r = await pulseRun({
       boardPath,
@@ -168,7 +192,7 @@ test("run cancelled at the one confirmation claims nothing", async () => {
 test("run respects capacity: two cards, ceiling four, both started in one batch", async () => {
   const dir = freshDir();
   try {
-    const { boardPath } = fixtureBoard(dir, { cards: 2 });
+    const { boardPath } = fixtureBoard(dir, { cards: 2, policyOverrides: { placement: "host" } });
     const r = await pulseRun({
       boardPath,
       instruction: "work through the ready cards with local implementers",
@@ -184,11 +208,21 @@ test("run respects capacity: two cards, ceiling four, both started in one batch"
 test("run: claim race removes the card from the landed batch and never double-claims", async () => {
   const dir = freshDir();
   try {
-    const { boardPath, ids } = fixtureBoard(dir, { cards: 2 });
+    const { boardPath, ids } = fixtureBoard(dir, { cards: 2, policyOverrides: { placement: "host" } });
     // Pre-claim card 1 outside Pulse: the scan marks it BLOCKED, the batch
     // excludes it entirely (a claim race removes the card from the landed
-    // batch), and only card 2 lands. Card 1 is never double-claimed.
-    const pre = claimCard({ boardPath, cardId: ids[0], role: "implementer" });
+    // batch), and only card 2 lands. Card 1 is never double-claimed. Host
+    // placement is only claimable through the trusted confirmed-batch path,
+    // so the pre-claim uses it (registered after a minted, confirmed batch).
+    const preBatch = mintBatchContext({
+      scan: { schema: "agentic-driver.board-pulse.v1", board: boardPath, cards: [], proposedDispatches: [] },
+      cards: [],
+      policy: readAutomationPolicy(boardPath),
+      instruction: "pre-claim card 1",
+    });
+    preBatch.entries.push({ cardId: ids[0], cardHash: null, title: "Card 1", role: "implementer", model: "zai/glm-5.3", repository: dir, placement: "host", state: "reserved" });
+    registerConfirmedBatchForClaims(preBatch);
+    const pre = claimCardForConfirmedBatch({ boardPath, cardId: ids[0], role: "implementer", confirmedBatch: preBatch });
     assert.equal(pre.ok, true);
     const r = await pulseRun({
       boardPath,
@@ -205,11 +239,10 @@ test("run: claim race removes the card from the landed batch and never double-cl
     assert.equal(claims.claims.filter((c) => c.cardId === ids[0]).length, 1);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
-
 test("run: ambiguous spawn leaves the entry reserved and never spawns twice", async () => {
   const dir = freshDir();
   try {
-    const { boardPath } = fixtureBoard(dir, { cards: 1 });
+    const { boardPath } = fixtureBoard(dir, { cards: 1, policyOverrides: { placement: "host" } });
     let spawnCalls = 0;
     const r = await pulseRun({
       boardPath,
@@ -350,7 +383,7 @@ test("policy operations: revocation (disable) and policy absence stop new claims
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("automated tick: claims and starts cards deterministically without prompts", async () => {
+test("automated tick: container placement is denied with containment-seam-unavailable, no host spawn", async () => {
   const dir = freshDir();
   try {
     const { boardPath } = fixtureBoard(dir, { cards: 2, pulse: pulsePolicy({ mode: "automated", fillOnStart: false }) });
@@ -363,7 +396,8 @@ test("automated tick: claims and starts cards deterministically without prompts"
     assert.equal(r.ok, true);
     assert.equal(r.skipped, false);
     assert.equal(r.landedAssignments.length, 2);
-    assert.equal(spawned.length, 2);
+    assert.ok(r.landedAssignments.every((a) => a.status === "denied"));
+    assert.equal(spawned.length, 0); // no containment fallback to host spawning
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -427,7 +461,7 @@ test("timer lifecycle: fillOnStart=false schedules the interval, never immediate
 test("tool run/enable/configure surface is wired end-to-end through the registered tool", async () => {
   const dir = freshDir();
   try {
-    const { boardPath } = fixtureBoard(dir, { cards: 1, pulse: pulsePolicy({ enabled: false }) });
+    const { boardPath } = fixtureBoard(dir, { cards: 1, pulse: pulsePolicy({ enabled: false }), policyOverrides: { placement: "host" } });
     const registered = [];
     registerPulseTools({ registerTool: (t) => registered.push(t) }, { spawnWorker: async () => ({ ok: true }) });
     const tool = registered[0];

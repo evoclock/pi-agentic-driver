@@ -14,21 +14,17 @@
 // herdr-lifecycle boundary — native confirmation, trusted repository,
 // installed model roll, fixed argv, shell:false — never raw pane management.
 
-import { resolveBoardPath, registerPulseTools, createPulseTimer, pulseTick } from "../scripts/enforcement/pulse_scheduler_pi.js";
+import { executeHerdrSpawnWorker } from "../scripts/enforcement/herdr_lifecycle_pi.js";
+import { resolveBoardPath, registerPulseTools, createPulseTimer, pulseTick, pulseWorkerSpawnSeam } from "../scripts/enforcement/pulse_scheduler_pi.js";
 
-export default async function pulsePi(pi) {
-  const lifecycle = await import(new URL("../scripts/enforcement/herdr_lifecycle_pi.js", import.meta.url).href);
+export default function pulsePi(pi) {
 
   // Guarded worker-creation seam (§2.5): every Pulse spawn goes through
-  // executeHerdrSpawnWorker, which performs native confirmation and
-  // verification. No other creation path exists.
-  const spawnWorker = ({ role, repository, model, context, signal }) =>
-    lifecycle.executeHerdrSpawnWorker(
-      { placement: "tab", role, model, repository },
-      context,
-      {},
-      signal,
-    );
+  // pulseWorkerSpawnSeam, which is placement-aware and fails closed — host
+  // placements route to executeHerdrSpawnWorker (native confirmation,
+  // verification); container/microvm placements are denied before any host
+  // worker is ever started. No other creation path exists.
+  const spawnWorker = pulseWorkerSpawnSeam({ executeHerdrSpawnWorker });
 
   const result = registerPulseTools(pi, {
     resolveBoardPath: (ctx) => resolveBoardPath(typeof ctx === "string" ? ctx : ctx?.cwd || process.cwd()),

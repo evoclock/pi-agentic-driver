@@ -344,3 +344,66 @@ test("scanBoard diagnostic hash is canonical-JSON SHA-256 of the public scan", (
   });
   assert.equal(diagnosticHash, sha256Hex(canonicalJsonString(scan)));
 });
+
+test("scanBoard: a review-lane card is BLOCKED and never proposed", () => {
+  const review = card({ lane: "review" });
+  const index = new Map([["T1", review]]);
+  const { scan } = scanBoard({
+    cards: [review], boardIndex: index,
+    pulsePolicy: basePulse,
+    modelObservations: fullObservations(["zai/glm-5.3", "openai-codex/gpt-5.6-sol"]),
+    declaredModels: ["zai/glm-5.3", "openai-codex/gpt-5.6-sol"],
+    acceptedRepositories: basePolicy.acceptedRepositories,
+  });
+  const entry = scan.cards[0];
+  assert.equal(entry.result, "BLOCKED");
+  assert.match(entry.reason, /lane/);
+  assert.equal(scan.proposedDispatches.length, 0);
+  // The reviewer route still reports its own independent capacity.
+  const reviewer = scan.capacity.find((c) => c.role === "reviewer");
+  assert.ok(reviewer, "reviewer route capacity is reported independently");
+  assert.equal(reviewer.free, 1);
+});
+
+test("scanBoard: a reviewer card routes through the declared reviewer route, not the implementer route", () => {
+  const reviewCard = card({ role: "reviewer" });
+  const index = new Map([["T1", reviewCard]]);
+  const { scan } = scanBoard({
+    cards: [reviewCard], boardIndex: index,
+    pulsePolicy: basePulse,
+    modelObservations: fullObservations(["zai/glm-5.3", "openai-codex/gpt-5.6-sol"]),
+    declaredModels: ["zai/glm-5.3", "openai-codex/gpt-5.6-sol"],
+    acceptedRepositories: basePolicy.acceptedRepositories,
+  });
+  assert.equal(scan.cards[0].result, "READY_FOR_NEXT");
+  assert.equal(scan.cards[0].role, "reviewer");
+  assert.deepEqual(scan.proposedDispatches.map((p) => p.model), ["openai-codex/gpt-5.6-sol"]);
+});
+
+test("scanBoard: reviewer capacity refills independently after its claim is consumed", () => {
+  const reviewCard = card({ role: "reviewer" });
+  const index = new Map([["T1", reviewCard]]);
+  const activeClaim = { cardId: "T1", role: "reviewer", envelopeId: "e1", envelope: { model: "openai-codex/gpt-5.6-sol" } };
+  const withClaim = scanBoard({
+    cards: [reviewCard], boardIndex: index,
+    pulsePolicy: basePulse,
+    modelObservations: fullObservations(["openai-codex/gpt-5.6-sol"]),
+    declaredModels: ["openai-codex/gpt-5.6-sol"],
+    activeClaims: [activeClaim],
+    acceptedRepositories: basePolicy.acceptedRepositories,
+  });
+  assert.equal(withClaim.scan.cards[0].result, "BLOCKED");
+  assert.equal(withClaim.scan.proposedDispatches.length, 0);
+  // The claim is consumed (terminal attempt): capacity refills and the card
+  // is proposed again on the reviewer route.
+  const afterTerminal = scanBoard({
+    cards: [reviewCard], boardIndex: index,
+    pulsePolicy: basePulse,
+    modelObservations: fullObservations(["openai-codex/gpt-5.6-sol"]),
+    declaredModels: ["openai-codex/gpt-5.6-sol"],
+    activeClaims: [],
+    acceptedRepositories: basePolicy.acceptedRepositories,
+  });
+  assert.equal(afterTerminal.scan.cards[0].result, "READY_FOR_NEXT");
+  assert.deepEqual(afterTerminal.scan.proposedDispatches.map((p) => p.model), ["openai-codex/gpt-5.6-sol"]);
+});
