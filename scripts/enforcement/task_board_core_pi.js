@@ -1865,7 +1865,62 @@ export function selectDispatchableCard({ cards, boardPath, activeClaims, cardId 
 // the new complete state (both writes are atomic renames); two concurrent
 // claims can never both win because the entire read-decide-write sequence
 // holds the lock. Expired claims are released first, inside the same lock.
-export function claimCard({ boardPath, cardId = null, role, policy = null, configPath = null, now = null, repository = null, startingRevision = null }) {
+export function claimCard({ boardPath, cardId = null, role, policy = null, configPath = null, now = null, repository = null, startingRevision }) {
+  return claimCardInternal({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision, confirmedBatch: null });
+}
+
+// ---------------------------------------------------------------------------
+// Trusted Pulse-internal confirmed-batch claim path. Host placement is
+// claimable ONLY here, and only for a batch context object this module has
+// registered after one native confirmation (registerConfirmedBatchForClaims),
+// matched by object identity — never by batchId string, user/model field, or
+// durable state. Each confirmed entry is single-use: one claim consumes it,
+// and a claim for a card outside the confirmed set is refused.
+// ---------------------------------------------------------------------------
+
+// batch context object (WeakMap key) -> Set of cardIds still claimable from it.
+const confirmedBatchClaims = new WeakMap();
+
+export function registerConfirmedBatchForClaims(batch) {
+  if (batch?.schema !== "agentic-driver.pulse-batch.v1" || typeof batch.batchId !== "string" || !Array.isArray(batch.entries)) {
+    throw new Error("registerConfirmedBatchForClaims requires a minted pulse batch context");
+  }
+  confirmedBatchClaims.set(batch, new Set(batch.entries.map((entry) => entry.cardId)));
+  return batch.batchId;
+}
+
+export function claimCardForConfirmedBatch({ boardPath, cardId = null, role, policy = null, configPath = null, now = null, repository = null, startingRevision = null, confirmedBatch = null }) {
+  if (confirmedBatch === null || !confirmedBatchClaims.has(confirmedBatch)) {
+    return { ok: false, code: "confirmed-batch-required", reason: "host placement is claimable only through the Pulse confirmed-batch path with a batch registered after native confirmation (fails closed)" };
+  }
+  if (typeof cardId !== "string" || cardId === "") {
+    return { ok: false, code: "confirmed-batch-card-required", reason: "a confirmed-batch claim requires an explicit cardId from the confirmed batch (fails closed)" };
+  }
+  const expiresMs = Date.parse(confirmedBatch.expiresAt);
+  const nowMs = Date.parse(now ?? new Date().toISOString());
+  if (!Number.isFinite(expiresMs) || !Number.isFinite(nowMs)) {
+    return { ok: false, code: "confirmed-batch-time-invalid", reason: "the confirmed batch expiry or current time is invalid (fails closed)" };
+  }
+  if (nowMs >= expiresMs) {
+    return { ok: false, code: "confirmed-batch-expired", reason: "the confirmed batch context has expired; a fresh preview and confirmation is required" };
+  }
+  const entry = confirmedBatch.entries.find((e) => e.cardId === cardId);
+  if (!entry || entry.placement !== "host") {
+    return { ok: false, code: "confirmed-batch-card-mismatch", reason: "the requested card is not a host entry in the confirmed batch; confirmations cannot be crossed between batch entries" };
+  }
+  if (entry.state !== "reserved") {
+    return { ok: false, code: "confirmed-batch-entry-not-reserved", reason: `confirmed batch entry is ${entry.state}, not reserved; it cannot be claimed again (single-use)` };
+  }
+  const claimable = confirmedBatchClaims.get(confirmedBatch);
+  if (!claimable.has(cardId)) {
+    return { ok: false, code: "confirmed-batch-entry-consumed", reason: "the confirmed batch entry was already claimed; confirmation is single-use" };
+  }
+  const result = claimCardInternal({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision, confirmedBatch });
+  if (result.ok) claimable.delete(cardId); // consume the single-use confirmation
+  return result;
+}
+
+function claimCardInternal({ boardPath, cardId = null, role, policy = null, configPath = null, now = null, repository = null, startingRevision = null, confirmedBatch = null }) {
   if (typeof boardPath !== "string" || boardPath === "") {
     throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
   }
@@ -1879,7 +1934,7 @@ export function claimCard({ boardPath, cardId = null, role, policy = null, confi
   for (let attempt = 0; ; attempt += 1) {
     try {
       return withWriterLock(boardPath, () =>
-        claimCardLocked({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision }));
+        claimCardLocked({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision, confirmedBatch }));
     } catch (error) {
       if (error?.code === "writer-lock-held" && attempt < 20) {
         sleepSync(25);
@@ -1893,7 +1948,7 @@ export function claimCard({ boardPath, cardId = null, role, policy = null, confi
   }
 }
 
-function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision }) {
+function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision, confirmedBatch = null }) {
   const at = now ?? new Date().toISOString();
   if (!existsSync(boardPath)) {
     return { ok: false, code: "board-unavailable", reason: "board file is no longer present (board-unavailable)" };
@@ -1932,9 +1987,17 @@ function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, rep
   if (!policyCheck.policy.roles.includes(role)) {
     return { ok: false, code: "policy-role-refused", reason: `role "${role}" is not declared in the automation policy (fails closed)` };
   }
-  // §3.4 mode table: automated placement is container/microVM, always.
-  if (policyCheck.policy.placement !== "container") {
-    return { ok: false, code: "policy-placement-refused", reason: "automated board dispatch requires container placement per the automation policy (§3.4)" };
+  // §3.4 mode table: ordinary claims are contained-only (container/microVM),
+  // always. Host placement is claimable ONLY through the trusted Pulse-internal
+  // confirmed-batch path (claimCardForConfirmedBatch), which requires a batch
+  // context registered after one native confirmation. Static pulse.mode=
+  // "interactive" plus host placement is never enough on its own; automated
+  // dispatch may never use host placement.
+  if (confirmedBatch === null && policyCheck.policy.placement !== "container") {
+    return { ok: false, code: "policy-placement-refused", reason: "ordinary board dispatch requires container placement per the automation policy (§3.4); host placement is claimable only through the Pulse confirmed-batch path" };
+  }
+  if (confirmedBatch !== null && policyCheck.policy.placement !== "host") {
+    return { ok: false, code: "policy-placement-refused", reason: "the Pulse confirmed-batch claim path requires host placement (fails closed)" };
   }
   // F4: the starting revision comes from the card's repository — the
   // workspace the board lives in, not process.cwd(). A caller-supplied

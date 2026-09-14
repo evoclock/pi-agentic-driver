@@ -12,6 +12,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { createHmac } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import {
@@ -20,7 +21,7 @@ import {
   readAutomationPolicy, checkAutomationPolicy, createEnvelope, isEnvelopeConsumed,
   dispatchEligibility, selectDispatchableCard, validateBoard, replaceAttempt,
   writerStatePath, claimsPath, automationPolicyPath,
-  projectionPath, registerKanbanBoardTools, ENVELOPE_SCHEMA,
+  projectionPath, registerKanbanBoardTools, ENVELOPE_SCHEMA, canonicalJsonString, withWriterLock,
 } from "../scripts/enforcement/task_board_core_pi.js";
 
 const authority = { source: "instruction", sessionOrReportId: "sess-test", quotedInstruction: "write the card" };
@@ -1014,4 +1015,60 @@ test("replaceAttempt: drift, reuse, and policy refusal fail closed without mutat
     assert.equal(again.ok, false);
     assert.equal(again.code, "envelope-not-active");
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("replaceAttempt: crash-injection in both claims-anchor windows rolls forward the staged signed replacement", () => {
+  for (const claimsWritten of [false, true]) {
+    const dir = freshDir();
+    try {
+      const { boardPath, second } = fixtureBoard(dir);
+      withPolicy(boardPath);
+      const claim = claimCard({ boardPath, role: "implementer", cardId: second });
+      assert.equal(claim.ok, true);
+      // Drive replaceAttempt under an injected crash inside the claims write:
+      // the complete signed next state is staged in writer state, then the
+      // claims file is either left stale (prepare crash) or written but not
+      // anchored (post-claims/pre-anchor crash). Recovery must roll forward
+      // the exact pre-recorded replacement, never mint another envelope.
+      const injected = withWriterLock(boardPath, () => {
+        const read = readClaimsState(boardPath);
+        assert.equal(read.ok, true);
+        const card = validateBoard(readFileSync(boardPath, "utf8"), {}).cards.find((c) => c.cardId === second);
+        const newEnvelope = createEnvelope({ card, policy: checkAutomationPolicy(readAutomationPolicy(boardPath), { boardPath }).policy, now: new Date().toISOString(), repository: dir });
+        const kept = read.state.claims.filter((c) => c.envelopeId !== claim.envelope.envelopeId);
+        const nextClaims = [...kept, { cardId: second, claimedAt: new Date().toISOString(), role: "implementer", envelopeId: newEnvelope.envelopeId, envelope: newEnvelope }];
+        const consumedClaims = [...read.state.consumedClaims, { cardId: second, envelopeId: claim.envelope.envelopeId, consumedAt: new Date().toISOString(), reason: "worker-unresponsive" }];
+        const transaction = { op: "replace-attempt", cardId: second, envelopeId: newEnvelope.envelopeId, at: new Date().toISOString(), phase: "claims-written", oldEnvelopeId: claim.envelope.envelopeId, oldReason: "worker-unresponsive" };
+        const statePath = writerStatePath(boardPath);
+        const writer = JSON.parse(readFileSync(statePath, "utf8"));
+        const value = { schema: "agentic-driver.board-claims.v2", generation: read.state.generation + 1, transaction, claims: nextClaims, consumedClaims };
+        value.hmac = createHmac("sha256", writer.secret)
+          .update(canonicalJsonString({ schema: value.schema, generation: value.generation, transaction: value.transaction, claims: value.claims, consumedClaims: value.consumedClaims }), "utf8")
+          .digest("hex");
+        writeFileSync(statePath, JSON.stringify({ ...writer, pendingClaimsState: value }));
+        if (claimsWritten) writeFileSync(claimsPath(boardPath), JSON.stringify(value));
+        return { newEnvelopeId: newEnvelope.envelopeId };
+      });
+      // Unrecovered public reads fail closed.
+      assert.equal(readClaimsState(boardPath).ok, false);
+      // Recovery runs first inside the next locked operation (any mutation
+      // triggers it; releaseExpiredClaims is the smallest one).
+      releaseExpiredClaims({ boardPath });
+      const state = readClaimsState(boardPath);
+      assert.equal(state.ok, true, readClaimsState(boardPath).reason);
+      assert.equal(state.state.transaction, null, "transaction cleared after roll-forward");
+      assert.equal(state.state.claims.filter((c) => c.cardId === second).length, 1, "exactly one active claim for the card");
+      assert.equal(state.state.claims[0].envelopeId, injected.newEnvelopeId, "the pre-recorded replacement rolled forward, not a new envelope");
+      assert.equal(isEnvelopeConsumed(boardPath, claim.envelope.envelopeId), true, "old attempt consumed");
+      const writer = JSON.parse(readFileSync(writerStatePath(boardPath), "utf8"));
+      assert.equal(writer.pendingClaimsState, null, "anchor cleared");
+      assert.equal(writer.claimsGeneration, state.state.generation);
+      // The rolled-forward replacement envelope is executable (not consumed),
+      // and a subsequent replaceAttempt against it works — recovery never
+      // minted a second envelope.
+      const r = replaceAttempt({ boardPath, cardId: second, envelopeId: injected.newEnvelopeId, reason: "failed" });
+      assert.equal(r.ok, true, JSON.stringify(r));
+      assert.notEqual(r.envelope.envelopeId, injected.newEnvelopeId);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
 });

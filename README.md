@@ -232,9 +232,14 @@ Claims and envelopes are kept in authenticated state beside `TASKS.md`. The
 derived `board.md` view shows active claims but never becomes an authority
 source.
 
+`agentic_kanban_pulse` checks the board for ready work and available capacity.
+A check only reports which work is ready to run. It does not claim cards. Interactive host
+work needs explicit policy and one native confirmation for the batch. Automated
+work requires containment and never falls back to the host.
+
 Coming next:
 
-- an optional watcher that checks for dispatchable work;
+- contained Pulse execution through Testudo;
 - Vogelkop support for the shared card fields; and
 - our own Obsidian plugin for canonical `TASKS.md`.
 
