@@ -1,4 +1,4 @@
-# pi-agentic-driver v0.9.0
+# pi-agentic-driver v0.9.1
 
 <p align="center">
   <img src="assets/Yamagane-origami.png" alt="pi-agentic-driver, Yamagane origami mark" width="140"/>
@@ -7,7 +7,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL%20v3-blue?style=flat" alt="License: AGPL v3"/></a>
   <a href="https://www.npmjs.com/package/@evoclock/pi-agentic-driver"><img src="https://img.shields.io/npm/v/@evoclock/pi-agentic-driver?style=flat" alt="npm version"/></a>
-  <img src="https://img.shields.io/badge/version-0.9.0-blue?style=flat" alt="Version 0.9.0"/>
+  <img src="https://img.shields.io/badge/version-0.9.1-blue?style=flat" alt="Version 0.9.1"/>
   <img src="https://img.shields.io/badge/status-active%20development%20%26%20testing-orange?style=flat" alt="Status"/>
   <img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=flat&logo=javascript&logoColor=black" alt="JavaScript"/>
   <img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat&logo=typescript&logoColor=white" alt="TypeScript"/>
@@ -53,6 +53,7 @@ proofs for agentic workflows.
 | `agentic_kanban_board_write` | Adds cards to the board through the trusted writer, which records who authorized the work. | shipped |
 | `agentic_kanban_board_update` | Moves, closes, flags, edits, or removes cards on the board, always recording who authorized the change. | shipped |
 | `agentic_kanban_board_dispatch` | Claims an eligible board card for automated contained work and creates its assignment envelope. | shipped |
+| `agentic_kanban_pulse` | Checks for ready work and available capacity, then starts assignments under the board policy. | shipped |
 
 **Status: active development and testing.** Each extension ships only after
 it passes fixture-based acceptance, native tests, live-session checks, and
@@ -66,7 +67,7 @@ components are listed here for transparency and are not packaged.
 <details>
 <summary><strong>code-phage, advisory code review</strong> <em>(released, 0.1.1)</em></summary>
 
-`code_phage` reviews a proposed change against a stated goal before the agent
+The `code_phage` tool reviews a proposed change against a stated goal before the agent
 writes or commits code. Give it a goal, candidate files, accepted
 requirements, and test paths. It will:
 
@@ -109,7 +110,7 @@ only, not a runtime dependency).
 <details>
 <summary><strong>herdr-communication, controlled role communication</strong> <em>(released, 0.2.1)</em></summary>
 
-`agentic_herdr_communication` exchanges controlled, marked reports with
+The `agentic_herdr_communication` tool exchanges controlled, marked reports with
 configured Pi worker roles running under [Herdr](https://herdr.dev/) 0.8.2.
 
 - **List and observe.** Worker roles are filtered to trusted repositories: a
@@ -133,7 +134,7 @@ configured Pi worker roles running under [Herdr](https://herdr.dev/) 0.8.2.
 <details>
 <summary><strong>herdr-lifecycle, role-labelled worker dispatch</strong> <em>(released, 0.2.1)</em></summary>
 
-`agentic_herdr_spawn_worker` turns one natural-language request into Herdr's
+The `agentic_herdr_spawn_worker` tool turns one natural-language request into Herdr's
 native lifecycle. Choose a placement (`right`, `below`, or `tab`), a safe role
 label, a model from the active Pi model roster, and a trusted repository. The
 extension:
@@ -165,7 +166,7 @@ for the wider task and model-routing workflow.
 <details>
 <summary><strong>herdr-dispatch, continuous worker journeys</strong> <em>(released, 0.5.0)</em></summary>
 
-`agentic_worker_dispatch` runs controlled worker journeys and observes worker
+The `agentic_worker_dispatch` tool runs controlled worker journeys and observes worker
 liveness. Two actions:
 
 - **pulse** reports whether a worker role is alive, its current state, and
@@ -192,7 +193,7 @@ silently, and return results as untrusted evidence.
 
 
 <details>
-<summary><strong>task board, planned and automated work you can see</strong> <em>(released, 0.9.0)</em></summary>
+<summary><strong>task board and Pulse, planned and automated work you can see</strong> <em>(released, 0.9.1)</em></summary>
 
 Keep planned work in canonical `TASKS.md`. You can read it directly or use
 the generated `board.md` view in Obsidian. Agents use the same canonical
@@ -216,10 +217,10 @@ For automated work, you set an explicit policy for the board. It defines:
 
 Without a valid policy, automated dispatch is refused.
 
-`agentic_kanban_board_dispatch` claims the highest-priority eligible card and
-creates a single-attempt assignment envelope. The envelope binds the card,
-repository, starting revision, assigned branch, allowed paths, stopping
-point, expiry, and interaction profile.
+The `agentic_kanban_board_dispatch` tool claims the highest-priority eligible card. It
+creates a single-attempt assignment envelope that binds the card, repository,
+starting revision, assigned branch, allowed paths, stopping point, expiry, and
+interaction profile.
 
 Blocked, altered, expired, reused, or unauthorized assignments fail closed.
 The journey validates the authenticated envelope before each consequential
@@ -232,10 +233,12 @@ Claims and envelopes are kept in authenticated state beside `TASKS.md`. The
 derived `board.md` view shows active claims but never becomes an authority
 source.
 
-`agentic_kanban_pulse` checks the board for ready work and available capacity.
-A check only reports which work is ready to run. It does not claim cards. Interactive host
-work needs explicit policy and one native confirmation for the batch. Automated
-work requires containment and never falls back to the host.
+The `agentic_kanban_pulse` tool checks the board for ready work and available capacity.
+A check only reports which work is ready to run. It does not claim cards.
+
+Interactive host work needs explicit policy and one native confirmation for
+the batch. Automated work requires containment and never falls back to the
+host.
 
 Coming next:
 
@@ -264,7 +267,7 @@ writer's voice.*
 <details>
 <summary><strong>AI;DR, writing review</strong> <em>(released, 0.4.2)</em></summary>
 
-`agentic_aidr` reviews the last assistant response, supplied prose, or a
+The `agentic_aidr` tool reviews the last assistant response, supplied prose, or a
 Markdown file. It checks four principles:
 
 - **Clarity.** Each sentence carries one useful idea.
@@ -304,8 +307,8 @@ QEMU/KVM virtual machine on a Linux host. The job cannot reach the host, the
 network, or anything else outside the machine. The system deletes the machine
 after the job ends.
 
-Isolation is off at the start of every session. You turn it on with
-`/agentic-isolation-enable` in the Pi TUI, and confirm. The model cannot run
+Isolation is off at the start of every session. Use the `/agentic-isolation-enable`
+command in the Pi TUI, and confirm. The model cannot run
 that command. Every cutover run asks for its own confirmation too. Nothing is
 saved to settings, and headless sessions stay blocked.
 
@@ -532,10 +535,9 @@ acceptance with all prohibited effects absent.
 
 ### Portable repository contract
 
-`templates/AGENTS.md` is a starting contract you can copy into any repository
-that uses Pi agents. It asks for controlled tasks and realistic tests, and
-treats agent reports as untrusted evidence. It never overwrites an existing
-`AGENTS.md`; add your project rules below it.
+The `templates/AGENTS.md` file is a starting contract you can copy into any
+repository that uses Pi agents. It asks for controlled tasks and realistic tests, and
+treats agent reports as untrusted evidence. It never overwrites an existing `AGENTS.md`. Add your project rules below it.
 
 ## Install
 
@@ -548,21 +550,21 @@ pi install npm:@evoclock/pi-agentic-driver
 Or from Git at a pinned tag:
 
 ```sh
-pi install git:github.com/evoclock/pi-agentic-driver@v0.9.0
+pi install git:github.com/evoclock/pi-agentic-driver@v0.9.1
 ```
 
-Released extensions load standalone; neither requires the other.
+Released extensions load independently.
 
 ### Choose which extensions load
 
-A normal install loads all six extensions by default. You can load only the
+A normal install loads all packaged extensions by default. You can load only the
 extensions you want with the object form in your Pi settings:
 
 ```json
 {
   "packages": [
     {
-      "source": "npm:@evoclock/pi-agentic-driver@0.9.0",
+      "source": "npm:@evoclock/pi-agentic-driver@0.9.1",
       "extensions": [
         "extensions/aidr.ts",
         "extensions/code-phage.js"
@@ -572,8 +574,8 @@ extensions you want with the object form in your Pi settings:
 }
 ```
 
-The package also includes `herdr-communication.ts`, `herdr-lifecycle.ts`,
-`herdr-dispatch.ts`, and `linux-microvm.ts`. Use `pi config` to enable or
+The package includes the `herdr-communication.ts`, `herdr-lifecycle.ts`, and
+`herdr-dispatch.ts` extensions. It also includes `linux-microvm.ts`. Use `pi config` to enable or
 disable individual resources from an installed package. You are not required
 to use every extension.
 
