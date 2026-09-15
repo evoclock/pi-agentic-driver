@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-only
 
 // BOARD-1 semantic model, closed validator, hash canonicalization, both
 // surface parsers/serializers, the trusted board writer, and the pure

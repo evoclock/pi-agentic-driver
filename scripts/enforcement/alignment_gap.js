@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-only
 
 // Compliance-gap analysis over paired containment runs (design annex §2.2):
 // a disclosed-monitor arm and an undisclosed-monitor arm run the same task

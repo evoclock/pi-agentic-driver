@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-only
 
 // Pulse interactive run, batch context, policy operations, and timer tests
 // (PULSE_DESIGN_v3 §15): immutable single-use batch context, one native

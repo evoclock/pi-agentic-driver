@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-only
 
 // Pulse containment regression tests (PULSE_DESIGN_v3 §2.5, §3.4): Pulse must
 // never represent a container/microvm assignment as contained while starting

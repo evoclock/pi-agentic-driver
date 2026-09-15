@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-only
 
 // Pulse core (PULSE_DESIGN_v3 §2.2, §4, §5): a side-effect-free evaluation of
 // one selected board. It consumes validated board cards, active claim

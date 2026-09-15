@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-only
 
 // Guarded spawn_worker composite capability (Tranche 07). One tool, one closed
 // request, one documented Herdr 0.8.2 layout/start sequence, bounded read-back,
