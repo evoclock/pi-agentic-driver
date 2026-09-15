@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-only
 
 // BOARD-1 dispatch integration tests per evidence/BOARD1_DESIGN_v6.md §3.6/§4:
 // atomic claim, blocked-by gating, automation-policy enforcement, envelope

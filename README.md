@@ -581,5 +581,8 @@ to use every extension.
 
 ## License
 
-AGPL-3.0-or-later with author-attribution additional terms (Section 7(b));
-see [LICENSE](LICENSE). A commercial licence is available on request.
+AGPL-3.0-only with author-attribution additional terms (Section 7(b));
+see [LICENSE](LICENSE). Commercial use, forks, and substantial modifications
+are permitted when all AGPL and attribution obligations are followed. A
+separate commercial licence is available for organisations requiring
+proprietary modifications or other terms incompatible with the AGPL.
