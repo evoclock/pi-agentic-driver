@@ -4,3 +4,6 @@ node_modules/
 
 # Internal planning documents
 .private-planning/
+
+# asgrep code-search index
+.asgrep/
