@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  janus launchd template — label dev.julen.janus (§5).
+
+  Install:
+    cp janus/dev.julen.janus.plist ~/Library/LaunchAgents/
+    # adjust WorkingDirectory to your checkout path
+    launchctl load ~/Library/LaunchAgents/dev.julen.janus.plist
+
+  The service binds 127.0.0.1 only and reads the gateway key from the
+  Keychain at runtime; no environment variables are required.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.julen.janus</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/npx</string>
+        <string>tsx</string>
+        <string>janus/server.ts</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/julen/pi-agentic-driver/janus</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/janus.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/janus.stderr.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
