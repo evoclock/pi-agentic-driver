@@ -19,12 +19,35 @@ import {
   claimCard, claimCardForConfirmedBatch, registerConfirmedBatchForClaims,
 } from "../scripts/enforcement/task_board_core_pi.js";
 import {
-  pulseRun, pulseTick, pulseWorkerSpawnSeam, mintBatchContext, reserveBatchEntry,
+  pulseRun, pulseTick, pulseWorkerSpawnSeam, mintBatchContext as mintBatchContextWithRoutes, reserveBatchEntry,
   releaseBatchEntry,
 } from "../scripts/enforcement/pulse_scheduler_pi.js";
 import { executeHerdrSpawnWorker } from "../scripts/enforcement/herdr_lifecycle_pi.js";
 
 const authority = { source: "instruction", sessionOrReportId: "sess-1", quotedInstruction: "plan the work" };
+const TEST_DIGEST = "a".repeat(64);
+function mintBatchContext(input) {
+  const routeDecisions = input.routeDecisions ?? input.cards.map((card) => ({ ok: true, cardId: card.cardId,
+    digest: TEST_DIGEST, selectedSeatId: "test-seat", accountId: null, provider: "openai",
+    endpointRef: "test-endpoint", model: "zai/glm-5.3", effort: "default", containmentTier: "testudo",
+    reservationId: null, reservationVectors: [], record: { decisionId: `decision-${card.cardId}`, phase: "implement" } }));
+  return mintBatchContextWithRoutes({ ...input, routeDecisions });
+}
+const routerConfig = {
+  schema: "agentic-driver.router-config.v1", revision: 1,
+  endpoints: { "test-endpoint": { url: "http://127.0.0.1:9999", kind: "openai" } },
+  seats: [{ schema: "agentic-driver.seat.v1", seatId: "test-seat", kind: "local", provider: "openai", accountId: null,
+    endpointRef: "test-endpoint", model: "zai/glm-5.3", capabilities: ["implement"], containmentTier: "testudo",
+    maxConcurrency: 4, costClass: "free", quotaCollector: null, clusterMembership: null, enabled: true, deprecated: null }],
+  models: { "zai/glm-5.3": { aliases: [], contextWindow: 100000, capabilities: ["implement"] } }, collectors: {},
+  eligibility: { rules: [], reserve: { floorPercent: 40, scope: "account-window", coldStartFraction: 0.25,
+    estimateSamples: 20, estimateMinSamples: 5, estimateOutlierSigma: 3, ownerInteractiveOverride: false } },
+  preferences: { order: [{ seatId: "test-seat" }], costPolicy: "free-first" },
+  ranking: { enabled: false, janusUrl: "http://127.0.0.1:7431", maxCandidates: 8, fallback: "preference-order" },
+  localHealth: { probeSeconds: 60, warmStateTracking: true }, secrets: {},
+};
+const routerRuntime = { routerConfig, routerSnapshot: { healthObservations: {
+  "test-endpoint": { sourceStatus: "ok", expiresAt: "2099-01-01T00:00:00Z" } }, modelInstalled: new Set(["zai/glm-5.3"]) } };
 
 function freshDir() {
   const dir = mkdtempSync(join(tmpdir(), "pulse-containment-"));
@@ -83,11 +106,12 @@ function tuiContext({ confirmed = true } = {}) {
     mode: "tui",
     hasUI: true,
     ui: { confirm: async () => confirmed },
+    ...routerRuntime,
   };
 }
 
 const registry = { get: (id) => id === "zai/glm-5.3" ? { id } : null, isAuthenticated: () => true };
-const ctx = { modelRegistry: registry, scopedModels: ["zai/glm-5.3"] };
+const ctx = { modelRegistry: registry, scopedModels: ["zai/glm-5.3"], ...routerRuntime };
 
 // Host-spawn tripwire: any call records itself and would fail the test.
 function hostSpawnTripwire(label) {
@@ -192,7 +216,9 @@ function hostBatch(boardPath, ids, dir) {
     instruction: "confirmed host batch",
   });
   for (const id of ids) {
-    batch.entries.push({ cardId: id, cardHash: null, title: id, role: "implementer", model: "zai/glm-5.3", repository: dir, placement: "host", state: "unused" });
+    batch.entries.push({ cardId: id, cardHash: null, title: id, role: "implementer", model: "zai/glm-5.3", repository: dir, placement: "host", state: "unused",
+      seatId: "test-seat", accountId: null, provider: "openai", endpointRef: "test-endpoint", effort: "default",
+      containmentTier: "testudo", phase: "implement", routeDecisionDigest: TEST_DIGEST, reservationId: null });
   }
   return batch;
 }
@@ -337,7 +363,8 @@ test("guard seam: host placement routes through the guarded lifecycle boundary",
   const calls = [];
   const lifecycle = async (params) => { calls.push(params); return { ok: true }; };
   const seam = pulseWorkerSpawnSeam({ executeHerdrSpawnWorker: lifecycle });
-  const host = await seam({ role: "implementer", repository: "/tmp/x", model: "zai/glm-5.3", placement: "host", context: { ...tuiContext(), cwd: "/tmp/x" }, signal: null });
+  const host = await seam({ role: "implementer", repository: "/tmp/x", model: "zai/glm-5.3", provider: "openai", seatId: "test-seat", endpointRef: "test-endpoint",
+    envelope: { model: "zai/glm-5.3", provider: "openai", seatId: "test-seat" }, placement: "host", context: { ...tuiContext(), cwd: "/tmp/x" }, signal: null });
   assert.equal(host.ok, true);
   assert.deepEqual(calls, [{ placement: "tab", role: "implementer", model: "zai/glm-5.3", repository: "x" }]);
 });

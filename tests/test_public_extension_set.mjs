@@ -1,8 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import registerLinuxMicroVMCutover from "../extensions/linux-microvm.ts";
 import { isNativeTuiContext } from "../scripts/enforcement/native_tui_context.js";
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 // The public extension set must not register the legacy agentic_work_mode
 // tool; only the activation-deferred, fail-closed cutover interface ships.
@@ -47,4 +51,52 @@ test("package file list matches the public extension set", () => {
     "extensions/task-board.ts",
   ]);
   assert.ok(pkg.files.includes("scripts/enforcement/herdr_async_dispatch_pi.js"), "missing: dispatch module");
+});
+
+// W1: the router modules are imported by packaged files (pulse_scheduler_pi.js
+// imports router_engine_pi.js/router_store_pi.js; extensions/pulse.ts imports
+// router_runtime_pi.js and through it the remaining router modules). A
+// published package must carry every script its packaged files import, or the
+// Pulse extension fails to import after install. This walks the relative
+// import graph from the packaged set and asserts each resolved script is
+// itself packaged.
+function relativeImportSpecifiers(source) {
+  const specs = new Set();
+  const patterns = [
+    /(?:^|[^\w$.])from\s*["']([^"']+)["']/g,
+    /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
+    /\bimport\s+["']([^"']+)["']/g,
+    /new\s+URL\(\s*["']([^"']+)["']\s*,\s*import\.meta\.url\s*\)/g,
+  ];
+  for (const pattern of patterns) {
+    for (const match of source.matchAll(pattern)) specs.add(match[1]);
+  }
+  return [...specs];
+}
+
+test("packaged file set closes over every relative script it imports", () => {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const packaged = new Set(pkg.files);
+  const queue = pkg.files.filter((file) => /\.(?:js|mjs|ts)$/.test(file));
+  const seen = new Set();
+  const missing = [];
+  while (queue.length > 0) {
+    const file = queue.shift();
+    if (seen.has(file)) continue;
+    seen.add(file);
+    const abs = resolve(REPO_ROOT, file);
+    if (!existsSync(abs)) continue;
+    let source;
+    try { source = readFileSync(abs, "utf8"); } catch { continue; }
+    for (const spec of relativeImportSpecifiers(source)) {
+      if (!spec.startsWith(".")) continue;
+      if (!/\.(?:js|mjs|ts|json)$/.test(spec)) continue;
+      const target = resolve(dirname(abs), spec);
+      if (!existsSync(target)) continue;
+      const rel = target.slice(REPO_ROOT.length + 1);
+      if (!packaged.has(rel)) { missing.push(`${file} imports ${spec} (${rel}) which is not in package.json files`); continue; }
+      if (/\.(?:js|mjs|ts)$/.test(rel)) queue.push(rel);
+    }
+  }
+  assert.deepEqual(missing, [], `packaged import set is incomplete:\n${missing.join("\n")}`);
 });

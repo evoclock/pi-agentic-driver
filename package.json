@@ -4,6 +4,9 @@
   "description": "Guardrail extensions for Agentic Driver: advisory review, bounded Herdr communication, and guarded worker lifecycle.",
   "type": "module",
   "license": "AGPL-3.0-only",
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -70,6 +73,13 @@
     "scripts/enforcement/task_board_core_pi.js",
     "scripts/enforcement/pulse_core_pi.js",
     "scripts/enforcement/pulse_scheduler_pi.js",
+    "scripts/enforcement/router_engine_pi.js",
+    "scripts/enforcement/router_schemas_pi.js",
+    "scripts/enforcement/router_ranking_pi.js",
+    "scripts/enforcement/router_store_pi.js",
+    "scripts/enforcement/router_replacement_pi.js",
+    "scripts/enforcement/router_runtime_pi.js",
+    ".agentic-driver/router.defaults.json",
     "skills/pulse/SKILL.md"
   ],
   "pi": {

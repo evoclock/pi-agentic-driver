@@ -17,12 +17,38 @@ import {
   claimCardForConfirmedBatch, registerConfirmedBatchForClaims,
 } from "../scripts/enforcement/task_board_core_pi.js";
 import {
-  pulseRun, pulseTick, mintBatchContext, reserveBatchEntry, consumeBatchEntry,
+  pulseRun, pulseTick, mintBatchContext as mintBatchContextWithRoutes, reserveBatchEntry, consumeBatchEntry,
   releaseBatchEntry, batchExpired, pulsePolicyOperation, createPulseTimer,
   registerPulseTools, pulseWorkerSpawnSeam,
 } from "../scripts/enforcement/pulse_scheduler_pi.js";
 
 const authority = { source: "instruction", sessionOrReportId: "sess-1", quotedInstruction: "plan the work" };
+const TEST_DIGEST = "a".repeat(64);
+function testRouteDecision(cardId, model = "zai/glm-5.3") {
+  return { ok: true, cardId, digest: TEST_DIGEST, selectedSeatId: "test-seat", accountId: null,
+    provider: "openai", endpointRef: "test-endpoint", model, effort: "default",
+    containmentTier: "testudo", reservationId: null, reservationVectors: [],
+    record: { decisionId: `decision-${cardId}`, phase: "implement" } };
+}
+function mintBatchContext(input) {
+  return mintBatchContextWithRoutes({ ...input, routeDecisions: input.routeDecisions
+    ?? input.cards.map((card) => testRouteDecision(card.cardId)) });
+}
+const routerConfig = {
+  schema: "agentic-driver.router-config.v1", revision: 1,
+  endpoints: { "test-endpoint": { url: "http://127.0.0.1:9999", kind: "openai" } },
+  seats: [{ schema: "agentic-driver.seat.v1", seatId: "test-seat", kind: "local", provider: "openai", accountId: null,
+    endpointRef: "test-endpoint", model: "zai/glm-5.3", capabilities: ["implement"], containmentTier: "testudo",
+    maxConcurrency: 4, costClass: "free", quotaCollector: null, clusterMembership: null, enabled: true, deprecated: null }],
+  models: { "zai/glm-5.3": { aliases: [], contextWindow: 100000, capabilities: ["implement"] } }, collectors: {},
+  eligibility: { rules: [], reserve: { floorPercent: 40, scope: "account-window", coldStartFraction: 0.25,
+    estimateSamples: 20, estimateMinSamples: 5, estimateOutlierSigma: 3, ownerInteractiveOverride: false } },
+  preferences: { order: [{ seatId: "test-seat" }], costPolicy: "free-first" },
+  ranking: { enabled: false, janusUrl: "http://127.0.0.1:7431", maxCandidates: 8, fallback: "preference-order" },
+  localHealth: { probeSeconds: 60, warmStateTracking: true }, secrets: {},
+};
+function routerRuntime() { return { routerConfig, routerSnapshot: { healthObservations: {
+  "test-endpoint": { sourceStatus: "ok", expiresAt: "2099-01-01T00:00:00Z" } }, modelInstalled: new Set(["zai/glm-5.3"]) } }; }
 
 function freshDir() {
   const dir = mkdtempSync(join(tmpdir(), "pulse-run-"));
@@ -85,6 +111,7 @@ function tuiContext({ confirmed = true, modelRegistry = null, scopedModels = nul
     ui: { confirm: async () => confirmed },
     modelRegistry,
     scopedModels,
+    ...routerRuntime(),
   };
 }
 
@@ -96,14 +123,16 @@ test("host spawn seam converts a canonical policy path to its trusted registry n
     executeHerdrSpawnWorker: async (params) => { calls.push(params); return { ok: true }; },
   });
   const result = await seam({
-    role: "implementer", model: "zai/glm-5.3", placement: "host",
+    role: "implementer", model: "zai/glm-5.3", provider: "openai", seatId: "test-seat", placement: "host",
+    envelope: { model: "zai/glm-5.3", provider: "openai", seatId: "test-seat" },
     repository: "/workspace/pi-dev-env", context: { cwd: "/workspace/pi-dev-env" }, signal: null,
   });
   assert.equal(result.ok, true);
   assert.deepEqual(calls, [{ placement: "tab", role: "implementer", model: "zai/glm-5.3", repository: "pi-dev-env" }]);
 
   const mismatch = await seam({
-    role: "implementer", model: "zai/glm-5.3", placement: "host",
+    role: "implementer", model: "zai/glm-5.3", provider: "openai", seatId: "test-seat", placement: "host",
+    envelope: { model: "zai/glm-5.3", provider: "openai", seatId: "test-seat" },
     repository: "/untrusted/pi-dev-env", context: { cwd: "/workspace/pi-dev-env" }, signal: null,
   });
   assert.equal(mismatch.ok, false);
@@ -136,7 +165,7 @@ test("run fails closed headlessly: the one batch confirmation requires the nativ
   const dir = freshDir();
   try {
     const { boardPath } = fixtureBoard(dir);
-    const r = await pulseRun({ boardPath, instruction: "work the ready cards", context: { cwd: dir }, spawnWorker: async () => ({ ok: true }) });
+    const r = await pulseRun({ boardPath, instruction: "work the ready cards", context: { cwd: dir, ...routerRuntime(), modelRegistry: registry, scopedModels: ["zai/glm-5.3"] }, spawnWorker: async () => ({ ok: true }) });
     assert.equal(r.ok, false);
     assert.equal(r.code, "native-confirmation-required");
     assert.equal(r.landedAssignments.length, 0);
@@ -220,7 +249,9 @@ test("run: claim race removes the card from the landed batch and never double-cl
       policy: readAutomationPolicy(boardPath),
       instruction: "pre-claim card 1",
     });
-    preBatch.entries.push({ cardId: ids[0], cardHash: null, title: "Card 1", role: "implementer", model: "zai/glm-5.3", repository: dir, placement: "host", state: "reserved" });
+    preBatch.entries.push({ cardId: ids[0], cardHash: null, title: "Card 1", role: "implementer", model: "zai/glm-5.3", repository: dir, placement: "host", state: "reserved",
+      seatId: "test-seat", accountId: null, provider: "openai", effort: "default", containmentTier: "testudo",
+      phase: "implement", routeDecisionDigest: TEST_DIGEST, reservationId: null });
     registerConfirmedBatchForClaims(preBatch);
     const pre = claimCardForConfirmedBatch({ boardPath, cardId: ids[0], role: "implementer", confirmedBatch: preBatch });
     assert.equal(pre.ok, true);
@@ -391,7 +422,7 @@ test("automated tick: container placement is denied with containment-seam-unavai
     const r = await pulseTick({
       boardPath,
       spawnWorker: async (req) => { spawned.push(req); return { ok: true }; },
-      context: { modelRegistry: registry, scopedModels: ["zai/glm-5.3"] },
+      context: { modelRegistry: registry, scopedModels: ["zai/glm-5.3"], ...routerRuntime() },
     });
     assert.equal(r.ok, true);
     assert.equal(r.skipped, false);

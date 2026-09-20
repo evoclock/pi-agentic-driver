@@ -16,15 +16,23 @@ import { createHmac } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import {
-  writeCard, updateCard, claimCard, readClaims, readClaimsState, reclaimClaim, releaseExpiredClaims,
+  writeCard, updateCard, claimCard as claimCardWithRoute, readClaims, readClaimsState, reclaimClaim, releaseExpiredClaims,
   prepareEnvelopeForExecution, validateEnvelopeForExecution, consumeEnvelope,
-  readAutomationPolicy, checkAutomationPolicy, createEnvelope, isEnvelopeConsumed,
+  readAutomationPolicy, checkAutomationPolicy, createEnvelope as createEnvelopeWithRoute, isEnvelopeConsumed,
   dispatchEligibility, selectDispatchableCard, validateBoard, replaceAttempt,
   writerStatePath, claimsPath, automationPolicyPath,
   projectionPath, registerKanbanBoardTools, ENVELOPE_SCHEMA, canonicalJsonString, withWriterLock,
 } from "../scripts/enforcement/task_board_core_pi.js";
 
 const authority = { source: "instruction", sessionOrReportId: "sess-test", quotedInstruction: "write the card" };
+const TEST_ROUTE_DIGEST = "a".repeat(64);
+function authenticatedRoute(role = "implementer", overrides = {}) {
+  return { seatId: "test-seat", accountId: null, provider: "openai", model: "test/model", role,
+    effort: "default", containmentTier: "testudo", phase: "implement",
+    routeDecisionDigest: TEST_ROUTE_DIGEST, reservationId: null, ...overrides };
+}
+function claimCard(input) { return claimCardWithRoute({ ...input, route: input.route ?? authenticatedRoute(input.role) }); }
+function createEnvelope(input) { return createEnvelopeWithRoute({ ...input, route: input.route ?? authenticatedRoute(input.route?.role) }); }
 
 function freshDir() {
   const dir = mkdtempSync(join(tmpdir(), "board-dispatch-"));
@@ -794,7 +802,7 @@ test("item 5: genuine multi-process race — two OS processes contend on the sam
     const childScript = `
 import { claimCard } from ${JSON.stringify(corePath)};
 import { writeFileSync } from "node:fs";
-const r = claimCard({ boardPath: ${JSON.stringify(boardPath)}, role: "implementer", cardId: ${JSON.stringify(first)} });
+const r = claimCard({ boardPath: ${JSON.stringify(boardPath)}, role: "implementer", cardId: ${JSON.stringify(first)}, route: ${JSON.stringify({seatId:"test-seat",accountId:null,provider:"openai",model:"test/model",role:"implementer",effort:"default",containmentTier:"testudo",phase:"implement",routeDecisionDigest:"a".repeat(64),reservationId:null})} });
 writeFileSync(${JSON.stringify(join(dir, "RESULT-A"))}, JSON.stringify({ ok: r.ok, code: r.code ?? null }));
 `;
     const childScript2 = childScript.replace("RESULT-A", "RESULT-B");
