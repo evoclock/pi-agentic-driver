@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 // Guarded spawn_worker composite capability (Tranche 07). One tool, one closed
-// request, one documented Herdr 0.8.2 layout/start sequence, bounded read-back,
+// request, one documented Herdr layout/start sequence, bounded read-back,
 // and a bounded receipt. This is deliberately NOT a general Herdr management
 // surface: no raw management verbs, no terminal remote control, no model
 // allowlist constant. Pane placement uses pane split directly; tab placement
@@ -767,7 +767,7 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
     }
     canonicalRoot = reconfirmedRoot;
 
-    // Herdr 0.8.2 owns new-shell readiness. Follow its documented topology:
+    // Herdr owns new-shell readiness. Follow its documented topology:
     // split directly for pane placement, or create a tab for tab placement.
     let coordinator = null;
     if (placement !== "tab") {

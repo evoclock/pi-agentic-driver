@@ -111,7 +111,9 @@ only, not a runtime dependency).
 <summary><strong>herdr-communication, controlled role communication</strong> <em>(released, 0.2.1)</em></summary>
 
 The `agentic_herdr_communication` tool exchanges controlled, marked reports with
-configured Pi worker roles running under [Herdr](https://herdr.dev/) 0.8.2.
+configured Pi worker roles running under [Herdr](https://herdr.dev/) (validated
+against 0.9.1; the trust seam accepts the Homebrew-managed herdr binary across
+versions rather than pinning one).
 
 - **List and observe.** Worker roles are filtered to trusted repositories: a
   checked-in registry plus canonical-path validation. Unlisted or
@@ -578,6 +580,27 @@ The package includes the `herdr-communication.ts`, `herdr-lifecycle.ts`, and
 `herdr-dispatch.ts` extensions. It also includes `linux-microvm.ts`. Use `pi config` to enable or
 disable individual resources from an installed package. You are not required
 to use every extension.
+
+## Router configuration
+
+Board Pulse selects a route seat through the capacity/policy router. The
+router reads a closed configuration file and a local-first SQLite file for
+operational state (reservations, observations, route-decision audit).
+
+- **Repository defaults** ship at `.agentic-driver/router.defaults.json`. The
+template contains no accounts and one disabled placeholder seat, so it loads
+out of the box and schedules nothing until you enable a real seat.
+- **User profile (precedence over defaults):**
+`~/.config/agentic-driver/router/profile.json`, or the path in the
+`AGENTIC_DRIVER_ROUTER_PROFILE` environment variable. A profile section
+replaces the matching defaults section wholesale; the merged config must
+validate or the router refuses to produce decisions (fails closed).
+- **Operational state:** `~/.local/share/agentic-driver/router/state.db`, or
+`AGENTIC_DRIVER_ROUTER_DB`. This store is operational state only. The
+authenticated claims file and the board writer remain the only dispatch
+authority, and SQLite is repaired from them, never the reverse.
+- **Runtime requirement:** the operational store uses the built-in
+`node:sqlite` module. Node.js 22.5 or newer is required.
 
 ## License
 

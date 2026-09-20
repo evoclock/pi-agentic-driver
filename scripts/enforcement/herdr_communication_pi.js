@@ -14,7 +14,7 @@ import { resolve } from "node:path";
 
 export const HERDR_COMMUNICATION_TOOL = "agentic_herdr_communication";
 export const HERDR_COMMUNICATION_SCHEMA = "agentic-driver.herdr-communication.v1";
-export const HERDR_VERSION = "0.8.2";
+export const HERDR_VERSION = "0.9.1";
 // One versioned policy: every schema-valid dynamic role is eligible except the
 // coordinator class (`coordinator` and `coordinator-*`).
 export const HERDR_ROLE_POLICY = Object.freeze({
@@ -25,12 +25,17 @@ export const HERDR_ROLE_PATTERN = "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$";
 const HERDR_ROLE_REGEXP = new RegExp(HERDR_ROLE_PATTERN);
 export const HERDR_COMMUNICATION_ACTIONS = Object.freeze(["list", "get", "prompt", "wait", "read"]);
 
-// The Homebrew link is the configured driver-node path observed for Herdr 0.8.2.
-// It is deliberately not resolved through PATH or HERDR_BIN_PATH.  A package
-// upgrade changes the realpath and therefore fails closed until this pin is
-// reviewed.  Linux callers have no configured production path in this package.
+// The Homebrew link is the configured driver-node path. It is deliberately
+// not resolved through PATH or HERDR_BIN_PATH. The realpath is validated as
+// <Cellar root>/herdr/<any-version>/bin/herdr so a Homebrew upgrade does not
+// break the trust seam: the executable must be the Homebrew-managed herdr
+// binary (same path family), executable, and a regular file, but the version
+// number is not pinned because pinning would break every package upgrade.
+// The semantic version constant above records the version this integration was
+// last validated against and is advisory only. Linux callers have no
+// configured production path in this package.
 export const TRUSTED_HERDR_EXECUTABLE = "/opt/homebrew/bin/herdr";
-const TRUSTED_HERDR_REALPATH_FRAGMENT = `/Cellar/herdr/${HERDR_VERSION}/bin/herdr`;
+const TRUSTED_HERDR_REALPATH_PATTERN = /\/Cellar\/herdr\/[0-9]+\.[0-9]+\.[0-9]+\/bin\/herdr$/;
 const WORKER_REPOSITORY_REGISTRY = "config/herdr-worker-repositories.v1.json";
 const WORKER_REPOSITORY_SCHEMA = "agentic-driver.herdr-worker-repositories.v1";
 const WORKER_REPOSITORY_FIELDS = new Set(["schema", "repositories"]);
@@ -427,7 +432,7 @@ function productionExecutable() {
     real = realpathSync(TRUSTED_HERDR_EXECUTABLE);
     const stat = statSync(real);
     accessSync(real, fsConstants.X_OK);
-    if (!stat.isFile() || !real.endsWith(TRUSTED_HERDR_REALPATH_FRAGMENT)) throw new Error("version mismatch");
+    if (!stat.isFile() || !TRUSTED_HERDR_REALPATH_PATTERN.test(real)) throw new Error("trust mismatch");
   } catch {
     throw communicationError("trusted_executable_unavailable", `the configured Herdr ${HERDR_VERSION} executable was not observed`);
   }
