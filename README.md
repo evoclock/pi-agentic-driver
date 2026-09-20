@@ -1,4 +1,4 @@
-# pi-agentic-driver v0.9.2
+# pi-agentic-driver
 
 <p align="center">
   <img src="assets/Yamagane-origami.png" alt="pi-agentic-driver, Yamagane origami mark" width="140"/>
