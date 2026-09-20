@@ -169,11 +169,12 @@ routing decisions computed under the old values no longer apply.
 | seat record | `maxConcurrency` | 4 | How many workers one seat may run at once. The default suits a typical single machine or hosted seat. Tune it per seat: a cluster takes more, a constrained subscription endpoint may take less. |
 | automation policy | `maxConcurrent` | 4 | How many workers may run at once across all seats. The default is a conservative start. Tune it to the capacity you actually have, and raise it when you add seats or hardware. |
 
-Seats are named for infrastructure, not models: `dgx-spark-cluster`,
-`mac-studio`, `merge-gateway-worker`. The model is a mutable field on the
-seat, so changing models never renumbers your configuration. Each seat also
-carries `scopeStatements`: plain-language descriptions of what the seat is
-for. The dispatch gate reads them when judging whether a task fits.
+Seats are named for infrastructure, not models: `dgx-spark`,
+`dgx-spark-cluster`, `mac-studio`, `mac-studio-cluster`, `strix-halo`,
+`strix-halo-cluster`, `merge-gateway-worker`. The model is a mutable field on
+the seat, so changing models never renumbers your configuration. Each seat
+also carries `scopeStatements`: plain-language descriptions of what the seat
+is for. The dispatch gate reads them when judging whether a task fits.
 
 </details>
 

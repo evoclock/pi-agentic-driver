@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  janus launchd template — a STARTING POINT, not a finished service file.
+  Everything marked ADJUST below is user-specific by design; the template
+  ships with placeholders because the label, paths, and log locations belong
+  to the user's machine, not to this repository.
+
+  Install:
+    1. Copy the template somewhere out of the repo:
+         cp janus/user.janus.plist ~/Library/LaunchAgents/user.janus.plist
+    2. ADJUST the values marked below (Label, WorkingDirectory, log paths).
+    3. Load it:
+         launchctl load ~/Library/LaunchAgents/user.janus.plist
+
+  The service binds 127.0.0.1 only and reads the gateway key from the
+  Keychain at runtime; no environment variables are required.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <!-- ADJUST: any label you like; the file name should match it. -->
+    <string>user.janus</string>
+    <key>ProgramArguments</key>
+    <array>
+        <!-- ADJUST if your tooling lives elsewhere (e.g. /usr/local/bin/npx). -->
+        <string>/opt/homebrew/bin/npx</string>
+        <string>tsx</string>
+        <string>janus/server.ts</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <!-- ADJUST: the janus/ directory of your checkout. -->
+    <string>/path/to/pi-agentic-driver/janus</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <!-- ADJUST: where stdout goes. -->
+    <string>/tmp/janus.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <!-- ADJUST: where stderr goes. -->
+    <string>/tmp/janus.stderr.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <!-- ADJUST if your npx lives on a different PATH. -->
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
