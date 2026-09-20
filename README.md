@@ -626,8 +626,8 @@ routing decisions computed under the old values no longer apply.
 | `gate` | `threshold` | 0.9 | The dispatch gate's confidence threshold. A task is only dispatched when the evaluation clears it. Lower it only with evidence from your own audit log. |
 | `gate` | `timeoutMs` | 8000 | How long the gate waits for an evaluation. On timeout there is no verdict and dispatch is blocked (fail closed). |
 | `gate` | `requestBudgetTokens` | 30000 | Maximum size of a gate evaluation request. Normal evaluations use under a thousand tokens. |
-| seat record | `maxConcurrency` | — required, no default | How many workers one seat may run at once. You set it per seat because a cluster, a single machine, and a subscription endpoint have different real limits. |
-| automation policy | `maxConcurrent` | — required, no default | How many workers may run at once across all seats. Your explicit ceiling; the system never guesses it. |
+| seat record | `maxConcurrency` | 4 | How many workers one seat may run at once. The default suits a typical single machine or hosted seat. Tune it per seat: a cluster takes more, a constrained subscription endpoint may take less. |
+| automation policy | `maxConcurrent` | 4 | How many workers may run at once across all seats. The default is a conservative start. Tune it to the capacity you actually have, and raise it when you add seats or hardware. |
 
 Seats are named for infrastructure, not models: `dgx-spark-cluster`,
 `mac-studio`, `merge-gateway-worker`. The model is a mutable field on the
