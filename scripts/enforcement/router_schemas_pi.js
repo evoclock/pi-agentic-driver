@@ -28,9 +28,16 @@ export const QUOTA_OBSERVATION_SCHEMA = "agentic-driver.quota-observation.v1";
 // ---------------------------------------------------------------------------
 
 export const SEAT_KINDS = Object.freeze(["local", "hosted-api", "subscription"]);
-export const PROVIDERS = Object.freeze([
-  "llama-server", "merge-gateway", "vercel-ai-gateway", "anthropic", "openai",
+// Built-in provider registry: the most common API routers plus the local
+// serving adapter. Users extend this list through the config's
+// `providers` section — the registry is OPEN by configuration, closed by
+// default. Nothing in the code branches on specific provider names.
+export const BUILTIN_PROVIDERS = Object.freeze([
+  "openrouter", "vercel-ai-gateway", "opencode", "fireworks-ai", "baseten",
+  "particle-ai", "cerebras", "together-ai", "merge-gateway", "anthropic",
+  "openai", "llama-server",
 ]);
+export const PROVIDERS = BUILTIN_PROVIDERS;
 export const CAPABILITIES = Object.freeze([
   "implement", "review", "final-verification", "design", "research",
 ]);
@@ -73,7 +80,7 @@ function isPosInt(value) {
 // §2 Seat record: agentic-driver.seat.v1
 // ---------------------------------------------------------------------------
 
-export function wellFormedSeat(seat, { endpoints = null } = {}) {
+export function wellFormedSeat(seat, { endpoints = null, providerRegistry = BUILTIN_PROVIDERS } = {}) {
   if (!isPlainObject(seat) || !exactKeys(seat, [
     "schema", "seatId", "kind", "provider", "accountId", "endpointRef",
     "model", "capabilities", "containmentTier", "maxConcurrency",
@@ -88,8 +95,8 @@ export function wellFormedSeat(seat, { endpoints = null } = {}) {
   if (!SEAT_KINDS.includes(seat.kind)) {
     return { ok: false, reason: `seat kind "${seat.kind}" is not one of ${SEAT_KINDS.join(", ")}` };
   }
-  if (!PROVIDERS.includes(seat.provider)) {
-    return { ok: false, reason: `seat provider "${seat.provider}" is not in the closed provider registry` };
+  if (!providerRegistry.includes(seat.provider)) {
+    return { ok: false, reason: `seat provider "${seat.provider}" is not in the provider registry (built-ins plus configured extensions)` };
   }
   // accountId is REQUIRED iff kind is subscription (§2).
   if (seat.kind === "subscription") {
@@ -191,11 +198,24 @@ export const ELIGIBILITY_RULES = Object.freeze([
 
 export function validateRouterConfig(config) {
   if (!isPlainObject(config)) return { ok: false, errors: ["router config must be an object"] };
-  if (!exactKeys(config, [
+  // exactKeys closed, with one governed extension point: the optional
+  // "providers" section (user-added provider ids). Built-ins always apply;
+  // extensions add to them, never remove.
+  const requiredKeys = [
     "schema", "revision", "endpoints", "seats", "models", "collectors",
     "eligibility", "preferences", "ranking", "localHealth", "secrets",
-  ])) {
-    return { ok: false, errors: ["router config has unknown or missing fields (exactKeys closed)"] };
+  ];
+  const optionalKeys = ["providers"];
+  const actualKeys = Object.keys(config).sort();
+  const allowed = [...requiredKeys, ...optionalKeys].sort();
+  const missing = requiredKeys.filter((key) => !actualKeys.includes(key));
+  const unknown = actualKeys.filter((key) => !allowed.includes(key));
+  if (missing.length || unknown.length) {
+    return { ok: false, errors: [
+      `router config has unknown or missing fields (exactKeys closed)` +
+      (missing.length ? `; missing: ${missing.join(", ")}` : "") +
+      (unknown.length ? `; unknown: ${unknown.join(", ")}` : ""),
+    ] };
   }
   const errors = [];
   if (config.schema !== ROUTER_CONFIG_SCHEMA) {
@@ -203,6 +223,36 @@ export function validateRouterConfig(config) {
   }
   if (!isPosInt(config.revision)) {
     errors.push("config revision must be a positive integer");
+  }
+  // providers{}: optional user extension of the registry. Each entry is a
+  // slug; entries add to the built-ins, never shadow or remove them.
+  let providerRegistry = BUILTIN_PROVIDERS;
+  if (config.providers !== undefined) {
+    if (!isPlainObject(config.providers) || Object.keys(config.providers).length === 0) {
+      errors.push("providers must be a non-empty object keyed by provider slug when present");
+    } else {
+      const extended = [];
+      for (const [name, entry] of Object.entries(config.providers)) {
+        if (!SLUG_RE.test(name) || name.length > 64) {
+          errors.push(`provider "${name}" must be a slug (max 64 chars)`);
+          continue;
+        }
+        if (BUILTIN_PROVIDERS.includes(name)) {
+          errors.push(`provider "${name}" shadows a built-in provider`);
+          continue;
+        }
+        // Entry shape is closed: {auth} — how the provider authenticates.
+        // "keychain" (default posture) is the only supported auth kind at
+        // launch; the entry exists so provider addition needs no code change.
+        if (!isPlainObject(entry) || !exactKeys(entry, ["auth"])
+          || entry.auth !== "keychain") {
+          errors.push(`provider "${name}" must have exactly {auth: "keychain"}`);
+          continue;
+        }
+        extended.push(name);
+      }
+      providerRegistry = Object.freeze([...BUILTIN_PROVIDERS, ...extended]);
+    }
   }
   // endpoints{}: named, closed-shape endpoint records. URLs are validated
   // structurally (http/https); there is no unrestricted-URL escape hatch.
@@ -222,8 +272,8 @@ export function validateRouterConfig(config) {
         || !/^https?:\/\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+$/.test(endpoint.url)) {
         errors.push(`endpoint "${name}" url must be an http(s) URL`);
       }
-      if (!PROVIDERS.includes(endpoint.kind)) {
-        errors.push(`endpoint "${name}" kind "${endpoint.kind}" is not in the closed provider registry`);
+      if (!providerRegistry.includes(endpoint.kind)) {
+        errors.push(`endpoint "${name}" kind "${endpoint.kind}" is not in the provider registry (built-ins plus configured extensions)`);
       }
     }
   }
@@ -233,7 +283,7 @@ export function validateRouterConfig(config) {
   } else {
     const seen = new Set();
     for (const seat of config.seats) {
-      const check = wellFormedSeat(seat, { endpoints: config.endpoints });
+      const check = wellFormedSeat(seat, { endpoints: config.endpoints, providerRegistry });
       if (!check.ok) {
         errors.push(`seat ${seat?.seatId ?? "(unidentified)"}: ${check.reason}`);
         continue;
@@ -408,8 +458,8 @@ export function validateRouterConfig(config) {
     errors.push("secrets must be an object keyed by provider id");
   } else {
     for (const [provider, ref] of Object.entries(config.secrets)) {
-      if (!PROVIDERS.includes(provider)) {
-        errors.push(`secrets key "${provider}" is not in the closed provider registry`);
+      if (!providerRegistry.includes(provider)) {
+        errors.push(`secrets key "${provider}" is not in the provider registry (built-ins plus configured extensions)`);
         continue;
       }
       if (!isPlainObject(ref) || !exactKeys(ref, SECRET_REF_FIELDS)

@@ -93,11 +93,17 @@ Config is read from `~/.config/typesafe-ai/jev/janus-config.json`
 }
 ```
 
-launchd (label `dev.julen.janus`) — template at `janus/dev.julen.janus.plist`:
+launchd — template at `janus/user.janus.plist`. The template is a starting
+point: every user-specific value (the label, the checkout path, log
+locations) is marked ADJUST in the file. Copy it out of the repository,
+adjust it, then load it:
 
 ```sh
-cp janus/dev.julen.janus.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/dev.julen.janus.plist
+cp janus/user.janus.plist ~/Library/LaunchAgents/
+```
+
+```sh
+launchctl load ~/Library/LaunchAgents/user.janus.plist
 ```
 
 Tests (no live gateway calls — the SDK is mocked):
@@ -200,5 +206,5 @@ janus/
     evaluate.ts        /evaluate pipeline + SDK error classification
     server.ts          HTTP surface, loopback bind, entrypoint
   tests/               node:test suites (mocked SDK, no live calls)
-  dev.julen.janus.plist  launchd template
+  user.janus.plist  launchd template
 ```
