@@ -2,7 +2,7 @@
   "name": "@evoclock/janus",
   "version": "0.1.0",
   "private": true,
-  "description": "janus — Jev evaluation wrapper service. The only AI SDK import site in pi-agentic-driver.",
+  "description": "janus \u2014 Jev evaluation wrapper service. The only AI SDK import site in pi-agentic-driver.",
   "type": "module",
   "license": "AGPL-3.0-only",
   "engines": {
@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@typesafe-ai/sdk": "0.6.0",
-    "redaction": "file:../../typesafe-secure/lib/redaction"
+    "@evoclock/redaction": "^0.1.0"
   },
   "devDependencies": {
     "@types/node": "24.10.9",

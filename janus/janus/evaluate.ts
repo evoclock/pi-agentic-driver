@@ -18,7 +18,7 @@ import { estimateRequestTokens, evalInputDigest } from "./budget.js";
 // Shared redaction library (typesafe-secure/lib/redaction, MIT — the canonical
 // implementation). Unconditional, no disable knob (SPEC A3.1); markers are
 // typed per SPEC A2.2 (`[REDACTED:<type>]`, `[REDACTED:sensitive_key]`).
-import { redactValue } from "redaction";
+import { redactValue } from "@evoclock/redaction";
 import { SingleFlight } from "./single_flight.js";
 import { DailyBudget, type UsageRecord } from "./budget_breaker.js";
 import { AuditLog } from "./audit.js";

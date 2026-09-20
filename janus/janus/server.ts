@@ -237,7 +237,7 @@ export function buildService(config: JanusConfig): JanusService {
   };
 }
 
-/** Entry point: `npx tsx janus/server.ts` (dev) or launchd (label dev.julen.janus). */
+/** Entry point: `npx tsx janus/server.ts` (dev) or launchd (label user.janus). */
 export function main(): void {
   const configPath = process.env.JANUS_CONFIG_PATH;
   const { config, warnings } = loadConfig(configPath || undefined);
