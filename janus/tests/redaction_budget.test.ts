@@ -3,10 +3,17 @@
 
 // Unit tests: the secrets/PII redaction pass (§7, M10) and the token budget
 // with state_too_large rejection (§2).
+//
+// Redaction semantics come from the shared library (typesafe-secure
+// lib/redaction, MIT — SPEC.md DRAFT v1.1), which replaces janus's legacy
+// janus/redact.ts. SPEC-normative divergences from the legacy module are
+// asserted here: typed markers `[REDACTED:<type>]` / `[REDACTED:sensitive_key]`
+// (SPEC A2.2), and the github_pat_classic shape floor of ≥36 chars (SPEC A4
+// row 2), under which a short `ghp_…` lookalike survives verbatim.
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { redactString, redactValue } from "../janus/redact.js";
+import { redactString, redactValue } from "redaction/src/index.js";
 import { estimateRequestTokens, estimateStringTokens, evalInputDigest, canonicalJson } from "../janus/budget.js";
 import { JanusError } from "../janus/errors.js";
 import { enforceRequest } from "../janus/schema.js";
@@ -17,37 +24,41 @@ import { DailyBudget } from "../janus/budget_breaker.js";
 import { AuditLog } from "../janus/audit.js";
 
 test("redaction: API keys and tokens", () => {
-  assert.equal(redactString("key AKIAIOSFODNN7EXAMPLE in config"), "key [REDACTED] in config");
-  assert.equal(redactString("ghp_abcdefghijklmnopqrstuvwxyzyx"), "[REDACTED]");
-  assert.equal(redactString("sk-proj-abcdefghijklmnopqrst"), "[REDACTED]");
-  assert.equal(redactString("xoxb-123456789-abcdef"), "[REDACTED]");
-  assert.equal(redactString("AIzaSyA1234567890abcdefghijklmnopqrstuv"), "[REDACTED]");
+  assert.equal(redactString("key AKIAIOSFODNN7EXAMPLE in config"), "key [REDACTED:aws_access_key] in config");
+  // SPEC A4 row 2: github_pat_classic requires ≥36 chars after `ghp_`; the
+  // legacy janus rule matched ≥20 and redacted a 28-char lookalike. SPEC wins:
+  // the short lookalike survives, a real-length PAT is redacted.
+  assert.equal(redactString("ghp_abcdefghijklmnopqrstuvwxyzyx"), "ghp_abcdefghijklmnopqrstuvwxyzyx");
+  assert.equal(redactString("ghp_abcdefghijklmnopqrstuvwxyz0123456789ab"), "[REDACTED:github_pat_classic]");
+  assert.equal(redactString("sk-proj-abcdefghijklmnopqrst"), "[REDACTED:openai_key]");
+  assert.equal(redactString("xoxb-123456789-abcdef"), "[REDACTED:slack_token]");
+  assert.equal(redactString("AIzaSyA1234567890abcdefghijklmnopqrstuv"), "[REDACTED:google_api_key]");
 });
 
 test("redaction: JWTs and bearer headers", () => {
   assert.equal(
     redactString("auth eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c done"),
-    "auth [REDACTED] done",
+    "auth [REDACTED:jwt] done",
   );
   assert.equal(
     redactString("Authorization: Bearer abc123.def456"),
-    "Authorization: [REDACTED]",
+    "Authorization: [REDACTED:bearer_authorization]",
   );
 });
 
 test("redaction: private key blocks", () => {
   const text = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nabc\n-----END RSA PRIVATE KEY-----";
-  assert.equal(redactString(text), "[REDACTED]");
+  assert.equal(redactString(text), "[REDACTED:private_key_block]");
 });
 
 test("redaction: assigned secrets keep the key name, drop the value", () => {
-  assert.equal(redactString('password: "hunter2secret"'), "password: [REDACTED]");
-  assert.equal(redactString("api_key=abcd1234efgh"), "api_key: [REDACTED]");
+  assert.equal(redactString('password: "hunter2secret"'), "password: [REDACTED:assigned_secret]");
+  assert.equal(redactString("api_key=abcd1234efgh"), "api_key: [REDACTED:assigned_secret]");
 });
 
 test("redaction: emails and SSNs", () => {
-  assert.equal(redactString("contact jane.doe@example.com now"), "contact [REDACTED] now");
-  assert.equal(redactString("ssn 123-45-6789"), "ssn [REDACTED]");
+  assert.equal(redactString("contact jane.doe@example.com now"), "contact [REDACTED:email] now");
+  assert.equal(redactString("ssn 123-45-6789"), "ssn [REDACTED:ssn]");
 });
 
 test("redaction: credit-card-shaped digits masked, benign numbers kept", () => {
@@ -64,12 +75,15 @@ test("redaction: recursive over objects and arrays; sensitive keys dropped", () 
     list: ["token=abcd1234efgh", 5, null],
   };
   const output = redactValue(input) as Record<string, unknown>;
-  assert.equal(output.user, "[REDACTED]");
-  assert.equal(output.password, "[REDACTED]");
+  assert.equal(output.user, "[REDACTED:email]");
+  assert.equal(output.password, "[REDACTED:sensitive_key]");
   const nested = output.nested as Record<string, unknown>;
-  assert.equal(nested.apiKey, "[REDACTED]");
+  // `apiKey` as an object KEY is itself in the closed sensitive-key registry
+  // (SPEC A2.6: apikey) — the all-type key drop fires (A3.2) before any
+  // string rule, exactly as the legacy key regex did.
+  assert.equal(nested.apiKey, "[REDACTED:sensitive_key]");
   assert.equal(nested.note, "clean");
-  assert.equal((output.list as unknown[])[0], "token: [REDACTED]");
+  assert.equal((output.list as unknown[])[0], "token: [REDACTED:assigned_secret]");
   assert.equal((output.list as unknown[])[1], 5);
 });
 
@@ -83,15 +97,15 @@ test("redaction: sensitive-key values dropped regardless of shape (review fix #4
     secret: { nested: { deeper: ["x"] } },
   };
   const output = redactValue(input) as Record<string, unknown>;
-  assert.equal(output.credentials, "[REDACTED]");
-  assert.equal(output.token, "[REDACTED]");
-  assert.equal(output.apiKey, "[REDACTED]");
-  assert.equal(output.private_key, "[REDACTED]");
-  assert.equal(output.authorization, "[REDACTED]");
-  assert.equal(output.secret, "[REDACTED]");
+  assert.equal(output.credentials, "[REDACTED:sensitive_key]");
+  assert.equal(output.token, "[REDACTED:sensitive_key]");
+  assert.equal(output.apiKey, "[REDACTED:sensitive_key]");
+  assert.equal(output.private_key, "[REDACTED:sensitive_key]");
+  assert.equal(output.authorization, "[REDACTED:sensitive_key]");
+  assert.equal(output.secret, "[REDACTED:sensitive_key]");
   // Nested objects under non-sensitive keys still get traversed.
   const wrapper = redactValue({ meta: { password: "leak" } }) as Record<string, unknown>;
-  assert.equal((wrapper.meta as Record<string, unknown>).password, "[REDACTED]");
+  assert.equal((wrapper.meta as Record<string, unknown>).password, "[REDACTED:sensitive_key]");
 });
 
 test("budget: conservative bound dominates chars/4 for CJK, emoji, and dense JSON (review fix #3)", () => {
@@ -208,6 +222,6 @@ test("end-to-end: redaction runs before the SDK call", async () => {
   });
   assert.equal(response.status, 200);
   const state = seen[0]?.state as Record<string, unknown>;
-  assert.equal(state.note, "email [REDACTED]");
-  assert.equal(state.password, "[REDACTED]");
+  assert.equal(state.note, "email [REDACTED:email]");
+  assert.equal(state.password, "[REDACTED:sensitive_key]");
 });

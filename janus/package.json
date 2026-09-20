@@ -15,7 +15,8 @@
     "test": "node --test --import tsx tests/*.test.ts"
   },
   "dependencies": {
-    "@typesafe-ai/sdk": "0.6.0"
+    "@typesafe-ai/sdk": "0.6.0",
+    "redaction": "file:../../typesafe-secure/lib/redaction"
   },
   "devDependencies": {
     "@types/node": "24.10.9",

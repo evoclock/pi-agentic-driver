@@ -176,7 +176,8 @@ janus/
     schema.ts          §6 question schema v1 enforcement (atomic fail-closed)
     verdict.ts         verdict enforcement (membership, ranges, thresholds)
     budget.ts          token estimation, 30k budget, evalInputDigest
-    redact.ts          secrets/PII redaction pass
+                       redaction pass: shared library typesafe-secure
+                       lib/redaction (MIT), wired via a file: dependency
     keychain.ts        guarded `security find-generic-password -w` capture
     single_flight.ts   digest coalescing + concurrency cap
     budget_breaker.ts  daily token/cost breaker

@@ -15,7 +15,10 @@ import { MAX_STATE_BYTES, MAX_TIMEOUT_MS } from "./config.js";
 import { JanusError, timeoutError } from "./errors.js";
 import { enforceRequest, type EnforcedQuestion } from "./schema.js";
 import { estimateRequestTokens, evalInputDigest } from "./budget.js";
-import { redactValue } from "./redact.js";
+// Shared redaction library (typesafe-secure/lib/redaction, MIT — the canonical
+// implementation). Unconditional, no disable knob (SPEC A3.1); markers are
+// typed per SPEC A2.2 (`[REDACTED:<type>]`, `[REDACTED:sensitive_key]`).
+import { redactValue } from "redaction/src/index.js";
 import { SingleFlight } from "./single_flight.js";
 import { DailyBudget, type UsageRecord } from "./budget_breaker.js";
 import { AuditLog } from "./audit.js";
