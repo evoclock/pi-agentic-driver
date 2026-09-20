@@ -1,0 +1,64 @@
+{
+  "schema": "agentic-driver.router-config.v1",
+  "revision": 1,
+  "endpoints": {
+    "local-default": {
+      "url": "http://127.0.0.1:8080",
+      "kind": "llama-server"
+    }
+  },
+  "seats": [
+    {
+      "schema": "agentic-driver.seat.v1",
+      "seatId": "local-default",
+      "kind": "local",
+      "provider": "llama-server",
+      "accountId": null,
+      "endpointRef": "local-default",
+      "model": "replace-with-installed-model",
+      "capabilities": ["implement", "review"],
+      "containmentTier": "none",
+      "maxConcurrency": 1,
+      "costClass": "free",
+      "quotaCollector": null,
+      "clusterMembership": null,
+      "enabled": false,
+      "deprecated": null
+    }
+  ],
+  "models": {
+    "replace-with-installed-model": {
+      "aliases": [],
+      "contextWindow": 32768,
+      "capabilities": ["implement", "review"]
+    }
+  },
+  "collectors": {},
+  "eligibility": {
+    "rules": [],
+    "reserve": {
+      "floorPercent": 40,
+      "scope": "account-window",
+      "coldStartFraction": 0.25,
+      "estimateSamples": 20,
+      "estimateMinSamples": 5,
+      "estimateOutlierSigma": 3,
+      "ownerInteractiveOverride": false
+    }
+  },
+  "preferences": {
+    "order": [{ "seatId": "local-default" }],
+    "costPolicy": "free-first"
+  },
+  "ranking": {
+    "enabled": false,
+    "janusUrl": "http://127.0.0.1:7431",
+    "maxCandidates": 8,
+    "fallback": "preference-order"
+  },
+  "localHealth": {
+    "probeSeconds": 60,
+    "warmStateTracking": true
+  },
+  "secrets": {}
+}

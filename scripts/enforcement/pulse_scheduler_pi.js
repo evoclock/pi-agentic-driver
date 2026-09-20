@@ -22,6 +22,8 @@ import {
   automationPolicyPath, PLACEMENTS,
 } from "./task_board_core_pi.js";
 import { scanBoard } from "./pulse_core_pi.js";
+import { routeDecision } from "./router_engine_pi.js";
+import { createReservation, claimReservation, renewReservationLease, consumeReservation, releaseReservation, insertRouteDecision } from "./router_store_pi.js";
 import { isNativeTuiContext } from "./native_tui_context.js";
 
 // ---------------------------------------------------------------------------
@@ -98,7 +100,7 @@ export function observeModelAvailability({ pulsePolicy = null, modelRegistry = n
 
 // One pure board scan for the manual check. Returns a structured result; it
 // never claims and never mutates anything.
-export function pulseCheck({ boardPath, modelRegistry = null, scopedModels = null, observedAt = null }) {
+export function pulseCheck({ boardPath, modelRegistry = null, scopedModels = null, observedAt = null, activeSessions = [], providerLimit = null }) {
   const base = observeBoardForPulse({ boardPath });
   if (!base.ok) return base;
   const { validated, pulsePolicy, effectivePolicy } = base;
@@ -115,8 +117,32 @@ export function pulseCheck({ boardPath, modelRegistry = null, scopedModels = nul
     declaredModels,
     observedAt,
     placement: pulsePolicy ? effectivePolicy.placement : null,
+    activeSessions, providerLimit,
   });
-  return { ok: true, code: null, reason: null, scan, diagnosticHash, validated, effectivePolicy, pulsePolicy, activeClaims };
+  return { ok: true, code: null, reason: null, scan, diagnosticHash, validated, effectivePolicy, pulsePolicy, activeClaims, activeSessions, providerLimit };
+}
+
+export async function routePulseCheck(check, { routerConfig, quotaObservations = [], healthObservations = {}, consumptionSamples = [], existingReservations = [], modelInstalled = null, janusRank = null, now = null } = {}) {
+  if (!check?.ok || !routerConfig) return { ok: false, code: "router-unavailable", reason: "validated router configuration is required" };
+  const decisions = [];
+  const proposed = new Set((check.scan.proposedDispatches ?? []).map((p) => p.title));
+  for (const card of check.validated.cards) {
+    if (!proposed.has(card.title)) continue;
+    const role = check.scan.cards.find((c) => c.title === card.title)?.role ?? "implementer";
+    const routeModels = [...(check.pulsePolicy?.routing?.[role]?.preferred ?? []), ...(check.pulsePolicy?.routing?.[role]?.fallback ?? [])].map((r) => r.model);
+    const policyRouteSeatIds = routerConfig.seats.filter((s) => routeModels.includes(s.model)).map((s) => s.seatId);
+    const freeCapacityBySeat = Object.fromEntries(routerConfig.seats.map((s) => [s.seatId,
+      check.scan.capacity.find((c) => c.role === role && c.model === s.model)?.free ?? 0]));
+    const decision = await routeDecision({ card: { ...card, role }, config: routerConfig,
+      snapshotDigest: check.diagnosticHash, policyRouteSeatIds, healthObservations,
+      quotaObservations, consumptionSamples, existingReservations, activeSessions: check.activeSessions,
+      freeCapacityBySeat, modelInstalled, janusRank, now: now ?? new Date().toISOString() });
+    if (!decision.ok) {
+      return { ok: false, code: "route-unavailable", reason: decision.reason ?? `no eligible route for card ${card.cardId}` };
+    }
+    decisions.push({ ...decision, cardId: card.cardId });
+  }
+  return { ok: true, decisions };
 }
 
 // Shared trusted resolution: board parse/validation + policy read/validate.
@@ -158,7 +184,7 @@ const BATCH_INTERACTIVE_TTL_MS = 5 * 60 * 1000;
 // set covers the FULL currently eligible candidate list (every READY_FOR_NEXT
 // card), not only initially free slots; refill consumes it lazily. It is
 // extension-memory state, never model input or durable authority.
-export function mintBatchContext({ scan, cards, policy, instruction, now = null, batchId = null }) {
+export function mintBatchContext({ scan, cards, policy, instruction, now = null, batchId = null, routeDecisions = null }) {
   if (scan?.schema !== "agentic-driver.board-pulse.v1") {
     throw new Error("mintBatchContext requires a pulse scan");
   }
@@ -176,14 +202,25 @@ export function mintBatchContext({ scan, cards, policy, instruction, now = null,
     else byTitle.set(card.title, card);
   }
   const proposalByTitle = new Map((scan.proposedDispatches ?? []).map((p) => [p.title, p]));
+  // Route decisions (router design §1/§8.1): keyed by cardId. The scheduler
+  // carries the decision's identity (seatId, provider, model, digest,
+  // reservationId) into the batch entry — it never recomputes a route.
+  const decisionByCardId = new Map(
+    (routeDecisions ?? []).filter((d) => d?.ok && typeof d?.record?.decisionId === "string")
+      .map((d) => [d.cardId, d]),
+  );
   const entries = [];
   for (const cardScan of scan.cards) {
     if (cardScan.result !== "READY_FOR_NEXT") continue;
     const card = byTitle.get(cardScan.title);
     if (!card) continue; // duplicate or missing title fails closed
     const proposal = proposalByTitle.get(cardScan.title);
-    const model = proposal?.model ?? null;
-    if (!model) continue; // no usable declared route observed this scan
+    const decision = decisionByCardId.get(card.cardId) ?? null;
+    if (!decision || typeof decision.digest !== "string" || typeof decision.model !== "string"
+      || typeof decision.provider !== "string" || typeof decision.selectedSeatId !== "string") {
+      throw new Error(`missing complete route decision for card ${card.cardId} (fails closed)`);
+    }
+    const model = decision.model;
     const repositories = Array.isArray(card.repositories) ? card.repositories.filter((r) => typeof r === "string" && r !== "") : [];
     const repository = repositories.length === 1 ? repositories[0]
       : repositories.length === 0 && Array.isArray(policy?.acceptedRepositories) && policy.acceptedRepositories.length === 1
@@ -199,6 +236,18 @@ export function mintBatchContext({ scan, cards, policy, instruction, now = null,
       repository,
       placement: proposal?.placement ?? policy?.placement ?? null,
       state: "unused",
+      seatId: decision.selectedSeatId,
+      accountId: decision.accountId,
+      provider: decision.provider,
+      endpointRef: decision.endpointRef,
+      effort: decision.effort,
+      containmentTier: decision.containmentTier,
+      phase: decision.record.phase,
+      routeDecisionId: decision.record.decisionId,
+      routeDecisionRecord: decision.record,
+      routeDecisionDigest: decision.digest,
+      reservationId: decision.reservationId,
+      reservationVectors: decision.reservationVectors,
     });
   }
   // Interactive expiry is the earlier of policy expiry or five minutes.
@@ -278,7 +327,7 @@ const AUTOMATED_HOST_DENIED =
 // consume after verified start. A claim race removes the card from the landed
 // batch and refreshes capacity; an ambiguous spawn leaves the entry reserved
 // and triggers reconciliation, never reuse or another start.
-async function executeBatch({ batch, boardPath, spawnWorker = null, context = null, now = null, allowHostDispatch = false }) {
+export async function executeBatch({ batch, boardPath, spawnWorker = null, context = null, now = null, allowHostDispatch = false, routerStore = null }) {
   const landed = [];
   const capacityTaken = new Set();
   let terminalReason = "no-eligible-card";
@@ -300,7 +349,13 @@ async function executeBatch({ batch, boardPath, spawnWorker = null, context = nu
       continue;
     }
     const reserved = reserveBatchEntry(batch, entry.cardId, { now });
-    if (!reserved.ok) continue; // consumed/expired earlier in this batch
+    if (!reserved.ok) continue;
+    if (entry.reservationId !== null) {
+      if (!routerStore) { releaseBatchEntry(batch, entry.cardId); throw new Error("router store is required for quota reservation"); }
+      createReservation(routerStore, { reservationId: entry.reservationId, decisionId: entry.routeDecisionId,
+        seatId: entry.seatId, accountId: entry.accountId, vectors: entry.reservationVectors, now: now ?? new Date().toISOString() });
+    }
+    if (routerStore) insertRouteDecision(routerStore, { record: entry.routeDecisionRecord, digest: entry.routeDecisionDigest });
     // Host entries claim ONLY through the trusted confirmed-batch path; the
     // batch was registered after the one native confirmation, and each entry
     // is single-use. Contained entries use the ordinary contained-only claim.
@@ -308,6 +363,7 @@ async function executeBatch({ batch, boardPath, spawnWorker = null, context = nu
       ? claimCardForConfirmedBatch({ boardPath, cardId: entry.cardId, role: entry.role, policy: null, now, confirmedBatch: batch })
       : claimCard({ boardPath, cardId: entry.cardId, role: entry.role, policy: null });
     if (!claim.ok) {
+      if (routerStore && entry.reservationId) releaseReservation(routerStore, { reservationId: entry.reservationId, now: now ?? new Date().toISOString() });
       releaseBatchEntry(batch, entry.cardId);
       landed.push({
         title: entry.title, role: entry.role, model: entry.model, placement: entry.placement,
@@ -317,6 +373,14 @@ async function executeBatch({ batch, boardPath, spawnWorker = null, context = nu
       continue;
     }
     capacityTaken.add(entry.cardId);
+    if (routerStore && entry.reservationId) {
+      const bound = claimReservation(routerStore, { reservationId: entry.reservationId,
+        claimId: claim.envelopeId, envelopeId: claim.envelopeId, now: now ?? new Date().toISOString() });
+      if (!bound.ok) throw new Error(bound.reason);
+      // L1: lease renewal runs through the production dispatch loop hook, not
+      // only from tests. The authenticated envelope is the reservation identity.
+      heartbeatBatchReservation({ routerStore, envelope: claim.envelope, now });
+    }
     if (typeof spawnWorker !== "function") {
       // No guarded spawn seam in this context: the claim landed and the entry
       // is consumed as a claimed-but-not-started assignment; never spawn
@@ -331,10 +395,13 @@ async function executeBatch({ batch, boardPath, spawnWorker = null, context = nu
       spawned = await spawnWorker({
         role: entry.role,
         repository: entry.repository,
-        model: entry.model,
+        model: claim.envelope.model,
+        provider: claim.envelope.provider,
+        seatId: claim.envelope.seatId,
+        endpointRef: entry.endpointRef,
+        envelope: claim.envelope,
         placement: entry.placement,
-        context,
-        signal: null,
+        context, signal: null,
       });
     } catch (error) {
       spawned = { ok: false, reason: String(error?.message || error).slice(0, 256) };
@@ -345,7 +412,9 @@ async function executeBatch({ batch, boardPath, spawnWorker = null, context = nu
     } else {
       // Delivery-unknown, partial start, or ambiguous read-back: the entry
       // stays reserved and triggers reconciliation — never reuse or another
-      // start (§6.2).
+      // start (§6.2). The reservation follows the claim through the terminal
+      // settlement hook (production caller for settleBatchReservation).
+      if (routerStore && entry.reservationId) settleBatchReservation({ routerStore, envelope: claim.envelope, outcome: "released", now });
       landed.push({
         title: entry.title, role: entry.role, model: entry.model, placement: entry.placement,
         status: "denied",
@@ -355,6 +424,19 @@ async function executeBatch({ batch, boardPath, spawnWorker = null, context = nu
     }
   }
   return { landed, terminalReason };
+}
+
+// Dispatch-loop completion/heartbeat hooks. The authenticated envelope is
+// the only accepted reservation identity; terminal transitions are idempotent.
+export function heartbeatBatchReservation({ routerStore, envelope, now = null }) {
+  if (!routerStore || typeof envelope?.reservationId !== "string") return { ok: true, skipped: true };
+  return renewReservationLease(routerStore, { reservationId: envelope.reservationId, now: now ?? new Date().toISOString() });
+}
+
+export function settleBatchReservation({ routerStore, envelope, outcome, now = null }) {
+  if (!routerStore || typeof envelope?.reservationId !== "string") return { ok: true, skipped: true };
+  const input = { reservationId: envelope.reservationId, now: now ?? new Date().toISOString() };
+  return outcome === "completed" ? consumeReservation(routerStore, input) : releaseReservation(routerStore, input);
 }
 
 // ---------------------------------------------------------------------------
@@ -376,12 +458,15 @@ export async function pulseRun({ boardPath, instruction, context = null, spawnWo
   if (!pulsePolicy || pulsePolicy.enabled !== true) {
     return { ok: false, code: "pulse-disabled", reason: "Pulse is not enabled for this board (fails closed)", scan: null, landedAssignments: [], batchTerminalReason: "pulse-disabled" };
   }
-  const check = pulseCheck({ boardPath, modelRegistry: context?.modelRegistry ?? null, scopedModels: context?.scopedModels ?? null, observedAt: now });
+  const check = pulseCheck({ boardPath, modelRegistry: context?.modelRegistry ?? null, scopedModels: context?.scopedModels ?? null, observedAt: now,
+    activeSessions: context?.activeSessions ?? [], providerLimit: context?.providerLimit ?? null });
   if (!check.ok) {
     return { ok: false, code: check.code, reason: check.reason, scan: null, landedAssignments: [], batchTerminalReason: check.code };
   }
   const { scan } = check;
-  const batch = mintBatchContext({ scan, cards: validated.cards, policy: effectivePolicy, instruction, now });
+  const routed = await routePulseCheck(check, { ...(context?.routerSnapshot ?? {}), routerConfig: context?.routerConfig, now });
+  if (!routed.ok) return { ok: false, code: routed.code, reason: routed.reason, scan, landedAssignments: [], batchTerminalReason: routed.code };
+  const batch = mintBatchContext({ scan, cards: validated.cards, policy: effectivePolicy, instruction, now, routeDecisions: routed.decisions });
   // One semantic batch preview and one native confirmation for the exact
   // batch (§6.2 step 3-4). Headless contexts fail closed.
   if (!isNativeTuiContext(context) || typeof context?.ui?.confirm !== "function") {
@@ -410,7 +495,7 @@ export async function pulseRun({ boardPath, instruction, context = null, spawnWo
   // batch context is registered for the trusted in-memory confirmed-batch
   // claim path; each host entry is claimable exactly once from it.
   registerConfirmedBatchForClaims(batch);
-  const { landed, terminalReason } = await executeBatch({ batch, boardPath, spawnWorker, context, now, allowHostDispatch: true });
+  const { landed, terminalReason } = await executeBatch({ batch, boardPath, spawnWorker, context, now, allowHostDispatch: true, routerStore: context?.routerStore ?? null });
   return { ok: true, cancelled: false, scan, landedAssignments: landed, batchTerminalReason: terminalReason, batchId: batch.batchId };
 }
 
@@ -419,17 +504,33 @@ export async function pulseRun({ boardPath, instruction, context = null, spawnWo
 // polling. Only runs when the policy enables Pulse in automated mode.
 // ---------------------------------------------------------------------------
 
-export async function pulseTick({ boardPath, spawnWorker = null, context = null, now = null }) {
+export async function pulseTick({ boardPath, spawnWorker = null, context = null, now = null, routerRuntimeFor = null }) {
   const base = observeBoardForPulse({ boardPath });
   if (!base.ok) return { ok: false, code: base.code, reason: base.reason, landedAssignments: [] };
   const { effectivePolicy, pulsePolicy } = base;
   if (!pulsePolicy || pulsePolicy.enabled !== true) return { ok: true, skipped: true, reason: "pulse-disabled", landedAssignments: [] };
   if (pulsePolicy.mode !== "automated") return { ok: true, skipped: true, reason: "interactive-mode-tick-is-a-no-op", landedAssignments: [] };
-  const check = pulseCheck({ boardPath, modelRegistry: context?.modelRegistry ?? null, scopedModels: context?.scopedModels ?? null, observedAt: now });
+  // W3: an automated tick refreshes its capacity snapshot per tick. A factory
+  // supplied by the timer re-reads collector caches and health probes so
+  // read-time freshness and the prior-reservation term are never frozen at
+  // session setup. A factory failure fails the tick closed (no stale routing).
+  let tickContext = context;
+  if (typeof routerRuntimeFor === "function") {
+    try {
+      const refreshed = await routerRuntimeFor({ boardPath, now });
+      tickContext = { ...(context ?? {}), ...(refreshed ?? {}) };
+    } catch (error) {
+      return { ok: false, code: "router-unavailable", reason: String(error?.message || error).slice(0, 512), landedAssignments: [] };
+    }
+  }
+  const check = pulseCheck({ boardPath, modelRegistry: tickContext?.modelRegistry ?? null, scopedModels: tickContext?.scopedModels ?? null, observedAt: now,
+    activeSessions: tickContext?.activeSessions ?? [], providerLimit: tickContext?.providerLimit ?? null });
   if (!check.ok) return { ok: false, code: check.code, reason: check.reason, landedAssignments: [] };
-  const batch = mintBatchContext({ scan: check.scan, cards: check.validated.cards, policy: effectivePolicy, instruction: "automated-tick", now });
+  const routed = await routePulseCheck(check, { ...(tickContext?.routerSnapshot ?? {}), routerConfig: tickContext?.routerConfig, now });
+  if (!routed.ok) return { ok: false, code: routed.code, reason: routed.reason, landedAssignments: [] };
+  const batch = mintBatchContext({ scan: check.scan, cards: check.validated.cards, policy: effectivePolicy, instruction: "automated-tick", now, routeDecisions: routed.decisions });
   // Automated ticks never infer host dispatch: allowHostDispatch stays false.
-  const { landed, terminalReason } = await executeBatch({ batch, boardPath, spawnWorker, context, now, allowHostDispatch: false });
+  const { landed, terminalReason } = await executeBatch({ batch, boardPath, spawnWorker, context: tickContext, now, allowHostDispatch: false, routerStore: tickContext?.routerStore ?? null });
   return { ok: true, skipped: false, scan: check.scan, landedAssignments: landed, batchTerminalReason: terminalReason };
 }
 
@@ -443,14 +544,46 @@ export async function pulseTick({ boardPath, spawnWorker = null, context = null,
 // shell:false); any container/microvm placement is denied WITHOUT touching
 // the lifecycle — Pulse never represents a contained assignment as contained
 // while starting an ordinary host worker.
+// §5.2 execution validation: the spawn step verifies the model/endpoint
+// passed to Herdr exactly matches the authenticated envelope (model +
+// provider + seat identity). A mismatch fails closed and is reported as a
+// structured route-mismatch result (the caller logs the event).
+export function validateSpawnMatchesEnvelope({ envelope, model, provider = null, seatId = null, endpointRef = null, routerConfig = null }) {
+  if (envelope === null || typeof envelope !== "object") {
+    return { ok: false, code: "route-mismatch", reason: "no authenticated envelope (fails closed)" };
+  }
+  if (typeof model !== "string" || model !== envelope.model) {
+    return { ok: false, code: "route-mismatch", reason: `spawn model "${model}" does not match the authenticated envelope model "${envelope.model}" (fails closed)` };
+  }
+  if (typeof provider !== "string" || provider !== envelope.provider) {
+    return { ok: false, code: "route-mismatch", reason: `spawn provider "${provider}" does not match the authenticated envelope provider "${envelope.provider}" (fails closed)` };
+  }
+  if (typeof seatId !== "string" || seatId !== envelope.seatId) {
+    return { ok: false, code: "route-mismatch", reason: `spawn seat "${seatId}" does not match the authenticated envelope seat "${envelope.seatId}" (fails closed)` };
+  }
+  if (routerConfig !== null) {
+    const seat = routerConfig?.seats?.find?.((s) => s.seatId === envelope.seatId);
+    if (!seat || seat.model !== envelope.model || seat.provider !== envelope.provider || seat.endpointRef !== endpointRef
+      || routerConfig?.endpoints?.[endpointRef]?.kind !== envelope.provider) {
+      return { ok: false, code: "route-mismatch", reason: "spawn endpoint does not resolve to the authenticated envelope route (fails closed)" };
+    }
+  }
+  return { ok: true, code: null, reason: null };
+}
+
 export function pulseWorkerSpawnSeam({ executeHerdrSpawnWorker } = {}) {
   if (typeof executeHerdrSpawnWorker !== "function") {
     throw new Error("pulseWorkerSpawnSeam requires the guarded herdr-lifecycle executeHerdrSpawnWorker");
   }
-  return async ({ role, repository, model, placement, context, signal }) => {
+  return async ({ role, repository, model, placement, context, signal, envelope = null, provider = null, seatId = null, endpointRef = null }) => {
     if (placement !== "host") {
       return { ok: false, code: "containment-seam-unavailable", reason: CONTAINMENT_SEAM_UNAVAILABLE };
     }
+    // §5.2 execution validation: the spawn must exactly match the
+    // authenticated envelope's route identity. A mismatch fails closed
+    // BEFORE any Herdr call is attempted.
+    const routeCheck = validateSpawnMatchesEnvelope({ envelope, model, provider, seatId, endpointRef, routerConfig: context?.routerConfig ?? null });
+    if (!routeCheck.ok) return routeCheck;
     // Board policy stores canonical repository paths, while the guarded
     // lifecycle accepts only registry names. Convert only a canonical sibling
     // of the coordinator repository; the lifecycle then revalidates the name,
@@ -810,7 +943,7 @@ export function createPulseTimer({ intervalSeconds, fillOnStart = false, tick, s
 // Tool registration (§12.2)
 // ---------------------------------------------------------------------------
 
-export function registerPulseTools(pi, { resolveBoardPath: resolveBoardPathFn = null, spawnWorker = null } = {}) {
+export function registerPulseTools(pi, { resolveBoardPath: resolveBoardPathFn = null, spawnWorker = null, routerRuntimeFor = null } = {}) {
   const boardPathFor = (ctx) => {
     const cwd = typeof ctx === "string" ? ctx : ctx?.cwd;
     if (typeof resolveBoardPathFn === "function") return resolveBoardPathFn(ctx);
@@ -856,18 +989,47 @@ export function registerPulseTools(pi, { resolveBoardPath: resolveBoardPathFn = 
       };
       const action = input?.action;
       const activeBoardPath = boardPathFor(ctx);
+      let runtimeContext = ctx;
+      let runtimeError = null;
+      if (["check", "run"].includes(action) && typeof routerRuntimeFor === "function" && activeBoardPath) {
+        try {
+          // W4: `check` is pure observation, so the runtime is assembled
+          // read-only (no store writes, no store creation) while `run` uses
+          // the write-mode runtime its claims need.
+          runtimeContext = { ...ctx, ...(await routerRuntimeFor(ctx, activeBoardPath, { readOnly: action === "check" })) };
+        }
+        catch (error) { runtimeError = String(error?.message || error).slice(0, 512); }
+      }
       if (action === "check") {
         if (!activeBoardPath || !existsSync(activeBoardPath)) {
           return fail("board-unavailable", "no board file found for this workspace (board-unavailable)");
         }
         const result = pulseCheck({
           boardPath: activeBoardPath,
-          modelRegistry: ctx?.modelRegistry ?? null,
-          scopedModels: ctx?.scopedModels ?? null,
+          modelRegistry: runtimeContext?.modelRegistry ?? null,
+          scopedModels: runtimeContext?.scopedModels ?? null,
           observedAt: new Date().toISOString(),
+          activeSessions: runtimeContext?.activeSessions ?? [],
+          providerLimit: runtimeContext?.providerLimit ?? null,
         });
         if (!result.ok) return fail(result.code, result.reason);
-        const value = { ok: true, nonAuthorizing: true, persisted: false, scan: result.scan };
+        // Routing is part of the observation: when the router is available
+        // the check carries the real route decisions; when it is not, the
+        // scan is still reported (pure observation, zero scheduling
+        // effects) with a structured routing failure — dispatch paths
+        // (run/tick) fail closed separately.
+        let routing;
+        if (runtimeError !== null) {
+          routing = { ok: false, code: "router-unavailable", reason: runtimeError };
+        } else {
+          const routed = await routePulseCheck(result, { ...(runtimeContext?.routerSnapshot ?? {}),
+            routerConfig: runtimeContext?.routerConfig, now: runtimeContext?.routerNow ?? new Date().toISOString() });
+          routing = routed.ok
+            ? { ok: true, routeDecisions: routed.decisions.map((decision) => ({ cardId: decision.cardId,
+                seatId: decision.selectedSeatId, routeDecisionDigest: decision.digest })) }
+            : { ok: false, code: routed.code, reason: routed.reason };
+        }
+        const value = { ok: true, nonAuthorizing: true, persisted: false, scan: result.scan, routing };
         return {
           content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
           details: { ...value, diagnosticHash: result.diagnosticHash },
@@ -877,10 +1039,11 @@ export function registerPulseTools(pi, { resolveBoardPath: resolveBoardPathFn = 
         if (!activeBoardPath || !existsSync(activeBoardPath)) {
           return fail("board-unavailable", "no board file found for this workspace (board-unavailable)");
         }
+        if (runtimeError !== null) return fail("router-unavailable", runtimeError);
         const result = await pulseRun({
           boardPath: activeBoardPath,
           instruction: input?.instruction,
-          context: ctx,
+          context: runtimeContext,
           spawnWorker,
         });
         if (!result.ok) return fail(result.code, result.reason);

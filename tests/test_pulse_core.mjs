@@ -131,7 +131,13 @@ test("model availability resolves declared routes and fails closed otherwise", (
   assert.equal(modelAvailability({ model: "zai/glm-5.3", observations, declaredModels: ["other/model"] }), "unknown");
   assert.equal(modelAvailability({ model: "zai/glm-5.3", observations: null }), "unknown");
   assert.equal(modelUsable("available"), true);
-  assert.equal(modelUsable("full"), true);
+  // §9 correction: "full" is unusable unless an explicit provider limit says
+  // otherwise — a bare full fails closed.
+  assert.equal(modelUsable("full"), false);
+  assert.equal(modelUsable("full", { providerLimit: 0 }), false);
+  assert.equal(modelUsable("full", { providerLimit: 2 }), false);
+  assert.equal(modelUsable("full", { providerLimit: 2, providerActive: 1 }), true);
+  assert.equal(modelUsable("full", { providerLimit: 2, providerActive: 2 }), false);
   assert.equal(modelUsable("unauthenticated"), false);
   assert.equal(modelUsable("unknown"), false);
 });
@@ -183,6 +189,28 @@ test("evaluateCard: READY_FOR_NEXT for a dispatchable card under enabled policy"
     acceptedRepositories: basePolicy.acceptedRepositories,
   });
   assert.equal(result.result, "READY_FOR_NEXT");
+});
+
+test("evaluateCard: full is usable only with explicit providerLimit AND providerActive headroom", () => {
+  const index = new Map([[ "T1", card() ]]);
+  const inputs = (overrides = {}) => ({
+    card: card(), boardIndex: index,
+    activeClaims: [], pulsePolicy: basePulse,
+    modelObservations: { "zai/glm-5.3": { status: "full" } },
+    declaredModels: ["zai/glm-5.3"],
+    acceptedRepositories: basePolicy.acceptedRepositories,
+    ...overrides,
+  });
+  // No capacity facts at all: fails closed (REVIEW_REQUIRED).
+  assert.equal(evaluateCard(inputs()).result, "REVIEW_REQUIRED");
+  // providerLimit alone is not enough — active must show headroom.
+  assert.equal(evaluateCard(inputs({ providerLimit: 3 })).result, "REVIEW_REQUIRED");
+  // providerLimit with providerActive headroom (per-model map) → usable.
+  const withHeadroom = evaluateCard(inputs({ providerLimit: 3, providerActive: { "zai/glm-5.3": 1 } }));
+  assert.equal(withHeadroom.result, "READY_FOR_NEXT");
+  assert.deepEqual(withHeadroom.routes.map((r) => r.model), ["zai/glm-5.3"]);
+  // providerActive at the ceiling → no headroom → fails closed.
+  assert.equal(evaluateCard(inputs({ providerLimit: 3, providerActive: { "zai/glm-5.3": 3 } })).result, "REVIEW_REQUIRED");
 });
 
 test("evaluateCard: BLOCKED for claimed card and dependency failure", () => {

@@ -16,6 +16,7 @@
 
 import { executeHerdrSpawnWorker } from "../scripts/enforcement/herdr_lifecycle_pi.js";
 import { resolveBoardPath, registerPulseTools, createPulseTimer, pulseTick, pulseWorkerSpawnSeam } from "../scripts/enforcement/pulse_scheduler_pi.js";
+import { prepareRouterRuntimeWithHealth, closeCachedRouterStores } from "../scripts/enforcement/router_runtime_pi.js";
 
 export default function pulsePi(pi) {
 
@@ -26,9 +27,31 @@ export default function pulsePi(pi) {
   // worker is ever started. No other creation path exists.
   const spawnWorker = pulseWorkerSpawnSeam({ executeHerdrSpawnWorker });
 
+  // The runtime is rebuilt per tool call and per automated tick (W3): a
+  // snapshot frozen at session setup would leave every subscription seat
+  // stale after the first observation expiry and freeze the prior-reservation
+  // term. The localHealth probe adapter (W2) is attached here, producing
+  // endpoint-keyed fresh health observations for local seats. `check`
+  // assembles the runtime read-only (W4): no store writes, no store creation.
+  const routerRuntimeFor = async (ctx, boardPath, { readOnly = false } = {}) => {
+    const runtime = await prepareRouterRuntimeWithHealth({
+      repoRoot: ctx?.cwd || process.cwd(), boardPath,
+      defaultsPath: ctx?.routerDefaultsPath ?? null, profilePath: ctx?.routerProfilePath ?? null,
+      dbPath: ctx?.routerDbPath ?? null, cacheRoot: ctx?.routerCacheRoot ?? null,
+      consumptionReceipts: ctx?.consumptionReceipts ?? [], readOnly,
+      fetchFn: ctx?.routerHealthFetch ?? null,
+    });
+    const installed = new Set(runtime.routerConfig.seats.map((seat) => seat.model).filter((model) => {
+      try { return ctx?.modelRegistry?.get?.(model) != null; } catch { return false; }
+    }));
+    runtime.routerSnapshot.modelInstalled = installed;
+    return { ...runtime, activeSessions: ctx?.activeSessions ?? [], providerLimit: ctx?.providerLimit ?? null };
+  };
+
   const result = registerPulseTools(pi, {
     resolveBoardPath: (ctx) => resolveBoardPath(typeof ctx === "string" ? ctx : ctx?.cwd || process.cwd()),
     spawnWorker,
+    routerRuntimeFor,
   });
 
   // Optional timer (§8): created only after session_start, only when the
@@ -43,6 +66,9 @@ export default function pulsePi(pi) {
       timer.clear();
       timer = null;
     }
+    // Release the cached per-dbPath store handles with the session so the
+    // runtime never accumulates DatabaseSync handles (W5).
+    closeCachedRouterStores();
   };
   const setupTimer = async (_event, ctx) => {
     clearTimer();
@@ -54,10 +80,15 @@ export default function pulsePi(pi) {
       const check = checkAutomationPolicy(policy, { boardPath });
       const pulse = check.ok ? check.policy.pulse : null;
       if (!pulse || pulse.enabled !== true || pulse.mode !== "automated") return;
+      // W3: the tick asks for a FRESH runtime every tick instead of reusing a
+      // setup-time snapshot. The factory re-reads collector caches, health
+      // probes, and the prior-reservation term under the read-time freshness
+      // rules; a factory failure fails that tick closed.
       timer = createPulseTimer({
         intervalSeconds: pulse.intervalSeconds,
         fillOnStart: pulse.fillOnStart === true,
-        tick: () => pulseTick({ boardPath, spawnWorker, context: ctx }),
+        tick: () => pulseTick({ boardPath, spawnWorker, context: ctx,
+          routerRuntimeFor: () => routerRuntimeFor(ctx, boardPath, { readOnly: false }) }),
       });
       timer.start();
     } catch {

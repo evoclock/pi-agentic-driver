@@ -1,3 +1,9 @@
 node_modules/
 *.tgz
 .DS_Store
+
+# Internal planning documents
+.private-planning/
+
+# asgrep code-search index
+.asgrep/

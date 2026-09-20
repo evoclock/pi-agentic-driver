@@ -48,9 +48,17 @@ export function modelAvailability({ model, observations = null, declaredModels =
 }
 
 // True only when the model can take new work this tick. "full" means the
-// provider reported a live limit reached; the route is full, not unusable.
-export function modelUsable(availability) {
-  return availability === "available" || availability === "full";
+// provider reported a live limit reached; the route is full, not unusable —
+// UNLESS an explicit provider-limit observation says otherwise (router design
+// §9 item 1): a bare "full" with no provider limit is treated as unusable
+// because capacity cannot be verified, and capacity races must fail closed.
+export function modelUsable(availability, { providerLimit = null, providerActive = null } = {}) {
+  if (availability === "available") return true;
+  if (availability === "full") {
+    return Number.isInteger(providerLimit) && Number.isInteger(providerActive)
+      && providerLimit > 0 && providerActive < providerLimit;
+  }
+  return false;
 }
 
 // Composed free capacity for one role/model route (§4.2):
@@ -88,8 +96,12 @@ export function freeCapacity({ role, model, pulsePolicy, activeClaims = [], acti
 
   const routeCeiling = route.maxConcurrent;
   const roleCeiling = roleEntry?.maxConcurrent ?? routeCeiling;
-  const policyCeiling = Number.isInteger(pulsePolicy?.globalMaxConcurrent)
-    ? pulsePolicy.globalMaxConcurrent
+  // §9 item 2: the policy-wide ceiling is the automation policy's own
+  // maxConcurrent (the actual global ceiling). The legacy pulsePolicy
+  // .globalMaxConcurrent lookup is removed — that field never existed in the
+  // closed pulse shape.
+  const policyCeiling = Number.isInteger(pulsePolicy?.maxConcurrent)
+    ? pulsePolicy.maxConcurrent
     : null;
   const configured = Math.min(routeCeiling, roleCeiling, policyCeiling ?? routeCeiling);
   const providerCap = Number.isInteger(providerLimit) && providerLimit >= 0 ? providerLimit : null;
@@ -121,7 +133,7 @@ export function routesForRole(role, pulsePolicy) {
 // Inputs are already trusted: the card comes from parseBoard/validateBoard,
 // the policy from checkAutomationPolicy. Capacity never changes a card
 // result — it only changes `capacity` and `proposedDispatches`.
-export function evaluateCard({ card, boardIndex, activeClaims = [], pulsePolicy = null, modelObservations = null, declaredModels = null, acceptedRepositories = null }) {
+export function evaluateCard({ card, boardIndex, activeClaims = [], pulsePolicy = null, modelObservations = null, declaredModels = null, acceptedRepositories = null, providerLimit = null, providerActive = null }) {
   // Provenance verification is the caller adapter's responsibility: it
   // supplies cards with `statePath` only when the trusted writer state is
   // available. The core stays side-effect-free and file-free.
@@ -169,9 +181,13 @@ export function evaluateCard({ card, boardIndex, activeClaims = [], pulsePolicy 
   }
   // Route availability: at least one declared route must be usable. Without
   // an authorised fallback this is REVIEW_REQUIRED (§5), never a substitution.
+  // "full" counts as usable only with an explicit provider limit (§9 item 1).
   const usable = routes.filter((route) => modelUsable(modelAvailability({
     model: route.model, observations: modelObservations, declaredModels,
-  })));
+  }), {
+    providerLimit,
+    providerActive: isPlainObject(providerActive) ? providerActive[route.model] : providerActive,
+  }));
   if (usable.length === 0) {
     return { result: "REVIEW_REQUIRED", reason: `no usable declared route for role "${role}" (preferred unavailable without authorised fallback)` };
   }
@@ -181,7 +197,7 @@ export function evaluateCard({ card, boardIndex, activeClaims = [], pulsePolicy 
 // One full board scan (§4.3, §5). Deterministic: cards in board P0→P3 then
 // card-ID order; capacity in role-then-route declaration order; proposals in
 // selection order. No cross-board priority comparison happens here.
-export function scanBoard({ cards, boardPath, boardRevision = null, policyRevision = null, activeClaims = [], pulsePolicy = null, modelObservations = null, declaredModels = null, observedAt = null, placement = null }) {
+export function scanBoard({ cards, boardPath, boardRevision = null, policyRevision = null, activeClaims = [], pulsePolicy = null, modelObservations = null, declaredModels = null, observedAt = null, placement = null, activeSessions = [], providerLimit = null }) {
   const index = new Map(cards.map((card) => [card.cardId, card]));
   const ordered = [...cards].sort((a, b) =>
     (PRIORITY_ORDER[a.priority] ?? 99) - (PRIORITY_ORDER[b.priority] ?? 99)
@@ -190,21 +206,24 @@ export function scanBoard({ cards, boardPath, boardRevision = null, policyRevisi
   const cardResults = [];
   const capacity = [];
   const proposedDispatches = [];
-  const policyWideRemaining = Number.isInteger(pulsePolicy?.globalMaxConcurrent)
-    ? pulsePolicy.globalMaxConcurrent - (activeClaims ?? []).length
+  // §9 item 2: the policy-wide ceiling is the automation policy's
+  // maxConcurrent. §9 item 3: the production path supplies activeSessions
+  // and providerLimit; the scan composes them into capacity.
+  const policyWideRemaining = Number.isInteger(pulsePolicy?.maxConcurrent)
+    ? pulsePolicy.maxConcurrent - (activeClaims ?? []).length
     : null;
 
   const roleOrder = pulsePolicy?.routing ? Object.keys(pulsePolicy.routing) : [];
   for (const role of roleOrder) {
     for (const route of routesForRole(role, pulsePolicy)) {
       const availability = modelAvailability({ model: route.model, observations: modelObservations, declaredModels });
-      const free = freeCapacity({ role, model: route.model, pulsePolicy, activeClaims });
+      const free = freeCapacity({ role, model: route.model, pulsePolicy, activeClaims, activeSessions, providerLimit });
       capacity.push({
         role, model: route.model, configured: free.configured,
         activeClaims: (activeClaims ?? []).filter((claim) => claim?.role === role && claimModel(claim) === route.model).length,
         startingOrRunning: 0,
-        providerLimit: null,
-        free: availability === "available" || availability === "full" ? free.free : 0,
+        providerLimit: Number.isInteger(providerLimit) && providerLimit >= 0 ? providerLimit : null,
+        free: modelUsable(availability, { providerLimit, providerActive: (activeSessions ?? []).filter((s) => s?.model === route.model).length }) ? free.free : 0,
         availability,
       });
     }
@@ -223,6 +242,11 @@ export function scanBoard({ cards, boardPath, boardRevision = null, policyRevisi
       card, boardIndex: index, boardPath, activeClaims, pulsePolicy,
       modelObservations, declaredModels,
       acceptedRepositories: pulsePolicy?.acceptedRepositories ?? null,
+      providerLimit,
+      providerActive: Object.fromEntries(routesForRole(
+        typeof card.role === "string" && card.role !== "" ? card.role : "implementer",
+        pulsePolicy,
+      ).map((route) => [route.model, (activeSessions ?? []).filter((session) => session?.model === route.model).length])),
     });
     const entry = { title: card.title, role: evaluation.role ?? (typeof card.role === "string" && card.role !== "" ? card.role : "implementer"), result: evaluation.result, reason: evaluation.reason };
     cardResults.push(entry);

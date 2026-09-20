@@ -15,6 +15,11 @@ import { createHash, createHmac, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, openSync, closeSync, unlinkSync, chmodSync, statSync as fsStatSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
+// R1/R2 (router design §7.2): the replacement writer derives route trust from
+// the router config and the dead-route rule from observations. These imports
+// are the pure router libraries; the board writer never mutates them.
+import { isDeadRoute } from "./router_replacement_pi.js";
+import { getRouteDecisionIdByDigest } from "./router_store_pi.js";
 
 // ---------------------------------------------------------------------------
 // Closed vocabularies (§1)
@@ -1288,8 +1293,8 @@ export function isDispatchable(card, boardIndex) {
 // Markdown stays canonical for task semantics.
 // ---------------------------------------------------------------------------
 
-export const CLAIMS_SCHEMA = "agentic-driver.board-claims.v2";
-export const ENVELOPE_SCHEMA = "agentic-driver.assignment-envelope.v1";
+export const CLAIMS_SCHEMA = "agentic-driver.board-claims.v3";
+export const ENVELOPE_SCHEMA = "agentic-driver.assignment-envelope.v2";
 export const AUTOMATION_POLICY_SCHEMA = "agentic-driver.automation-policy.v1";
 export const PLACEMENTS = Object.freeze(["container", "host"]);
 export const RISK_LEVELS = Object.freeze(["low", "medium", "high"]);
@@ -1324,17 +1329,21 @@ function writeJsonFileAtomic(path, value) {
 }
 
 // HMAC over the canonical JSON form of the claims content, keyed by the
-// writer-state secret (F1). Covers claims, consumed-claim records, and the
-// transaction record — every authority-bearing field of the file.
-function claimsFileHmac(value, secret) {
+// writer-state secret (F1). Covers claims, consumed-claim records, the
+// transaction record, and the verdict-evidence map — every authority-bearing
+// field of the file. v2→v3 (router design §5.3): `evidence` joins the HMAC
+// input; v2 files are grandfathered (absent evidence reads as {}).
+function claimsFileHmac(value, secret, { includeEvidence = true } = {}) {
+  const payload = {
+    schema: value.schema,
+    generation: value.generation,
+    transaction: value.transaction ?? null,
+    claims: value.claims ?? [],
+    consumedClaims: value.consumedClaims ?? [],
+  };
+  if (includeEvidence) payload.evidence = value.evidence ?? {};
   return createHmac("sha256", secret)
-    .update(canonicalJsonString({
-      schema: value.schema,
-      generation: value.generation,
-      transaction: value.transaction ?? null,
-      claims: value.claims ?? [],
-      consumedClaims: value.consumedClaims ?? [],
-    }), "utf8")
+    .update(canonicalJsonString(payload), "utf8")
     .digest("hex");
 }
 
@@ -1349,16 +1358,35 @@ function exactKeys(value, keys) {
   return actual.length === expected.length && actual.every((key, i) => key === expected[i]);
 }
 
+// v1→v2 (router design §5.1): exactly these keys gained — seatId, accountId,
+// provider, model, role, effort, containmentTier, phase, routeDecisionDigest,
+// reservationId. v1 claims remain valid and dispatchable under the old
+// predicate; new claims require the v2 schema.
 const ENVELOPE_FIELDS = Object.freeze([
   "schema", "envelopeId", "cardId", "cardHash", "repository", "startingRevision",
   "baseRevision", "branch", "allowedPaths", "unchangedPaths", "capabilities",
   "stoppingPoint", "acceptance", "placement", "interactionProfile", "risk",
   "riskCeiling", "mode", "createdAt", "expiry",
+  "seatId", "accountId", "provider", "model", "role", "effort",
+  "containmentTier", "phase", "routeDecisionDigest", "reservationId",
 ]);
+const V1_ENVELOPE_FIELDS = Object.freeze([
+  "schema", "envelopeId", "cardId", "cardHash", "repository", "startingRevision",
+  "baseRevision", "branch", "allowedPaths", "unchangedPaths", "capabilities",
+  "stoppingPoint", "acceptance", "placement", "interactionProfile", "risk",
+  "riskCeiling", "mode", "createdAt", "expiry",
+]);
+const EFFORT_LEVELS = Object.freeze(["low", "default", "high"]);
+const ENVELOPE_PHASES = Object.freeze(["plan", "implement", "review", "escalate"]);
+const CONTAINMENT_TIERS = Object.freeze(["testudo", "docker-policy", "none"]);
 
-export function wellFormedEnvelope(env) {
-  if (env === null || typeof env !== "object" || Array.isArray(env) || !exactKeys(env, ENVELOPE_FIELDS)) return false;
-  if (env.schema !== ENVELOPE_SCHEMA) return false;
+function wellFormedV1Envelope(env) {
+  if (env === null || typeof env !== "object" || Array.isArray(env) || !exactKeys(env, V1_ENVELOPE_FIELDS)) return false;
+  if (env.schema !== "agentic-driver.assignment-envelope.v1") return false;
+  return v1EnvelopeCoreValid(env);
+}
+
+function v1EnvelopeCoreValid(env) {
   if (typeof env.envelopeId !== "string" || !/^[0-9a-f]{32}$/.test(env.envelopeId)) return false;
   if (typeof env.cardId !== "string" || !CARD_ID_RE.test(env.cardId)) return false;
   if (env.cardHash !== null && !/^[0-9a-f]{64}$/.test(env.cardHash)) return false;
@@ -1382,7 +1410,33 @@ export function wellFormedEnvelope(env) {
   return true;
 }
 
-const CLAIM_FIELDS = Object.freeze(["cardId", "claimedAt", "role", "envelopeId", "envelope"]);
+export function wellFormedEnvelope(env) {
+  // Migration (§5.1): v1 claims remain valid and dispatchable under the old
+  // predicate; new claims require the v2 schema.
+  if (env !== null && typeof env === "object" && !Array.isArray(env) && env.schema === "agentic-driver.assignment-envelope.v1") {
+    return wellFormedV1Envelope(env);
+  }
+  if (env === null || typeof env !== "object" || Array.isArray(env) || !exactKeys(env, ENVELOPE_FIELDS)) return false;
+  if (env.schema !== ENVELOPE_SCHEMA) return false;
+  if (!v1EnvelopeCoreValid(env)) return false;
+  // Route fields (§5.1): seatId/provider/model/role non-empty strings;
+  // accountId string or null; effort/containmentTier/phase closed enums;
+  // routeDecisionDigest 64-hex; reservationId string or null.
+  for (const field of ["seatId", "provider", "model", "role"]) {
+    if (typeof env[field] !== "string" || env[field] === "") return false;
+  }
+  if (env.accountId !== null && (typeof env.accountId !== "string" || env.accountId === "")) return false;
+  if (!EFFORT_LEVELS.includes(env.effort)) return false;
+  if (!CONTAINMENT_TIERS.includes(env.containmentTier)) return false;
+  if (!ENVELOPE_PHASES.includes(env.phase)) return false;
+  if (!/^[0-9a-f]{64}$/.test(env.routeDecisionDigest ?? "")) return false;
+  if (env.reservationId !== null && (typeof env.reservationId !== "string" || env.reservationId === "")) return false;
+  return true;
+}
+
+const CLAIM_FIELDS = Object.freeze(["cardId", "claimedAt", "role", "envelopeId", "envelope", "parentClaimId", "attemptIndex"]);
+// v2 grandfathering: claims in v2 files carry exactly the five legacy fields.
+const V2_CLAIM_FIELDS = Object.freeze(["cardId", "claimedAt", "role", "envelopeId", "envelope"]);
 const CONSUMED_FIELDS = Object.freeze(["cardId", "envelopeId", "consumedAt", "reason"]);
 const CONSUMED_REASONS = Object.freeze([
   "expired", "reclaimed", "completed", "exhausted", "cancelled", "failed",
@@ -1390,17 +1444,27 @@ const CONSUMED_REASONS = Object.freeze([
 ]);
 const TRANSACTION_FIELDS = Object.freeze(["op", "cardId", "envelopeId", "at", "phase"]);
 const REPLACE_TRANSACTION_FIELDS = Object.freeze(["op", "cardId", "envelopeId", "at", "phase", "oldEnvelopeId", "oldReason"]);
-const CLAIMS_STATE_FIELDS = Object.freeze(["schema", "generation", "transaction", "claims", "consumedClaims", "hmac"]);
+// v2→v3: verdict evidence is closed and HMAC-authenticated; claims also gain lineage.
+const CLAIMS_STATE_FIELDS = Object.freeze(["schema", "generation", "transaction", "claims", "consumedClaims", "evidence", "hmac"]);
+const V2_CLAIMS_STATE_FIELDS = Object.freeze(["schema", "generation", "transaction", "claims", "consumedClaims", "hmac"]);
+const EVIDENCE_KEY_RE = /^[0-9a-f]{64}$/;
 
-function wellFormedClaim(claim) {
-  return claim !== null && typeof claim === "object" && !Array.isArray(claim) && exactKeys(claim, CLAIM_FIELDS)
-    && CARD_ID_RE.test(claim.cardId)
-    && ISO_TS_RE.test(claim.claimedAt)
-    && ROLE_NAME_RE.test(claim.role)
-    && /^[0-9a-f]{32}$/.test(claim.envelopeId)
-    && wellFormedEnvelope(claim.envelope)
-    && claim.envelope.envelopeId === claim.envelopeId
-    && claim.envelope.cardId === claim.cardId;
+function wellFormedClaim(claim, { legacy = false } = {}) {
+  if (claim === null || typeof claim !== "object" || Array.isArray(claim)) return false;
+  if (!exactKeys(claim, legacy ? V2_CLAIM_FIELDS : CLAIM_FIELDS)) return false;
+  if (!CARD_ID_RE.test(claim.cardId)) return false;
+  if (!ISO_TS_RE.test(claim.claimedAt)) return false;
+  if (!ROLE_NAME_RE.test(claim.role)) return false;
+  if (!/^[0-9a-f]{32}$/.test(claim.envelopeId)) return false;
+  if (!wellFormedEnvelope(claim.envelope)) return false;
+  if (claim.envelope.envelopeId !== claim.envelopeId) return false;
+  if (claim.envelope.cardId !== claim.cardId) return false;
+  if (legacy) return true;
+  // Lineage (§7.3): parentClaimId is a claim identity string or null
+  // (initial dispatch); attemptIndex is a non-negative integer starting
+  // at 0 for the initial attempt.
+  return (claim.parentClaimId === null || (typeof claim.parentClaimId === "string" && claim.parentClaimId !== ""))
+    && Number.isInteger(claim.attemptIndex) && claim.attemptIndex >= 0;
 }
 
 function wellFormedConsumedClaim(claim) {
@@ -1450,16 +1514,33 @@ export function readClaimsState(boardPath) {
     if (writerState.claimsDigest !== null || writerState.claimsGeneration > 0) {
       return { ok: false, reason: "the claims file is missing but the writer state anchors issued claims state — deletion is rejected (fails closed)" };
     }
-    return { ok: true, missing: true, state: { generation: 0, transaction: null, claims: [], consumedClaims: [] } };
+    return { ok: true, missing: true, state: { generation: 0, transaction: null, claims: [], consumedClaims: [], evidence: {} } };
   }
   const value = readJsonFile(path);
-  if (value === null || typeof value !== "object" || Array.isArray(value) || !exactKeys(value, CLAIMS_STATE_FIELDS)) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return { ok: false, reason: "the claims file is malformed or has an unknown shape (fails closed)" };
+  }
+  // Schema migration (§5.3): v2 files are grandfathered — an absent evidence
+  // map reads as {}, claims keep the legacy five-field shape, and the HMAC is
+  // verified over the legacy input. v3 requires the evidence key, the lineage
+  // fields, and the extended HMAC.
+  const legacy = value.schema === "agentic-driver.board-claims.v2";
+  let evidence = value.evidence;
+  if (legacy) {
+    if (!exactKeys(value, V2_CLAIMS_STATE_FIELDS)) {
+      return { ok: false, reason: "the claims file is malformed or has an unknown shape (fails closed)" };
+    }
+    evidence = {};
+  } else if (!exactKeys(value, CLAIMS_STATE_FIELDS)) {
+    return { ok: false, reason: "the claims file is malformed or has an unknown shape (fails closed)" };
+  }
+  if (!isPlainEvidenceMap(evidence)) {
+    return { ok: false, reason: "the claims evidence map is malformed (fails closed)" };
   }
   if (!Array.isArray(value.claims) || !Array.isArray(value.consumedClaims)
     || !Number.isInteger(value.generation) || value.generation < 0
     || !wellFormedTransaction(value.transaction)
-    || !value.claims.every(wellFormedClaim)
+    || !value.claims.every((claim) => wellFormedClaim(claim, { legacy }))
     || !value.consumedClaims.every(wellFormedConsumedClaim)) {
     return { ok: false, reason: "the claims file contains a malformed record (fails closed)" };
   }
@@ -1472,7 +1553,8 @@ export function readClaimsState(boardPath) {
   if (writerState.secret === null) {
     return { ok: false, reason: "writer state file has no secret to verify the claims file (fails closed)" };
   }
-  if (typeof value.hmac !== "string" || value.hmac !== claimsFileHmac(value, writerState.secret)) {
+  if (typeof value.hmac !== "string"
+    || value.hmac !== claimsFileHmac({ ...value, evidence }, writerState.secret, { includeEvidence: !legacy })) {
     return { ok: false, reason: "the claims file HMAC does not verify — tampered or forged (fails closed)" };
   }
   // Deletion/rollback guard: the generation must be exactly the anchored
@@ -1490,6 +1572,7 @@ export function readClaimsState(boardPath) {
       transaction: value.transaction,
       claims: value.claims,
       consumedClaims: value.consumedClaims,
+      evidence,
     },
   };
 }
@@ -1510,6 +1593,24 @@ function claimsAnchorDigest(value, secret) {
     .digest("hex");
 }
 
+const EVIDENCE_FIELDS = Object.freeze(["evalInputDigest", "answers", "probabilities", "thresholdPolicy", "versions", "requestId", "timestamp"]);
+function isPlainEvidenceMap(evidence) {
+  if (evidence === null || typeof evidence !== "object" || Array.isArray(evidence)) return false;
+  const keys = Object.keys(evidence);
+  if (keys.length > 64) return false;
+  for (const key of keys) {
+    const r = evidence[key];
+    if (!EVIDENCE_KEY_RE.test(key) || r === null || typeof r !== "object" || Array.isArray(r) || !exactKeys(r, EVIDENCE_FIELDS)) return false;
+    if (r.evalInputDigest !== key || !EVIDENCE_KEY_RE.test(r.evalInputDigest)) return false;
+    if (r.answers === null || typeof r.answers !== "object" || Array.isArray(r.answers)
+      || r.probabilities === null || typeof r.probabilities !== "object" || Array.isArray(r.probabilities)
+      || r.thresholdPolicy === null || typeof r.thresholdPolicy !== "object" || Array.isArray(r.thresholdPolicy)
+      || r.versions === null || typeof r.versions !== "object" || Array.isArray(r.versions)) return false;
+    if (typeof r.requestId !== "string" || r.requestId === "" || !ISO_TS_RE.test(r.timestamp) || JSON.stringify(r).length > 8192) return false;
+  }
+  return true;
+}
+
 // Recover the two-file claims/anchor commit. The complete authenticated next
 // claims state is staged in writer state first, so either crash window rolls
 // forward deterministically rather than accepting an older file.
@@ -1518,9 +1619,15 @@ function recoverClaimsAnchorLocked(boardPath) {
   const writerState = readWriterState(statePath);
   const pending = writerState.pendingClaimsState;
   if (pending === null) return { ok: true, recovered: false };
-  if (writerState.secret === null || !pending || typeof pending !== "object"
-    || !exactKeys(pending, CLAIMS_STATE_FIELDS)
-    || pending.hmac !== claimsFileHmac(pending, writerState.secret)) {
+  if (writerState.secret === null || !pending || typeof pending !== "object") {
+    return { ok: false, reason: "the staged claims-anchor transaction is malformed or unauthenticated (fails closed)" };
+  }
+  const pendingLegacy = pending.schema === "agentic-driver.board-claims.v2";
+  if (pendingLegacy ? !exactKeys(pending, V2_CLAIMS_STATE_FIELDS) : !exactKeys(pending, CLAIMS_STATE_FIELDS)
+    || !Array.isArray(pending.claims) || !pending.claims.every((claim) => wellFormedClaim(claim, { legacy: pendingLegacy }))) {
+    return { ok: false, reason: "the staged claims-anchor transaction is malformed or unauthenticated (fails closed)" };
+  }
+  if (pending.hmac !== claimsFileHmac(pending, writerState.secret, { includeEvidence: !pendingLegacy })) {
     return { ok: false, reason: "the staged claims-anchor transaction is malformed or unauthenticated (fails closed)" };
   }
   writeJsonFileAtomic(claimsPath(boardPath), pending);
@@ -1544,12 +1651,18 @@ function writeClaims(boardPath, claims, { consumedClaims = null, transaction = n
   writerState = readWriterState(statePath);
   const previous = readClaimsState(boardPath);
   if (!previous.ok) throw Object.assign(new Error(previous.reason), { code: "claims-corrupt" });
+  // v2→v3 migration: legacy claims are upgraded in place on the next write —
+  // absent lineage fields take their initial-dispatch defaults (§7.3).
+  const upgradedClaims = claims.map((claim) => claim.parentClaimId === undefined && claim.attemptIndex === undefined
+    ? { ...claim, parentClaimId: null, attemptIndex: 0 }
+    : claim);
   const value = {
     schema: CLAIMS_SCHEMA,
     generation: previous.state.generation + 1,
     transaction,
-    claims,
+    claims: upgradedClaims,
     consumedClaims: consumedClaims ?? previous.state.consumedClaims,
+    evidence: previous.state.evidence ?? {},
   };
   value.hmac = claimsFileHmac(value, writerState.secret);
   // Prepare → claims → commit. Because prepare contains the complete signed
@@ -1758,7 +1871,7 @@ export function repositoryAccepted(policy, repository) {
 // in), the card's base revision is bound in when present (branch chaining),
 // and the risk classification comes from the policy (per-card override only
 // when the policy allows).
-export function createEnvelope({ card, policy, now = null, repository = null, startingRevision = null }) {
+export function createEnvelope({ card, policy, now = null, repository = null, startingRevision = null, route = null }) {
   const at = now ?? new Date().toISOString();
   const envelopeId = randomBytes(16).toString("hex");
   const expiryHours = Number.isFinite(policy?.envelopeExpiryHours) && policy.envelopeExpiryHours > 0
@@ -1775,6 +1888,22 @@ export function createEnvelope({ card, policy, now = null, repository = null, st
   // envelope's starting revision IS the base (branch chaining), not merely a
   // copied field; execution validation enforces HEAD === startingRevision.
   const startRev = startingRevision ?? card.base ?? gitHead(repo);
+  const r = route;
+  if (r === null || typeof r !== "object"
+    || typeof r.seatId !== "string" || r.seatId === ""
+    || typeof r.provider !== "string" || r.provider === ""
+    || typeof r.model !== "string" || r.model === ""
+    || typeof r.role !== "string" || r.role === ""
+    || !EFFORT_LEVELS.includes(r.effort) || !CONTAINMENT_TIERS.includes(r.containmentTier)
+    || !ENVELOPE_PHASES.includes(r.phase) || !/^[0-9a-f]{64}$/.test(r.routeDecisionDigest ?? "")) {
+    throw Object.assign(new Error("new claims require a complete authenticated route decision"), { code: "route-required" });
+  }
+  const routeFields = {
+    seatId: r.seatId, accountId: r.accountId ?? null, provider: r.provider,
+    model: r.model, role: r.role, effort: r.effort, containmentTier: r.containmentTier,
+    phase: r.phase, routeDecisionDigest: r.routeDecisionDigest,
+    reservationId: typeof r.reservationId === "string" && r.reservationId !== "" ? r.reservationId : null,
+  };
   return deepFreeze({
     schema: ENVELOPE_SCHEMA,
     envelopeId,
@@ -1796,6 +1925,7 @@ export function createEnvelope({ card, policy, now = null, repository = null, st
     mode: "automated",
     createdAt: at,
     expiry,
+    ...routeFields,
   });
 }
 
@@ -1865,8 +1995,8 @@ export function selectDispatchableCard({ cards, boardPath, activeClaims, cardId 
 // the new complete state (both writes are atomic renames); two concurrent
 // claims can never both win because the entire read-decide-write sequence
 // holds the lock. Expired claims are released first, inside the same lock.
-export function claimCard({ boardPath, cardId = null, role, policy = null, configPath = null, now = null, repository = null, startingRevision }) {
-  return claimCardInternal({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision, confirmedBatch: null });
+export function claimCard({ boardPath, cardId = null, role, policy = null, configPath = null, now = null, repository = null, startingRevision, route = null }) {
+  return claimCardInternal({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision, confirmedBatch: null, route });
 }
 
 // ---------------------------------------------------------------------------
@@ -1920,7 +2050,7 @@ export function claimCardForConfirmedBatch({ boardPath, cardId = null, role, pol
   return result;
 }
 
-function claimCardInternal({ boardPath, cardId = null, role, policy = null, configPath = null, now = null, repository = null, startingRevision = null, confirmedBatch = null }) {
+function claimCardInternal({ boardPath, cardId = null, role, policy = null, configPath = null, now = null, repository = null, startingRevision = null, confirmedBatch = null, route = null }) {
   if (typeof boardPath !== "string" || boardPath === "") {
     throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
   }
@@ -1934,7 +2064,7 @@ function claimCardInternal({ boardPath, cardId = null, role, policy = null, conf
   for (let attempt = 0; ; attempt += 1) {
     try {
       return withWriterLock(boardPath, () =>
-        claimCardLocked({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision, confirmedBatch }));
+        claimCardLocked({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision, confirmedBatch, route }));
     } catch (error) {
       if (error?.code === "writer-lock-held" && attempt < 20) {
         sleepSync(25);
@@ -1948,7 +2078,27 @@ function claimCardInternal({ boardPath, cardId = null, role, policy = null, conf
   }
 }
 
-function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision, confirmedBatch = null }) {
+// Route fields for confirmed-batch claims: the batch entry carries the
+// route decision's identity (seatId/provider/model/digest/reservationId)
+// minted by the scheduler from the route decision — never recomputed here.
+function confirmedBatchRouteFor(cardId, confirmedBatch) {
+  const entry = (confirmedBatch?.entries ?? []).find((e) => e.cardId === cardId);
+  if (!entry) return null;
+  return {
+    seatId: entry.seatId,
+    accountId: entry.accountId,
+    provider: entry.provider,
+    model: entry.model,
+    role: entry.role,
+    effort: entry.effort,
+    containmentTier: entry.containmentTier,
+    phase: entry.phase,
+    routeDecisionDigest: entry.routeDecisionDigest,
+    reservationId: entry.reservationId,
+  };
+}
+
+function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision, confirmedBatch = null, route = null }) {
   const at = now ?? new Date().toISOString();
   if (!existsSync(boardPath)) {
     return { ok: false, code: "board-unavailable", reason: "board file is no longer present (board-unavailable)" };
@@ -2038,13 +2188,16 @@ function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, rep
       : "no dispatchable unclaimed card is available" };
   }
   const card = selected.card;
-  const envelope = createEnvelope({ card, policy: policyCheck.policy, now: at, repository: repo, startingRevision });
+  const selectedRoute = confirmedBatch !== null ? confirmedBatchRouteFor(card.cardId, confirmedBatch) : route;
+  const envelope = createEnvelope({ card, policy: policyCheck.policy, now: at, repository: repo, startingRevision, route: selectedRoute });
   const claim = {
     cardId: card.cardId,
     claimedAt: at,
     role,
     envelopeId: envelope.envelopeId,
     envelope,
+    parentClaimId: null,
+    attemptIndex: 0,
   };
   const nextClaims = [...activeClaims, claim];
   // F3: the transaction record goes into the claims file BEFORE the
@@ -2473,13 +2626,71 @@ function replaceAttemptLocked({ boardPath, cardId, envelopeId, reason, replaceme
   // carries the complete signed next value, so either crash window rolls
   // forward deterministically (the same prepare→claims→commit scheme as
   // claimCard, extended with the replace op and phase).
-  const newEnvelope = createEnvelope({ card, policy: policyCheck.policy, now: at, repository: replacementRepository, startingRevision: replacement.startingRevision ?? undefined });
+  const oldRoute = {
+    seatId: oldClaim.envelope.seatId, accountId: oldClaim.envelope.accountId,
+    provider: oldClaim.envelope.provider, model: oldClaim.envelope.model, role: replacementRole,
+    effort: oldClaim.envelope.effort, containmentTier: oldClaim.envelope.containmentTier,
+    phase: oldClaim.envelope.phase, routeDecisionDigest: oldClaim.envelope.routeDecisionDigest,
+    reservationId: oldClaim.envelope.reservationId,
+  };
+  const requestedRoute = replacement.route ?? oldRoute;
+  if (requestedRoute.seatId === oldRoute.seatId
+    && canonicalJsonString(requestedRoute) !== canonicalJsonString(oldRoute)) {
+    return { ok: false, code: "replacement-route-invalid", reason: "same-seat replacement is pinned to every field of the prior authenticated envelope (fails closed)" };
+  }
+  if (requestedRoute.seatId !== oldRoute.seatId) {
+    // R1: different-seat replacement route fidelity. The caller-supplied
+    // requestedRoute is NEVER the route authority. The seat is resolved from
+    // the trusted router config for decision.selectedSeatId; the route fields
+    // must then equal that seat's fields (effort follows the card), and the
+    // decision's parentDecisionId must equal the prior decision id retrieved
+    // from the store — never a merely non-null value.
+    const decision = replacement.routeDecision;
+    const routerConfig = replacement.routerConfig ?? null;
+    const seat = decision !== null && typeof decision === "object" && Array.isArray(routerConfig?.seats)
+      ? routerConfig.seats.find((candidate) => candidate?.seatId === decision.selectedSeatId) ?? null
+      : null;
+    const digest = decision !== null && typeof decision === "object" ? sha256Hex(canonicalJsonString(decision)) : null;
+    // R2: deadness is computed from supplied observations (reusing the pure
+    // §7.2 rule), never accepted as a caller-supplied boolean.
+    const dead = isDeadRoute({ seat, healthObservations: replacement.healthObservations ?? {},
+      quotaObservations: replacement.quotaObservations ?? [], now: at });
+    const priorDecisionId = replacement.routerStore !== null && replacement.routerStore !== undefined
+      ? getRouteDecisionIdByDigest(replacement.routerStore, oldClaim.envelope.routeDecisionDigest)
+      : typeof replacement.priorDecisionId === "string" && replacement.priorDecisionId !== ""
+        ? replacement.priorDecisionId
+        : null;
+    const cardEffort = EFFORT_LEVELS.includes(card?.effort) ? card.effort : "default";
+    const seatRoute = seat === null ? null : {
+      seatId: seat.seatId, accountId: seat.accountId ?? null, provider: seat.provider,
+      model: seat.model, containmentTier: seat.containmentTier, effort: cardEffort,
+    };
+    const routeMatchesSeat = seatRoute !== null
+      && requestedRoute.seatId === seatRoute.seatId
+      && requestedRoute.accountId === seatRoute.accountId
+      && requestedRoute.provider === seatRoute.provider
+      && requestedRoute.model === seatRoute.model
+      && requestedRoute.containmentTier === seatRoute.containmentTier
+      && requestedRoute.effort === seatRoute.effort
+      && requestedRoute.role === replacementRole;
+    if (!decision || decision.schema !== "agentic-driver.route-decision.v1"
+      || seat === null || !routeMatchesSeat
+      || typeof priorDecisionId !== "string" || priorDecisionId === "" || decision.parentDecisionId !== priorDecisionId
+      || digest !== requestedRoute.routeDecisionDigest
+      || dead.dead
+      || (requestedRoute.reservationId !== null && replacement.reservationCreated !== true)) {
+      return { ok: false, code: "replacement-route-invalid", reason: "different-seat replacement requires the config seat for the decision's selectedSeatId, an exact seat-derived route, the prior store decision id as parentDecisionId, a live (non-dead) route, a matching digest, and a reservation (fails closed)" };
+    }
+  }
+  const newEnvelope = createEnvelope({ card, policy: policyCheck.policy, now: at, repository: replacementRepository, startingRevision: replacement.startingRevision ?? undefined, route: requestedRoute });
   const newClaim = {
     cardId,
     claimedAt: at,
     role: replacementRole,
     envelopeId: newEnvelope.envelopeId,
     envelope: newEnvelope,
+    parentClaimId: envelopeId,
+    attemptIndex: (oldClaim.attemptIndex ?? 0) + 1,
   };
   const keptClaims = activeClaims.filter((claim) => claim.envelopeId !== envelopeId);
   const nextClaims = [...keptClaims, newClaim];
