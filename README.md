@@ -53,6 +53,7 @@ proofs for agentic workflows.
 | `agentic_kanban_board_update` | Moves, closes, flags, edits, or removes cards on the board, always recording who authorized the change. | shipped |
 | `agentic_kanban_board_dispatch` | Claims an eligible board card for automated contained work and creates its assignment envelope. | shipped |
 | `agentic_kanban_pulse` | Checks for ready work and available capacity, then starts assignments under the board policy. | shipped |
+| Router configuration | Capacity/policy routing for Board Pulse: seat configuration with per-seat scope statements, tunable policy values, and a binding dispatch gate. See [Router configuration](#router-configuration). | shipped |
 
 **Status: active development and testing.** Each extension ships only after
 it passes fixture-based acceptance, native tests, live-session checks, and
@@ -601,7 +602,8 @@ authority, and SQLite is repaired from them, never the reverse.
 - **Runtime requirement:** the operational store uses the built-in
 `node:sqlite` module. Node.js 22.5 or newer is required.
 
-### Tunable configuration values
+<details>
+<summary><strong>Tunable configuration values</strong> <em>(all keys required, defaults are conservative starting values)</em></summary>
 
 Every numeric policy in the router is a configuration key — never a
 constant in code. All keys are **required**. The repository defaults below
@@ -633,6 +635,8 @@ Seats are named for infrastructure, not models: `dgx-spark-cluster`,
 seat, so changing models never renumbers your configuration. Each seat also
 carries `scopeStatements`: plain-language descriptions of what the seat is
 for. The dispatch gate reads them when judging whether a task fits.
+
+</details>
 
 ## License
 
