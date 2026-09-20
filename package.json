@@ -1,6 +1,6 @@
 {
   "name": "@evoclock/pi-agentic-driver",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "description": "Guardrail extensions for Agentic Driver: advisory review, bounded Herdr communication, and guarded worker lifecycle.",
   "type": "module",
   "license": "AGPL-3.0-only",
@@ -80,7 +80,8 @@
     "scripts/enforcement/router_replacement_pi.js",
     "scripts/enforcement/router_runtime_pi.js",
     ".agentic-driver/router.defaults.json",
-    "skills/pulse/SKILL.md"
+    "skills/pulse/SKILL.md",
+    "janus"
   ],
   "pi": {
     "extensions": [

@@ -53,7 +53,8 @@ proofs for agentic workflows.
 | `agentic_kanban_board_update` | Moves, closes, flags, edits, or removes cards on the board, always recording who authorized the change. | shipped |
 | `agentic_kanban_board_dispatch` | Claims an eligible board card for automated contained work and creates its assignment envelope. | shipped |
 | `agentic_kanban_pulse` | Checks for ready work and available capacity, then starts assignments under the board policy. | shipped |
-| Router configuration | Capacity/policy routing for Board Pulse: seat configuration with per-seat scope statements, tunable policy values, and a binding dispatch gate. See [Router configuration](#router-configuration). | shipped |
+| Router | Capacity/policy routing for Board Pulse: seats with scope statements, tunable policy values, and a binding dispatch gate. | shipped |
+| Janus (bundled service) | Local Jev evaluation service on loopback: semantic ranking, the dispatch-gate judgment, redaction before every external call. See `janus/README.md`. | shipped |
 
 **Status: active development and testing.** Each extension ships only after
 it passes fixture-based acceptance, native tests, live-session checks, and
@@ -102,6 +103,81 @@ only, not a runtime dependency).
   native UI over derived candidates, never by model-supplied targets.
 - **inventory refresh.** Git-aware codebase inventory regeneration with
   verification receipts, so prior-art matching stays honest.
+
+<details>
+<summary><strong>router, capacity/policy routing with a binding dispatch gate</strong> <em>(released, 0.9.2)</em></summary>
+
+Board Pulse selects a route seat through the capacity/policy router. The
+router reads a closed configuration file and a local-first SQLite file for
+operational state (reservations, observations, route-decision audit).
+
+Two router features call **Janus** — a separate local service, bundled under
+`janus/`, that is the only component allowed to talk to the TypeSafe Jev
+models:
+
+- **Semantic ranking** (optional): Janus ranks up to eight eligible seats;
+  on any Janus failure the router falls back to preference order.
+- **The binding dispatch gate**: before a task is claimed, Janus judges
+  whether the task fits the selected seat. No verdict, no dispatch — the
+  gate fails closed when Janus is unreachable.
+
+Janus binds loopback only (`127.0.0.1:8787`), reads its API key from the
+macOS Keychain at runtime, redacts state before every external call, and
+coalesces identical requests. See `janus/README.md` for the endpoint
+contract, Keychain provisioning, and configuration.
+
+- **Repository defaults** ship at `.agentic-driver/router.defaults.json`. The
+template contains no accounts and one disabled placeholder seat, so it loads
+out of the box and schedules nothing until you enable a real seat.
+- **User profile (precedence over defaults):**
+`~/.config/agentic-driver/router/profile.json`, or the path in the
+`AGENTIC_DRIVER_ROUTER_PROFILE` environment variable. A profile section
+replaces the matching defaults section wholesale; the merged config must
+validate or the router refuses to produce decisions (fails closed).
+- **Operational state:** `~/.local/share/agentic-driver/router/state.db`, or
+`AGENTIC_DRIVER_ROUTER_DB`. This store is operational state only. The
+authenticated claims file and the board writer remain the only dispatch
+authority; the system repairs SQLite from them, never the reverse.
+- **Runtime requirement:** the operational store uses the built-in
+`node:sqlite` module. You need Node.js 22.5 or newer.
+
+<details>
+<summary><strong>Tunable configuration values</strong> <em>(all keys required, defaults are conservative starting values)</em></summary>
+
+Every numeric policy in the router is a configuration key — never a
+constant in code. All keys are **required**. The repository defaults below
+are conservative starting values. Your profile overrides them. A missing key
+is a configuration validation failure: the router fails closed rather than
+guess. Changing a value participates in the configuration digest, so cached
+routing decisions computed under the old values no longer apply.
+
+| Section | Key | Default | What it controls |
+|---|---|---|---|
+| `eligibility.reserve` | `floorPercent` | 40 | Share of every quota window kept in reserve (per account, per window). Headroom for an unexpected burst and your next interactive session, without idling the account. |
+| `eligibility.reserve` | `scope` | `account-window` | How widely the reserve floor applies (per account per window at launch). |
+| `eligibility.reserve` | `coldStartFraction` | 0.25 | Consumption assumed for a seat with too little history: deliberately generous, so a mis-estimate fails eligibility instead of draining the account. |
+| `eligibility.reserve` | `estimateSamples` | 20 | How many recent dispatches the consumption estimate averages: enough to smooth outliers, quick enough to track a model change. |
+| `eligibility.reserve` | `estimateMinSamples` | 5 | Below this many observations, the estimator treats the average as noise and uses the cold-start value instead. |
+| `eligibility.reserve` | `estimateOutlierSigma` | 3 | Outlier cut for the estimate: one unusually slow dispatch cannot inflate the average, real tail latency is kept. |
+| `eligibility.reserve` | `ownerInteractiveOverride` | false | Whether your own interactive dispatches bypass the reserve rule (they do not, at launch). |
+| `ranking` | `janusUrl` | `http://127.0.0.1:8787` | The local Janus evaluation service endpoint used for semantic ranking. |
+| `ranking` | `maxCandidates` | 8 | The router ranks at most eight eligible seats per request; preference order trims the list first. |
+| `ranking` | `fallback` | `preference-order` | What happens when ranking is unavailable: dispatch falls back to your preference order and never blocks. |
+| `gate` | `threshold` | 0.9 | The dispatch gate's confidence threshold. A task is only dispatched when the evaluation clears it. Lower it only with evidence from your own audit log. |
+| `gate` | `timeoutMs` | 8000 | How long the gate waits for an evaluation. On timeout there is no verdict, and the gate blocks dispatch (fail closed). |
+| `gate` | `requestBudgetTokens` | 30000 | Maximum size of a gate evaluation request. Normal evaluations use under a thousand tokens. |
+| seat record | `maxConcurrency` | 4 | How many workers one seat may run at once. The default suits a typical single machine or hosted seat. Tune it per seat: a cluster takes more, a constrained subscription endpoint may take less. |
+| automation policy | `maxConcurrent` | 4 | How many workers may run at once across all seats. The default is a conservative start. Tune it to the capacity you actually have, and raise it when you add seats or hardware. |
+
+Seats are named for infrastructure, not models: `dgx-spark-cluster`,
+`mac-studio`, `merge-gateway-worker`. The model is a mutable field on the
+seat, so changing models never renumbers your configuration. Each seat also
+carries `scopeStatements`: plain-language descriptions of what the seat is
+for. The dispatch gate reads them when judging whether a task fits.
+
+</details>
+
+</details>
 
 ## Multi-agent communication
 
@@ -580,63 +656,6 @@ The package includes the `herdr-communication.ts`, `herdr-lifecycle.ts`, and
 `herdr-dispatch.ts` extensions. It also includes `linux-microvm.ts`. Use `pi config` to enable or
 disable individual resources from an installed package. You are not required
 to use every extension.
-
-## Router configuration
-
-Board Pulse selects a route seat through the capacity/policy router. The
-router reads a closed configuration file and a local-first SQLite file for
-operational state (reservations, observations, route-decision audit).
-
-- **Repository defaults** ship at `.agentic-driver/router.defaults.json`. The
-template contains no accounts and one disabled placeholder seat, so it loads
-out of the box and schedules nothing until you enable a real seat.
-- **User profile (precedence over defaults):**
-`~/.config/agentic-driver/router/profile.json`, or the path in the
-`AGENTIC_DRIVER_ROUTER_PROFILE` environment variable. A profile section
-replaces the matching defaults section wholesale; the merged config must
-validate or the router refuses to produce decisions (fails closed).
-- **Operational state:** `~/.local/share/agentic-driver/router/state.db`, or
-`AGENTIC_DRIVER_ROUTER_DB`. This store is operational state only. The
-authenticated claims file and the board writer remain the only dispatch
-authority, and SQLite is repaired from them, never the reverse.
-- **Runtime requirement:** the operational store uses the built-in
-`node:sqlite` module. Node.js 22.5 or newer is required.
-
-<details>
-<summary><strong>Tunable configuration values</strong> <em>(all keys required, defaults are conservative starting values)</em></summary>
-
-Every numeric policy in the router is a configuration key — never a
-constant in code. All keys are **required**. The repository defaults below
-are conservative starting values. Your profile overrides them. A missing key
-is a configuration validation failure: the router fails closed rather than
-guess. Changing a value participates in the configuration digest, so cached
-routing decisions computed under the old values no longer apply.
-
-| Section | Key | Default | What it controls |
-|---|---|---|---|
-| `eligibility.reserve` | `floorPercent` | 40 | Share of every quota window kept in reserve (per account, per window). Headroom for an unexpected burst and your next interactive session, without idling the account. |
-| `eligibility.reserve` | `scope` | `account-window` | How widely the reserve floor applies (per account per window at launch). |
-| `eligibility.reserve` | `coldStartFraction` | 0.25 | Consumption assumed for a seat with too little history: deliberately generous, so a mis-estimate fails eligibility instead of draining the account. |
-| `eligibility.reserve` | `estimateSamples` | 20 | How many recent dispatches the consumption estimate averages: enough to smooth outliers, quick enough to track a model change. |
-| `eligibility.reserve` | `estimateMinSamples` | 5 | Below this many observations the average is treated as noise and the cold-start value is used instead. |
-| `eligibility.reserve` | `estimateOutlierSigma` | 3 | Outlier cut for the estimate: one unusually slow dispatch cannot inflate the average, real tail latency is kept. |
-| `eligibility.reserve` | `ownerInteractiveOverride` | false | Whether your own interactive dispatches bypass the reserve rule (they do not, at launch). |
-| `ranking` | `janusUrl` | `http://127.0.0.1:8787` | The local janus evaluation service endpoint used for semantic ranking. |
-| `ranking` | `maxCandidates` | 8 | At most eight eligible seats are ranked per request; preference order trims first. |
-| `ranking` | `fallback` | `preference-order` | What happens when ranking is unavailable: dispatch falls back to your preference order and never blocks. |
-| `gate` | `threshold` | 0.9 | The dispatch gate's confidence threshold. A task is only dispatched when the evaluation clears it. Lower it only with evidence from your own audit log. |
-| `gate` | `timeoutMs` | 8000 | How long the gate waits for an evaluation. On timeout there is no verdict and dispatch is blocked (fail closed). |
-| `gate` | `requestBudgetTokens` | 30000 | Maximum size of a gate evaluation request. Normal evaluations use under a thousand tokens. |
-| seat record | `maxConcurrency` | 4 | How many workers one seat may run at once. The default suits a typical single machine or hosted seat. Tune it per seat: a cluster takes more, a constrained subscription endpoint may take less. |
-| automation policy | `maxConcurrent` | 4 | How many workers may run at once across all seats. The default is a conservative start. Tune it to the capacity you actually have, and raise it when you add seats or hardware. |
-
-Seats are named for infrastructure, not models: `dgx-spark-cluster`,
-`mac-studio`, `merge-gateway-worker`. The model is a mutable field on the
-seat, so changing models never renumbers your configuration. Each seat also
-carries `scopeStatements`: plain-language descriptions of what the seat is
-for. The dispatch gate reads them when judging whether a task fits.
-
-</details>
 
 ## License
 

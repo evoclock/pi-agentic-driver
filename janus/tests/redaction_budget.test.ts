@@ -13,7 +13,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { redactString, redactValue } from "redaction";
+import { redactString, redactValue } from "@evoclock/redaction";
 import { estimateRequestTokens, estimateStringTokens, evalInputDigest, canonicalJson } from "../janus/budget.js";
 import { JanusError } from "../janus/errors.js";
 import { enforceRequest } from "../janus/schema.js";
