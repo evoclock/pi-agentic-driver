@@ -180,6 +180,58 @@ is for. The dispatch gate reads them when judging whether a task fits.
 
 </details>
 
+<details>
+<summary><strong>Janus, local Jev evaluation service</strong> <em>(released, 0.9.2)</em></summary>
+
+Janus is the local evaluation service bundled in this repository under
+`janus/`. It is the only component allowed to talk to the TypeSafe Jev
+model. It wraps the official TypeSafe SDK (TypeSafe Direct is the sole
+provider) and exposes one evaluation endpoint plus health probes on
+loopback. The router's semantic ranking and the binding dispatch gate both
+call it; nothing else in the harness talks to Jev directly.
+
+**Guarantees:**
+
+- **Loopback only.** Janus binds `127.0.0.1:8787` and nothing else. There is
+  deliberately no bind-address option: it is a local tool.
+- **Key stays in the macOS Keychain.** Janus reads the TypeSafe API key at
+  runtime with a guarded `security` lookup; the key is never passed to
+  subprocesses and never appears in logs or transcripts.
+- **Redaction before every external call.** A secrets/PII pass runs over
+  the state before anything leaves the machine. There is no disable knob.
+- **Single-flight.** Identical requests coalesce onto one provider call;
+  distinct in-flight evaluations are capped and overflow is rejected with
+  `busy` rather than queued silently.
+- **Controlled requests.** A 30k-token request budget; oversized requests are
+  rejected, never truncated silently.
+
+**Running it:**
+
+```sh
+cd janus
+```
+
+```sh
+npm install
+```
+
+```sh
+npx tsx janus/server.ts
+```
+
+For a persistent setup, a launchd template ships at
+`janus/user.janus.plist`. The TypeSafe Direct key is provisioned once
+in the Keychain — the command is in `janus/README.md`.
+
+**When Janus is down:** semantic ranking falls back to preference order,
+and the binding dispatch gate blocks dispatch (fail closed). Janus never
+becomes a silent dependency: its absence is loud.
+
+See `janus/README.md` for the full endpoint contract, the error taxonomy,
+and configuration.
+
+</details>
+
 ## Multi-agent communication
 
 *Extensions for controlled coordination between agents.*
