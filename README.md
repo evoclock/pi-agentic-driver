@@ -1,4 +1,4 @@
-# pi-agentic-driver v0.9.1
+# pi-agentic-driver
 
 <p align="center">
   <img src="assets/Yamagane-origami.png" alt="pi-agentic-driver, Yamagane origami mark" width="140"/>
@@ -7,7 +7,6 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL%20v3-blue?style=flat" alt="License: AGPL v3"/></a>
   <a href="https://www.npmjs.com/package/@evoclock/pi-agentic-driver"><img src="https://img.shields.io/npm/v/@evoclock/pi-agentic-driver?style=flat" alt="npm version"/></a>
-  <img src="https://img.shields.io/badge/version-0.9.1-blue?style=flat" alt="Version 0.9.1"/>
   <img src="https://img.shields.io/badge/status-active%20development%20%26%20testing-orange?style=flat" alt="Status"/>
   <img src="https://img.shields.io/badge/JavaScript-F7DF1E?style=flat&logo=javascript&logoColor=black" alt="JavaScript"/>
   <img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat&logo=typescript&logoColor=white" alt="TypeScript"/>
@@ -112,8 +111,8 @@ only, not a runtime dependency).
 
 The `agentic_herdr_communication` tool exchanges controlled, marked reports with
 configured Pi worker roles running under [Herdr](https://herdr.dev/) (validated
-against 0.9.1; the trust seam accepts the Homebrew-managed herdr binary across
-versions rather than pinning one).
+against Herdr 0.9.1; the trust seam accepts the Homebrew-managed herdr binary
+across versions rather than pinning one).
 
 - **List and observe.** Worker roles are filtered to trusted repositories: a
   checked-in registry plus canonical-path validation. Unlisted or
@@ -549,10 +548,10 @@ From npm:
 pi install npm:@evoclock/pi-agentic-driver
 ```
 
-Or from Git at a pinned tag:
+Or from Git at the latest release tag (see the repo's tags for the current one; the npm badge above shows the live version):
 
 ```sh
-pi install git:github.com/evoclock/pi-agentic-driver@v0.9.1
+pi install git:github.com/evoclock/pi-agentic-driver@<latest-tag>
 ```
 
 Released extensions load independently.
@@ -566,7 +565,7 @@ extensions you want with the object form in your Pi settings:
 {
   "packages": [
     {
-      "source": "npm:@evoclock/pi-agentic-driver@0.9.1",
+      "source": "npm:@evoclock/pi-agentic-driver",
       "extensions": [
         "extensions/aidr.ts",
         "extensions/code-phage.js"
