@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@typesafe-ai/sdk": "0.6.0",
-    "redaction": "file:../../typesafe-secure/lib/redaction"
+    "redaction": "npm:@evoclock/redaction@file:../../typesafe-secure/lib/redaction"
   },
   "devDependencies": {
     "@types/node": "24.10.9",
