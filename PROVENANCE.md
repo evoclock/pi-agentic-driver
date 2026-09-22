@@ -72,3 +72,12 @@ This repository is the public package source for `@evoclock/pi-agentic-driver`.
   change it, the switch is not persisted, and each microVM run still requires
   native confirmation. Headless sessions fail closed. The existing trusted
   facts, fixed argv, receipt validation, and cleanup checks remain unchanged.
+- The unified tasks skill (session task tools + owner-initiated TaskPromote)
+  reimplements the documented behavior of @ladbabynpm/picc-tasks v0.2.0 (MIT,
+  Copyright (c) 2026 Ladbaby) as prior art: the same tool names, the same
+  storage model (session JSONL snapshot entries plus a disk mirror at
+  ~/.pi/tasks/{taskListId}/tasks.json), and the same result text. No code is
+  copied; this is a clean AGPL-3.0-only reimplementation to the same behavior
+  spec, so no MIT license text is vendored. picc-tasks is an independent
+  project by its author, used as reference; it is not affiliated with, nor
+  does it endorse, pi-agentic-driver.

@@ -81,6 +81,10 @@
     "scripts/enforcement/router_runtime_pi.js",
     ".agentic-driver/router.defaults.json",
     "skills/pulse/SKILL.md",
+    "skills/tasks/SKILL.md",
+    "extensions/tasks.ts",
+    "scripts/enforcement/session_tasks_core_pi.js",
+    "scripts/enforcement/session_tasks_validate_pi.js",
     "janus"
   ],
   "pi": {
