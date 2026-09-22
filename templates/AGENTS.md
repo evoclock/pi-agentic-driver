@@ -35,6 +35,17 @@ acceptance result, and exact next step in the existing task and report. Create
 a follow-up task only when no existing task represents the remaining work. The
 next session or worker resumes that task instead of rediscovering scope.
 
+Session task tools (`TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`) are
+available when the tasks capability is loaded for the session — declared by
+the `AGENTIC_DRIVER_TASKS_CAPABILITY` marker in the worker brief. Package
+presence is not the loading contract; a worker without the marker must not
+assume the session tools exist. Worker task lists are session-scoped:
+promotion to the durable board (`TaskPromote`) is owner-initiated only and is
+refused in worker sessions — the commit path additionally requires the
+capability marker, so a session that cannot declare it can never promote. A
+worker that believes a task deserves a board card states that in its report
+text; it never promotes and never invents an authority record.
+
 Every worker report should state:
 
 - repository and revision;

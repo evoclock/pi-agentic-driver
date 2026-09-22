@@ -49,8 +49,12 @@ test("package file list matches the public extension set", () => {
     "extensions/linux-microvm.ts",
     "extensions/pulse.ts",
     "extensions/task-board.ts",
+    "extensions/tasks.ts",
   ]);
   assert.ok(pkg.files.includes("scripts/enforcement/herdr_async_dispatch_pi.js"), "missing: dispatch module");
+  assert.ok(pkg.files.includes("scripts/enforcement/session_tasks_core_pi.js"), "missing: session tasks core module");
+  assert.ok(pkg.files.includes("scripts/enforcement/session_tasks_validate_pi.js"), "missing: tasks validate entry point");
+  assert.ok(pkg.files.includes("skills/tasks/SKILL.md"), "missing: tasks skill doc");
 });
 
 // W1: the router modules are imported by packaged files (pulse_scheduler_pi.js

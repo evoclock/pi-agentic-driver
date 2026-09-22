@@ -43,6 +43,7 @@ proofs for agentic workflows.
 | Tool | What it does | Status |
 |------|--------------|--------|
 | `code_phage` | Reviews a plan against a stated goal before code is written and advises your agent. | shipped |
+| `tasks` | Keeps a session plan close to the work, then lets the owner make selected items durable in `TASKS.md`. | next release |
 | `agentic_herdr_communication` | Exchanges marked reports with worker agents; never grants authority. | shipped |
 | `agentic_herdr_spawn_worker` | Starts one Pi worker in a pane or tab, with native confirmation. | shipped |
 | `agentic_aidr` | A remedy for AI;DR. Reviews writing for clarity, simplicity, brevity, and humanity. | shipped |
@@ -92,6 +93,20 @@ requirements, and test paths. It will:
 Concept credit: Matty Stratton, "Cognitive Complexity" (2024-09-20, concept
 only, no code copied); `flake8-cognitive-complexity` 0.1.0, MIT (concept
 only, not a runtime dependency).
+
+</details>
+
+<details>
+<summary><strong>tasks, from session plan to durable work</strong> <em>(next release)</em></summary>
+
+Plans stay close to the work. They do not become board work by accident. The tasks skill gives Pi a familiar session list. It adds an owner-approved way to keep selected tasks in the durable `TASKS.md` board.
+
+- **Keep the working list simple.** Use `TaskCreate`, `TaskGet`, `TaskList`, and `TaskUpdate` as usual.
+- **Make durable work deliberate.** `TaskPromote` never runs automatically. It previews the exact cards and destination before the owner confirms.
+- **Keep authority clear.** The trusted board writer creates and updates `TASKS.md`. The skill does not bypass it.
+- **Make migration gentle.** Existing task files remain readable. Moving to the driver-owned skill does not strand current plans.
+
+The result is a clean handoff from a session plan to durable work. Selected tasks can survive the session, appear on the shared board, and become available for controlled dispatch when ready.
 
 </details>
 
