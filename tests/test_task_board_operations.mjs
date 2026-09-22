@@ -6,7 +6,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -322,4 +322,108 @@ test("update tool: update and delete through the registered tool with authority;
     assert.equal(unknown.details.ok, false);
     assert.equal(unknown.details.code, "card-not-found");
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("registered writer loads workspace capabilities for write, update, and delete", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "board-cap-registry-"));
+  const boardPath = join(dir, "TASKS.md");
+  try {
+    mkdirSync(join(dir, ".vogelkop"), { recursive: true });
+    writeFileSync(join(dir, ".vogelkop", "capabilities.json"), JSON.stringify([
+      { name: "fs-write", description: "write workspace files" },
+      { name: "run-tests" },
+    ]));
+    const registered = [];
+    registerKanbanBoardTools({ registerTool: (tool) => registered.push(tool) }, { boardPath });
+    const writeTool = registered.find((tool) => tool.name === "agentic_kanban_board_write");
+    const updateTool = registered.find((tool) => tool.name === "agentic_kanban_board_update");
+    const created = await writeTool.execute("write", {
+      title: "Capability card", specification: "spec", definitionOfDone: "done",
+      stoppingPoint: "stop", scopePaths: ["src/"], capabilities: ["fs-write"], authority,
+    });
+    assert.equal(created.details.ok, true, JSON.stringify(created.details));
+    const cardId = created.details.cardId;
+    const updated = await updateTool.execute("update", {
+      operation: "update", cardId, capabilities: ["run-tests"], authority,
+    });
+    assert.equal(updated.details.ok, true, JSON.stringify(updated.details));
+    const removed = await updateTool.execute("delete", { operation: "delete", cardId, authority });
+    assert.equal(removed.details.ok, true, JSON.stringify(removed.details));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("registered writer rejects declared capabilities when the workspace registry is missing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "board-cap-registry-missing-"));
+  const boardPath = join(dir, "TASKS.md");
+  try {
+    const registered = [];
+    registerKanbanBoardTools({ registerTool: (tool) => registered.push(tool) }, { boardPath });
+    const writeTool = registered.find((tool) => tool.name === "agentic_kanban_board_write");
+    const result = await writeTool.execute("write", {
+      title: "Undeclared capability", specification: "spec", definitionOfDone: "done",
+      stoppingPoint: "stop", scopePaths: ["src/"], capabilities: ["fs-write"], authority,
+    });
+    assert.equal(result.details.ok, false);
+    assert.equal(result.details.code, "validation-failed");
+    assert.ok(result.details.errors.some((error) => error.includes("capability registry")));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("registered writer reports malformed workspace capability registries structurally", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "board-cap-registry-invalid-"));
+  const boardPath = join(dir, "TASKS.md");
+  try {
+    mkdirSync(join(dir, ".vogelkop"), { recursive: true });
+    writeFileSync(join(dir, ".vogelkop", "capabilities.json"), "{ not valid json");
+    const registered = [];
+    registerKanbanBoardTools({ registerTool: (tool) => registered.push(tool) }, { boardPath });
+    const writeTool = registered.find((tool) => tool.name === "agentic_kanban_board_write");
+    const result = await writeTool.execute("write", {
+      title: "Malformed registry", specification: "spec", definitionOfDone: "done",
+      stoppingPoint: "stop", scopePaths: ["src/"], capabilities: ["fs-write"], authority,
+    });
+    assert.equal(result.details.ok, false);
+    assert.equal(result.details.code, "capability-registry-invalid");
+    assert.ok(result.details.reason.includes("capability registry is invalid"));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("capability-less cards are unaffected by absent or malformed workspace registries", async () => {
+  const missingDir = mkdtempSync(join(tmpdir(), "board-cap-registry-empty-"));
+  const malformedDir = mkdtempSync(join(tmpdir(), "board-cap-registry-unused-"));
+  try {
+    const missingBoardPath = join(missingDir, "TASKS.md");
+    const missingTools = [];
+    registerKanbanBoardTools({ registerTool: (tool) => missingTools.push(tool) }, { boardPath: missingBoardPath });
+    const missingWrite = missingTools.find((tool) => tool.name === "agentic_kanban_board_write");
+    const missingResult = await missingWrite.execute("write", {
+      title: "No capability", specification: "spec", definitionOfDone: "done",
+      stoppingPoint: "stop", scopePaths: ["src/"], authority,
+    });
+    assert.equal(missingResult.details.ok, true, JSON.stringify(missingResult.details));
+
+    const malformedBoardPath = join(malformedDir, "TASKS.md");
+    const malformedTools = [];
+    registerKanbanBoardTools({ registerTool: (tool) => malformedTools.push(tool) }, { boardPath: malformedBoardPath });
+    const malformedWrite = malformedTools.find((tool) => tool.name === "agentic_kanban_board_write");
+    const malformedUpdate = malformedTools.find((tool) => tool.name === "agentic_kanban_board_update");
+    const created = await malformedWrite.execute("write", {
+      title: "No capability", specification: "spec", definitionOfDone: "done",
+      stoppingPoint: "stop", scopePaths: ["src/"], authority,
+    });
+    assert.equal(created.details.ok, true, JSON.stringify(created.details));
+    mkdirSync(join(malformedDir, ".vogelkop"), { recursive: true });
+    writeFileSync(join(malformedDir, ".vogelkop", "capabilities.json"), "not json");
+    const updated = await malformedUpdate.execute("update", {
+      operation: "update", cardId: created.details.cardId, lane: "review", authority,
+    });
+    assert.equal(updated.details.ok, true, JSON.stringify(updated.details));
+    const removed = await malformedUpdate.execute("delete", {
+      operation: "delete", cardId: created.details.cardId, authority,
+    });
+    assert.equal(removed.details.ok, true, JSON.stringify(removed.details));
+  } finally {
+    rmSync(missingDir, { recursive: true, force: true });
+    rmSync(malformedDir, { recursive: true, force: true });
+  }
 });

@@ -379,6 +379,75 @@ function safeJsonParse(text) {
   }
 }
 
+const CAPABILITY_REGISTRY_PATH = ".vogelkop/capabilities.json";
+
+function capabilityRegistryError(registryPath, reason) {
+  return Object.assign(new Error(`capability registry is invalid at ${registryPath}: ${reason}`), {
+    code: "capability-registry-invalid",
+  });
+}
+
+// The workspace registry is deliberately loaded at tool-call time. A missing
+// registry is an empty declaration; an unreadable or malformed present file is
+// not silently downgraded to empty. Capability-less boards are independent of
+// the registry, so they retain the writer's existing behavior even while an
+// unused registry file is malformed.
+function loadWorkspaceCapabilityNames(boardPath) {
+  const registryPath = join(dirname(boardPath), CAPABILITY_REGISTRY_PATH);
+  let text;
+  try {
+    text = readFileSync(registryPath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw capabilityRegistryError(registryPath, String(error?.message || error).slice(0, 256));
+  }
+  let entries;
+  try {
+    entries = JSON.parse(text);
+  } catch (error) {
+    throw capabilityRegistryError(registryPath, `invalid JSON: ${String(error?.message || error).slice(0, 256)}`);
+  }
+  if (!Array.isArray(entries)) {
+    throw capabilityRegistryError(registryPath, "expected a JSON array");
+  }
+  const names = [];
+  for (const [index, entry] of entries.entries()) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)
+      || typeof entry.name !== "string" || entry.name.trim() === ""
+      || (entry.description !== undefined && typeof entry.description !== "string")) {
+      throw capabilityRegistryError(registryPath, `entry ${index} must contain a non-empty string name and an optional string description`);
+    }
+    names.push(entry.name);
+  }
+  return names;
+}
+
+function boardHasCapabilities(boardPath) {
+  if (!existsSync(boardPath)) return false;
+  try {
+    const parsed = parseBoard(readFileSync(boardPath, "utf8"));
+    return parsed.cards.some((card) => Array.isArray(card.capabilities) && card.capabilities.length > 0);
+  } catch {
+    // Let the writer report the board error; do not use an unreadable board to
+    // justify ignoring a malformed capability registry.
+    return true;
+  }
+}
+
+function workspaceRegistriesFor(boardPath, requestedCapabilities) {
+  try {
+    return { capabilities: loadWorkspaceCapabilityNames(boardPath) };
+  } catch (error) {
+    const capabilityRequested = requestedCapabilities !== undefined
+      && requestedCapabilities !== null
+      && (!Array.isArray(requestedCapabilities) || requestedCapabilities.length > 0);
+    if (error?.code === "capability-registry-invalid" && !capabilityRequested && !boardHasCapabilities(boardPath)) {
+      return { capabilities: [] };
+    }
+    throw error;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Closed validator (§1, §6 gate 2). Validate before persist; decline on
 // violation; duplicate cardId is a validation error; decorative use of the
@@ -2898,11 +2967,12 @@ export function registerKanbanBoardTools(pi, { boardPath = null, resolveBoardPat
         // reason), never raw throws — the model sees the governance reason.
         let result;
         try {
+          const registries = workspaceRegistriesFor(activeBoardPath, input?.capabilities);
           result = writeCard({
             boardPath: activeBoardPath,
             input: writerInput,
             authority: input?.authority,
-            registries: {},
+            registries,
             surface: "tasks",
             // No requireExistingBoard: the write tool bootstraps a fresh
             // board when none exists. Recreation is safe — fresh content only,
@@ -3028,9 +3098,10 @@ export function registerKanbanBoardTools(pi, { boardPath = null, resolveBoardPat
         }
         let result;
         try {
+          const registries = workspaceRegistriesFor(activeBoardPath, operation === "update" ? input?.capabilities : undefined);
           result = operation === "update"
-            ? updateCard({ boardPath: activeBoardPath, cardId: input.cardId, changes, authority: input?.authority, registries: {}, surface: "tasks" })
-            : deleteCard({ boardPath: activeBoardPath, cardId: input.cardId, authority: input?.authority, registries: {}, surface: "tasks" });
+            ? updateCard({ boardPath: activeBoardPath, cardId: input.cardId, changes, authority: input?.authority, registries, surface: "tasks" })
+            : deleteCard({ boardPath: activeBoardPath, cardId: input.cardId, authority: input?.authority, registries, surface: "tasks" });
         } catch (error) {
           const code = typeof error?.code === "string" ? error.code : "writer-error";
           const value = { ok: false, persisted: false, code, reason: String(error?.message || error).slice(0, 512), errors: [String(error?.message || error).slice(0, 512)] };
