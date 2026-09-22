@@ -209,6 +209,57 @@ is for. The dispatch gate reads them when judging whether a task fits.
 
 </details>
 
+<details>
+<summary><strong>Janus, local Jev evaluation service</strong> <em>(shipped)</em></summary>
+
+Janus is the local evaluation service bundled in this repository under
+`janus/`. It is the only component allowed to talk to the TypeSafe Jev
+model. It wraps the official TypeSafe SDK. It exposes one evaluation endpoint
+and health probes on loopback. The router's semantic ranking and binding
+dispatch gate call it. Nothing else in the harness talks to Jev directly.
+
+**Guarantees:**
+
+- **Loopback only.** Janus binds `127.0.0.1:8787` and nothing else. There is
+  deliberately no bind-address option: it is a local tool.
+- **Key stays in the macOS Keychain.** Janus reads the TypeSafe API key at
+  runtime with a guarded `security` lookup. It never passes the key to
+  subprocesses. It never writes the key to logs or transcripts.
+- **Redaction before every external call.** A secrets/PII pass runs over the
+  state before anything leaves the machine. No disable knob exists.
+- **Single-flight.** Janus coalesces identical requests. It caps distinct
+  in-flight evaluations. It rejects overflow with `busy` instead of queuing
+  silently.
+- **Controlled requests.** Janus enforces a 30k-token request budget. It
+  rejects oversized requests instead of truncating them.
+
+**Running it:**
+
+```sh
+cd janus
+```
+
+```sh
+npm install
+```
+
+```sh
+npx tsx janus/server.ts
+```
+
+For a persistent setup, use the launchd template at
+`janus/user.janus.plist`. Provision the TypeSafe Direct key once in the
+Keychain. The command is in `janus/README.md`.
+
+**When Janus is down:** semantic ranking falls back to preference order. The
+binding dispatch gate blocks dispatch and fails closed. Janus never becomes a
+silent dependency: its absence is loud.
+
+See `janus/README.md` for the full endpoint contract, the error taxonomy,
+and configuration.
+
+</details>
+
 ## Multi-agent communication
 
 *Extensions for controlled coordination between agents.*
