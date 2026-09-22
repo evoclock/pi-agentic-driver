@@ -20,12 +20,21 @@ import { parseBoard, validateBoard } from "../scripts/enforcement/task_board_cor
 // Registered-tool harness
 // ---------------------------------------------------------------------------
 
-async function makeHarness({ env = {}, uiConfirm = null, cwd = null } = {}) {
+async function makeHarness({ env = {}, uiConfirm = null, ui = null, cwd = null } = {}) {
   const registered = new Map();
+  const commands = new Map();
   const handlers = {};
+  const uiCalls = { widgets: [], statuses: [], notifications: [] };
+  const uiHost = (uiConfirm || ui) ? {
+    ...(ui ?? {}),
+    ...(uiConfirm ? { confirm: uiConfirm } : {}),
+    setWidget: (key, value, options) => uiCalls.widgets.push({ key, value, options }),
+    setStatus: (key, value) => uiCalls.statuses.push({ key, value }),
+    notify: (message, level) => uiCalls.notifications.push({ message, level }),
+  } : undefined;
   const pi = {
     registerTool: (tool) => registered.set(tool.name, tool),
-    registerCommand: () => {},
+    registerCommand: (name, command) => commands.set(name, command),
     appendEntry: (_type, _data) => {},
     on: (_event, handler) => { handlers[_event] = handler; },
   };
@@ -33,9 +42,9 @@ async function makeHarness({ env = {}, uiConfirm = null, cwd = null } = {}) {
   const listId = `sess-tool-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const ctx = {
     cwd: dir,
-    mode: uiConfirm ? "tui" : "headless",
-    hasUI: Boolean(uiConfirm),
-    ui: uiConfirm ? { confirm: uiConfirm } : undefined,
+    mode: (uiConfirm || ui) ? "tui" : "headless",
+    hasUI: Boolean(uiHost),
+    ui: uiHost,
     sessionManager: { getSessionId: () => listId, getBranch: () => [] },
   };
   const savedEnv = {};
@@ -47,10 +56,16 @@ async function makeHarness({ env = {}, uiConfirm = null, cwd = null } = {}) {
   await registerTasksPi(pi);
   return {
     registered,
+    commands,
+    handlers,
+    uiCalls,
     ctx,
     dir,
     listId,
     boardPath: join(dir, "TASKS.md"),
+    async event(name, event = {}, eventCtx = ctx) {
+      return handlers[name]?.(event, eventCtx);
+    },
     async call(name, params) {
       const tool = registered.get(name);
       assert.ok(tool, `${name} must be registered`);
@@ -134,6 +149,74 @@ test("TaskUpdate reports statusChange and mirrors inverse dependency edges", asy
     const deleted = await h.call("TaskUpdate", { taskId: "4", status: "deleted" });
     assert.deepEqual(detailsOf(deleted).statusChange, { from: "pending", to: "deleted" });
     assert.deepEqual(detailsOf(deleted).updatedFields, ["deleted"]);
+  } finally { h.cleanup(); }
+});
+
+// ---------------------------------------------------------------------------
+// picc-tasks UI parity: live widget, footer pill, and /tasks command
+// ---------------------------------------------------------------------------
+
+test("picc-tasks UI parity refreshes the widget and footer on task mutations", async () => {
+  const h = await makeHarness({
+    ui: {
+      theme: {
+        fg: (_color, text) => text,
+        bold: (text) => text,
+        strikethrough: (text) => text,
+      },
+    },
+  });
+  try {
+    await h.event("session_start");
+    await h.call("TaskCreate", { subject: "First task", description: "first", activeForm: "Doing first" });
+    await h.call("TaskCreate", { subject: "Internal task", description: "internal", metadata: { _internal: true } });
+
+    const widget = h.uiCalls.widgets.at(-1);
+    assert.equal(widget.key, "picc-tasks");
+    assert.deepEqual(widget.options, { placement: "aboveEditor" });
+    assert.match(widget.value[0], /Tasks  1 pending · 0 in progress · 0 done/);
+    assert.match(widget.value.join("\n"), /▫ \[pending\] First task/);
+    assert.deepEqual(h.uiCalls.statuses.at(-1), { key: "picc-tasks", value: "0\/1 tasks" });
+
+    await h.call("TaskUpdate", { taskId: "1", owner: "alice", status: "in_progress" });
+    assert.match(h.uiCalls.widgets.at(-1).value.join("\n"), /▪ \[in_progress\] First task \(alice\)/);
+    assert.deepEqual(h.uiCalls.statuses.at(-1), { key: "picc-tasks", value: "1 active \/ 0\/1 tasks" });
+
+    await h.call("TaskCreate", { subject: "Blocker", description: "blocker" });
+    await h.call("TaskUpdate", { taskId: "1", addBlockedBy: ["3"] });
+    assert.match(h.uiCalls.widgets.at(-1).value.join("\n"), /First task \(alice\) \[blocked by #3\]/);
+
+    await h.call("TaskUpdate", { taskId: "3", status: "completed" });
+    assert.doesNotMatch(h.uiCalls.widgets.at(-1).value.join("\n"), /First task .*blocked by/);
+    assert.deepEqual(h.uiCalls.statuses.at(-1), { key: "picc-tasks", value: "1 active \/ 1\/2 tasks" });
+
+    const list = detailsOf(await h.call("TaskList"));
+    assert.deepEqual(list.tasks.map((task) => task.id), ["1", "3"], "internal tasks stay out of TaskList");
+  } finally { h.cleanup(); }
+});
+
+test("/tasks is a richer informational view and swallows stale-context errors", async () => {
+  const h = await makeHarness({
+    ui: {
+      theme: { fg: (_color, text) => text },
+    },
+  });
+  try {
+    await h.call("TaskCreate", { subject: "Visible", description: "visible description", activeForm: "Doing visible" });
+    await h.call("TaskCreate", { subject: "Internal", description: "internal description", metadata: { _internal: true } });
+    const command = h.commands.get("tasks");
+    assert.ok(command, "the /tasks command must be registered");
+    await command.handler("", h.ctx);
+    const message = h.uiCalls.notifications.at(-1).message;
+    assert.match(message, /visible description/);
+    assert.match(message, /active: Doing visible/);
+    assert.match(message, /\[internal\]/);
+    assert.match(message, /internal description/);
+
+    const staleCtx = { ui: { notify: () => { throw new Error("stale after session replacement"); } } };
+    await assert.doesNotReject(() => command.handler("", staleCtx));
+    await h.event("session_tree");
+    assert.ok(h.uiCalls.widgets.length > 0, "session events refresh the widget");
   } finally { h.cleanup(); }
 });
 
