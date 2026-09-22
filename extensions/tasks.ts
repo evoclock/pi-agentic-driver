@@ -63,8 +63,121 @@ export default async function tasksPi(pi) {
   let highWaterMark = 0;
   let taskListId = null;
   let mirrorPath = null;
+  let lastCtx = null;
+
+  const WIDGET_KEY = "picc-tasks";
+  const TASK_ICONS = Object.freeze({ pending: "▫", in_progress: "▪", completed: "✓" });
+
+  const isVisible = (task) => task?.metadata?._internal !== true;
+  const unresolvedTaskIds = () => new Set(
+    tasks.filter((task) => task.status !== "completed").map((task) => task.id),
+  );
+
+  const renderTaskListLine = (task) => {
+    const parts = [
+      `${TASK_ICONS[task.status] ?? "?"} #${task.id}`,
+      `[${task.status}]`,
+      task.subject,
+    ];
+    if (task.owner) parts.push(`(${task.owner})`);
+    let line = parts.join(" ");
+    const unresolved = unresolvedTaskIds();
+    const live = task.blockedBy.filter((id) => unresolved.has(id));
+    if (live.length > 0) line += ` [blocked by ${live.map((id) => `#${id}`).join(", ")}]`;
+    return line;
+  };
+
+  const renderTaskListLineForLLM = (task) => {
+    const parts = [`#${task.id}`, `[${task.status}]`, task.subject];
+    if (task.owner) parts.push(`(${task.owner})`);
+    let line = parts.join(" ");
+    const unresolved = unresolvedTaskIds();
+    const live = task.blockedBy.filter((id) => unresolved.has(id));
+    if (live.length > 0) line += ` [blocked by ${live.map((id) => `#${id}`).join(", ")}]`;
+    return line;
+  };
+
+  const themed = (theme, method, args, fallback) => {
+    try {
+      if (typeof theme?.[method] === "function") return theme[method](...args);
+    } catch { /* UI styling is best-effort */ }
+    return fallback;
+  };
+
+  const renderWidgetTaskLine = (theme, task, unresolved) => {
+    const live = task.blockedBy.filter((id) => unresolved.has(id));
+    const parts = [
+      TASK_ICONS[task.status] ?? "?",
+      `[${task.status}]`,
+      task.subject,
+    ];
+    if (task.owner) parts.push(`(${task.owner})`);
+    let line = parts.join(" ");
+    if (live.length > 0) line += ` [blocked by ${live.map((id) => `#${id}`).join(", ")}]`;
+    if (task.status === "completed") {
+      return themed(theme, "strikethrough", [line], line);
+    }
+    if (task.status === "in_progress") {
+      return themed(theme, "bold", [line], line);
+    }
+    return themed(theme, "fg", [live.length > 0 ? "dim" : "text", line], line);
+  };
+
+  // UI is deliberately a best-effort projection of the task state. A context
+  // can become stale during /new, /fork, /resume, or /reload; task mutations
+  // must still succeed and the next session event will render the projection.
+  const refreshUI = (ctx = null) => {
+    if (ctx) lastCtx = ctx;
+    let uiHost;
+    try {
+      uiHost = ctx ?? lastCtx;
+      if (!uiHost || uiHost.hasUI === false || !uiHost.ui) return;
+    } catch {
+      return;
+    }
+
+    const visible = tasks.filter(isVisible);
+    try {
+      if (typeof uiHost.ui.setWidget === "function") {
+        if (visible.length === 0) {
+          uiHost.ui.setWidget(WIDGET_KEY, undefined);
+        } else {
+          const counts = {
+            pending: visible.filter((task) => task.status === "pending").length,
+            in_progress: visible.filter((task) => task.status === "in_progress").length,
+            completed: visible.filter((task) => task.status === "completed").length,
+          };
+          const header = `Tasks  ${counts.pending} pending · ${counts.in_progress} in progress · ${counts.completed} done`;
+          const unresolved = unresolvedTaskIds();
+          const theme = uiHost.ui.theme;
+          const rows = [...visible]
+            .sort((a, b) => Number(a.id) - Number(b.id) || a.id.localeCompare(b.id))
+            .map((task) => renderWidgetTaskLine(theme, task, unresolved));
+          uiHost.ui.setWidget(WIDGET_KEY, [themed(theme, "fg", ["dim", header], header), ...rows], { placement: "aboveEditor" });
+        }
+      }
+    } catch {
+      // A stale UI host must never turn a successful tool mutation into an error.
+    }
+
+    try {
+      if (typeof uiHost.ui.setStatus === "function") {
+        if (visible.length === 0) {
+          uiHost.ui.setStatus(WIDGET_KEY, undefined);
+        } else {
+          const active = visible.filter((task) => task.status === "in_progress").length;
+          const done = visible.filter((task) => task.status === "completed").length;
+          const total = visible.length;
+          uiHost.ui.setStatus(WIDGET_KEY, active > 0 ? `${active} active / ${done}/${total} tasks` : `${done}/${total} tasks`);
+        }
+      }
+    } catch {
+      // Footer refresh is independent of the widget and equally best-effort.
+    }
+  };
 
   const syncState = (ctx) => {
+    if (ctx) lastCtx = ctx;
     taskListId = core.resolveTaskListId({ session: ctx?.sessionManager?.getSessionId?.() ?? null });
     mirrorPath = core.tasksMirrorPath(taskListId);
     // Replay: the branch's last picc-tasks-state entry wins; disk mirror is
@@ -85,9 +198,11 @@ export default async function tasksPi(pi) {
     } else {
       tasks = fromBranch.tasks; highWaterMark = branchHwm;
     }
+    refreshUI(ctx);
   };
 
   const commitChange = (ctx) => {
+    if (ctx) lastCtx = ctx;
     const snapshot = { tasks: tasks.map((t) => ({ ...t })), highWaterMark };
     try {
       pi.appendEntry(TASK_STATE_ENTRY, snapshot);
@@ -95,6 +210,7 @@ export default async function tasksPi(pi) {
     if (mirrorPath) {
       try { core.persistSnapshot(mirrorPath, snapshot); } catch { /* non-fatal */ }
     }
+    refreshUI(ctx);
   };
 
   const findTask = (id) => tasks.find((t) => t.id === id);
@@ -186,15 +302,18 @@ export default async function tasksPi(pi) {
       description: "Use this tool to list all tasks in the task list.\n\n## When to Use This Tool\n\n- To see what tasks are available to work on (status: 'pending', no owner, not blocked)\n- To check overall progress on the project\n- To find tasks that are blocked and need dependencies resolved\n- After completing a task, to check for newly unblocked work or claim the next available task\n- **Prefer working on tasks in ID order** (lowest ID first) when multiple tasks are available, as earlier tasks often set up context for later ones\n\n## Output\n\nReturns a summary of each task:\n- **id**: Task identifier (use with TaskGet, TaskUpdate)\n- **subject**: Brief description of the task\n- **status**: 'pending', 'in_progress', or 'completed'\n- **owner**: Agent ID if assigned, empty if available\n- **blockedBy**: List of open task IDs that must be resolved first (tasks with blockedBy cannot be claimed until dependencies resolve)\n\nUse TaskGet with a specific task ID to view full details including description and comments.",
       parameters: { type: "object", additionalProperties: false, properties: {} },
       async execute() {
-        if (tasks.length === 0) return { content: [{ type: "text", text: "No tasks found" }], details: { tasks: [] } };
-        const unresolved = new Set(tasks.filter((t) => t.status !== "completed").map((t) => t.id));
-        const lines = tasks.map((t) => {
-          let line = `#${t.id} [${t.status}] ${t.subject}`;
-          if (t.owner) line += ` (${t.owner})`;
-          if (t.blockedBy.length > 0) line += ` [blocked by ${t.blockedBy.filter((id) => unresolved.has(id)).map((id) => `#${id}`).join(", ")}]`;
-          return line;
-        });
-        return { content: [{ type: "text", text: lines.join("\n") }], details: { tasks: tasks.map((t) => ({ id: t.id, subject: t.subject, status: t.status, ...(t.owner !== undefined ? { owner: t.owner } : {}), blockedBy: t.blockedBy.filter((id) => unresolved.has(id)) })) } };
+        const visible = tasks.filter(isVisible);
+        if (visible.length === 0) return { content: [{ type: "text", text: "No tasks found" }], details: { tasks: [] } };
+        const unresolved = unresolvedTaskIds();
+        const list = visible.map((t) => ({
+          id: t.id,
+          subject: t.subject,
+          status: t.status,
+          ...(t.owner !== undefined ? { owner: t.owner } : {}),
+          blockedBy: t.blockedBy.filter((id) => unresolved.has(id)),
+        }));
+        const lines = list.map(renderTaskListLineForLLM);
+        return { content: [{ type: "text", text: lines.join("\n") }], details: { tasks: list } };
       },
     });
 
@@ -560,7 +679,42 @@ export default async function tasksPi(pi) {
     });
   }
 
+  // Rich, read-only view for the owner. It intentionally includes internal
+  // tasks and presentation fields that the model-facing TaskList omits.
+  if (typeof pi?.registerCommand === "function") {
+    pi.registerCommand("tasks", {
+      description: "Show all tasks (richer view than the LLM-facing TaskList).",
+      argumentHint: "",
+      handler: async (_args, ctx) => {
+        try {
+          if (tasks.length === 0) {
+            ctx?.ui?.notify?.("No tasks yet. Use TaskCreate to add one.", "info");
+            return;
+          }
+          const blocks = [];
+          for (const task of tasks) {
+            const internal = task.metadata?._internal === true ? " [internal]" : "";
+            blocks.push(`${renderTaskListLine(task)}${internal}`);
+            blocks.push(`    ${task.description}`);
+            if (task.activeForm) blocks.push(`    active: ${task.activeForm}`);
+          }
+          ctx?.ui?.notify?.(blocks.join("\n"), "info");
+        } catch (error) {
+          // Informational only: a stale context after session replacement is
+          // not a command failure and must never surface to the user/agent.
+          const message = error instanceof Error ? error.message : String(error);
+          if (!message.includes("stale after session replacement")) {
+            // Other UI failures are also non-fatal; the command has no state
+            // mutation to roll back.
+          }
+        }
+      },
+    });
+  }
+
   pi.on?.("session_start", async (_event, ctx) => { syncState(ctx); });
+  pi.on?.("session_tree", async (_event, ctx) => { syncState(ctx); });
+  pi.on?.("session_shutdown", () => { lastCtx = null; });
   syncState(typeof pi?.ctx !== "undefined" ? pi.ctx : null);
 
   return {

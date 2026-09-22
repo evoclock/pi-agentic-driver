@@ -101,7 +101,8 @@ only, not a runtime dependency).
 
 Plans stay close to the work. They do not become board work by accident. The tasks skill gives Pi a familiar session list. It adds an owner-approved way to keep selected tasks in the durable `TASKS.md` board.
 
-- **Keep the working list simple.** Use `TaskCreate`, `TaskGet`, `TaskList`, and `TaskUpdate` as usual.
+- **Keep the working list simple.** Use `TaskCreate`, `TaskGet`, `TaskList`, and `TaskUpdate` as usual; the above-editor widget and footer pill stay live as tasks change.
+- **Keep the Claude-like view.** `/tasks` provides descriptions, active forms, and internal-task markers without mutating the plan.
 - **Make durable work deliberate.** `TaskPromote` never runs automatically. It previews the exact cards and destination before the owner confirms.
 - **Keep authority clear.** The trusted board writer creates and updates `TASKS.md`. The skill does not bypass it.
 - **Make migration gentle.** Existing task files remain readable. Moving to the driver-owned skill does not strand current plans.

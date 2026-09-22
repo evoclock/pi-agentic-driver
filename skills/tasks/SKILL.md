@@ -15,6 +15,22 @@ copied; this is a clean AGPL-3.0-only reimplementation to the same behavior
 spec. picc-tasks is an independent project by its author, used as reference;
 it is not affiliated with, nor does it endorse, pi-agentic-driver.
 
+## Interactive task view
+
+The driver-owned skill preserves picc-tasks' owner-facing UI as well as its
+session tools:
+
+- the above-editor widget shows visible tasks with `▫`/`▪`/`✓` status icons,
+  status, subject, owner, live unresolved blockers, and a count header;
+- the footer status pill shows active and done/total counts;
+- `/tasks` is a richer, read-only view with descriptions, `activeForm`, and
+  `[internal]` markers.
+
+The widget and pill refresh after every task mutation and on `session_start` or
+`session_tree`. UI refresh is best-effort: a stale context after session
+replacement is swallowed and never turns a successful mutation or `/tasks`
+command into an error.
+
 ## What this skill owns
 
 1. The **session task list** — working memory for the current session. Every
