@@ -43,7 +43,7 @@ proofs for agentic workflows.
 | Tool | What it does | Status |
 |------|--------------|--------|
 | `code_phage` | Reviews a plan against a stated goal before code is written and advises your agent. | shipped |
-| `tasks` | Keeps a session plan close to the work, then lets the owner make selected items durable in `TASKS.md`. | next release |
+| `tasks` | Keeps a session plan close to the work, then lets the owner make selected items durable in `TASKS.md`. | shipped |
 | `agentic_herdr_communication` | Exchanges marked reports with worker agents; never grants authority. | shipped |
 | `agentic_herdr_spawn_worker` | Starts one Pi worker in a pane or tab, with native confirmation. | shipped |
 | `agentic_aidr` | A remedy for AI;DR. Reviews writing for clarity, simplicity, brevity, and humanity. | shipped |
@@ -97,7 +97,7 @@ only, not a runtime dependency).
 </details>
 
 <details>
-<summary><strong>tasks, from session plan to durable work</strong> <em>(next release)</em></summary>
+<summary><strong>tasks, from session plan to durable work</strong> <em>(shipped)</em></summary>
 
 Plans stay close to the work. They do not become board work by accident. The tasks skill gives Pi a familiar session list. It adds an owner-approved way to keep selected tasks in the durable `TASKS.md` board.
 
@@ -110,14 +110,28 @@ The result is a clean handoff from a session plan to durable work. Selected task
 
 </details>
 
+**Available now:**
 
-- **prompted planning lifecycle.** Natural-language goals become complete
-  semantic proposals with parent and scope choices at native boundaries. No
-  retry loops, no model-supplied identifiers.
-- **native assignment selection.** Planned assignments are chosen through a
-  native UI over derived candidates, never by model-supplied targets.
-- **inventory refresh.** Git-aware codebase inventory regeneration with
-  verification receipts, so prior-art matching stays honest.
+- **task-ledger integration.** Agents can read and act within board card
+  states while the trusted writer retains authority over admission,
+  completion, reconciliation, and migration. The Tasks skill also bridges
+  session planning to the durable `TASKS.md` board.
+- **role and phase routing.** The router separates planning, implementation,
+  review, and escalation phases. It reports endpoint warm state when
+  configured. Warm-session preference remains future work; route affinity
+  never overrides authority.
+
+**Planned in this theme:**
+
+- **prompted planning lifecycle.** Turn natural-language goals into complete
+  proposals with parent and scope choices at native boundaries. No retry
+  loops or model-supplied identifiers.
+- **native assignment selection.** Choose planned assignments through a
+  native UI over derived candidates, never through model-supplied targets.
+- **inventory refresh.** Regenerate the Git-aware codebase inventory with
+  verification receipts so prior-art matching stays honest.
+- **project status and state review.** Add read-only views of workspace Git
+  state, formal records, and task-state health.
 
 <details>
 <summary><strong>router, capacity/policy routing with a binding dispatch gate</strong> <em>(released, 0.9.2)</em></summary>
@@ -597,19 +611,20 @@ silently allowed.
 
 *Extensions that keep routine Git low-friction and consequential Git guarded.*
 
-**In development:**
+**Planned:**
 
-- **git workflow safeguards.** Design only; the package contains no Git
-  extension yet. The planned capability covers exact-file staging, native
-  confirmation, post-confirmation drift checks, and protected-operation
-  boundaries.
-- **assignment-aware Git journeys.** Merge and protected-push flows bound to
-  a verified assignment, so consequential Git operations carry their own
-  recorded provenance.
+- **git workflow safeguards.** Not packaged yet. The planned capability covers
+  exact-file staging, native confirmation, post-confirmation drift checks,
+  and protected-operation boundaries.
+- **assignment-aware Git journeys.** Planned merge and protected-push flows
+  bound to a verified assignment, so consequential Git operations carry their
+  own recorded provenance.
 
 ## Package integrity
 
 *Extensions that keep the installed set honest and the record controlled.*
+
+**Planned:**
 
 - **security and integrity scanning.** Static scanning of MCP configs, agent
   skills, and extension packages for hardcoded secrets, prompt and shell
@@ -668,10 +683,10 @@ extensions you want with the object form in your Pi settings:
 }
 ```
 
-The package includes the `herdr-communication.ts`, `herdr-lifecycle.ts`, and
-`herdr-dispatch.ts` extensions. It also includes `linux-microvm.ts`. Use `pi config` to enable or
-disable individual resources from an installed package. You are not required
-to use every extension.
+The package includes the Herdr communication, lifecycle, and dispatch
+extensions, the board and Tasks extensions, and `linux-microvm.ts`. Use
+`pi config` to enable or disable individual resources from an installed
+package. You are not required to use every extension.
 
 ## License
 
