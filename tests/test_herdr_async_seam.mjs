@@ -224,6 +224,26 @@ test("normalized lifecycle states cover terminal and non-terminal sets", () => {
   assert.deepEqual([...ASYNC_TERMINAL_STATES], ["completed", "exhausted", "review_requested", "failed", "cancelled"]);
 });
 
+test("a brief exceeding the bounded prompt size fails closed without any Herdr call", async () => {
+  // The transport enforces MAX_PROMPT_BYTES (32 KiB) including the mandatory
+  // report contract; the seam must surface that as a typed fail-closed result
+  // with no process spawn and no submission stored.
+  const f = fixture();
+  const oversizedBrief = "x".repeat(33 * 1024);
+  const submitted = await submitAsyncDispatch({ role: "worker", prompt: oversizedBrief }, context(), { runProcess: f.runProcess });
+  assert.equal(submitted.ok, false);
+  assert.equal(submitted.code, "prompt_oversized");
+  assert.equal(submitted.status, "denied");
+  assert.equal(submitted.receipt, undefined);
+  assert.equal(submitted.nonAuthorizing, true);
+  assert.equal(submitted.authorityCreated, false);
+  assert.deepEqual(f.calls, [], "no Herdr traffic may occur for an oversized brief");
+  // Nothing was stored: a later poll on any id finds no live submission.
+  const polled = await pollAsyncDispatch({ submissionId: "sub-anything" }, context(), { runProcess: f.runProcess });
+  assert.equal(polled.ok, false);
+  assert.equal(polled.code, "unknown-submission");
+});
+
 test("the registered tool executes the full submit-then-poll-then-read flow", async () => {
   const f = fixture();
   const tools = [];
