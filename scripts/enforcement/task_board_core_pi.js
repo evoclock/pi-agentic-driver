@@ -434,7 +434,7 @@ function boardHasCapabilities(boardPath) {
   }
 }
 
-function workspaceRegistriesFor(boardPath, requestedCapabilities) {
+export function workspaceRegistriesFor(boardPath, requestedCapabilities) {
   try {
     return { capabilities: loadWorkspaceCapabilityNames(boardPath) };
   } catch (error) {
@@ -2248,7 +2248,10 @@ function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, rep
       return { ok: false, code: "policy-role-concurrency-refused", reason: `the automation policy allows role "${role}" at most ${roleConcurrency} concurrent claim(s); ${activeForRole} are active` };
     }
   }
-  const validatedBoard = validateBoard(readFileSync(boardPath, "utf8"), {});
+  let registries;
+  try { registries = workspaceRegistriesFor(boardPath); }
+  catch (error) { return { ok: false, code: error?.code ?? "capability-registry-invalid", reason: error?.message ?? String(error) }; }
+  const validatedBoard = validateBoard(readFileSync(boardPath, "utf8"), registries);
   if (!validatedBoard.ok) {
     return { ok: false, code: "board-invalid", errors: validatedBoard.errors };
   }

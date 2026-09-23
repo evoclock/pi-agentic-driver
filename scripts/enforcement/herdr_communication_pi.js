@@ -23,7 +23,7 @@ export const HERDR_ROLE_POLICY = Object.freeze({
 });
 export const HERDR_ROLE_PATTERN = "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$";
 const HERDR_ROLE_REGEXP = new RegExp(HERDR_ROLE_PATTERN);
-export const HERDR_COMMUNICATION_ACTIONS = Object.freeze(["list", "get", "prompt", "wait", "read"]);
+export const HERDR_COMMUNICATION_ACTIONS = Object.freeze(["list", "get", "prompt", "submit", "wait", "read"]);
 
 // The Homebrew link is the configured driver-node path. It is deliberately
 // not resolved through PATH or HERDR_BIN_PATH. The realpath is validated as
@@ -84,6 +84,10 @@ export const HERDR_COMMUNICATION_PARAMETERS = Object.freeze({
   allOf: [
     {
       if: { properties: { action: { const: "prompt" } }, required: ["action"] },
+      then: { required: ["role", "prompt", "timeoutMs"] },
+    },
+    {
+      if: { properties: { action: { const: "submit" } }, required: ["action"] },
       then: { required: ["role", "prompt", "timeoutMs"] },
     },
     {
@@ -151,6 +155,7 @@ function successResult(operation, fields = {}) {
     list: "observed",
     get: "observed",
     prompt: "prompted",
+    submit: "submitted",
     wait: "observed",
     read: "complete",
   }[operation] || "observed";
@@ -363,7 +368,7 @@ function isReviewerRole(role) {
   return typeof role === "string" && role.split("-").includes("reviewer");
 }
 
-function reportMarkersForRole(role) {
+export function reportMarkersForRole(role) {
   requireRole(role);
   if (HERDR_REPORT_MARKERS[role]) return HERDR_REPORT_MARKERS[role];
   const label = role.toUpperCase().replaceAll("-", "_");
@@ -377,12 +382,13 @@ function validateParams(params) {
   if (!isPlainObject(params)) throw communicationError("invalid_parameters", "communication parameters must be an object", "denied");
   const action = params.action;
   if (!HERDR_COMMUNICATION_ACTIONS.includes(action)) {
-    throw communicationError("unsupported_action", "only list, get, prompt, wait, and read are available", "denied");
+    throw communicationError("unsupported_action", "only list, get, prompt, submit, wait, and read are available", "denied");
   }
   const contracts = {
     list: { required: [], allowed: new Set(["action"]) },
     get: { required: ["role"], allowed: new Set(["action", "role"]) },
     prompt: { required: ["role", "prompt", "timeoutMs"], allowed: new Set(["action", "role", "prompt", "timeoutMs"]) },
+    submit: { required: ["role", "prompt", "timeoutMs"], allowed: new Set(["action", "role", "prompt", "timeoutMs"]) },
     wait: { required: ["role", "timeoutMs"], allowed: new Set(["action", "role", "timeoutMs"]) },
     read: { required: ["role"], allowed: new Set(["action", "role"]) },
   }[action];
@@ -393,7 +399,7 @@ function validateParams(params) {
     if (params[field] === undefined) throw communicationError("missing_parameter", `${action} requires ${field}`, "denied");
   }
   if (action !== "list") requireRole(params.role);
-  if (action === "prompt") {
+  if (action === "prompt" || action === "submit") {
     if (typeof params.prompt !== "string" || !params.prompt.trim()) {
       throw communicationError("prompt_required", "prompt must be non-empty text", "denied");
     }
@@ -466,6 +472,14 @@ function fixedArgv(action, params) {
         "--until", "idle", "--until", "done", "--until", "blocked",
         "--timeout", String(params.timeoutMs),
       ];
+    case "submit":
+      // Submission without --wait: the transport returns immediately after
+      // the CLI accepts the brief. Settlement is observed later through
+      // separate get/read operations; the adapter never retries or resends.
+      return [
+        "agent", "prompt", params.role, promptWithReportRequirement(params.role, params.prompt),
+        "--timeout", String(params.timeoutMs),
+      ];
     case "wait":
       return [
         "agent", "wait", params.role,
@@ -521,6 +535,8 @@ function processFailure(code, status = "blocked", diagnostic) {
     failure = communicationError("stale_role_mapping", "the configured role is no longer mapped to the expected live agent");
   } else if (code === "agent_prompt_stalled") {
     failure = communicationError("prompt_stalled", "Herdr did not observe the prompted role advance");
+  } else if (code === "agent_blocked") {
+    failure = communicationError("role_blocked", "the target role is blocked; the brief was not submitted", "blocked");
   } else if (code === "aborted") {
     failure = communicationError("aborted", "Herdr communication was aborted");
   } else {
@@ -1271,6 +1287,37 @@ export async function executeHerdrCommunication(params, context, options = {}, s
         reportMarkers: reportMarkersForRole(role),
       });
     }
+    if (operation === "submit") {
+      // One submission attempt, no --wait: return as soon as the CLI accepts
+      // the brief. There is no retry, no resend, and no settlement wait here;
+      // the caller observes settlement later through get/read. A stalled
+      // submission leaves delivery unknown rather than inviting a resend.
+      const current = await invokeHerdr("get", { action: "get", role }, context, options, signal);
+      publicAgentObservation(extractAgent(current, "agent_info"), role, repositories, { requirePromptable: true });
+      let submitted;
+      try {
+        submitted = await invokeHerdr(operation, request, context, options, signal);
+      } catch (error) {
+        if (error instanceof HerdrCommunicationError && error.code === "prompt_stalled") {
+          const unknown = communicationError("prompt_delivery_unknown", "prompt delivery is unknown; the adapter did not retry, and only the caller may issue a new explicit prompt");
+          unknown.deliveryState = "unknown";
+          throw unknown;
+        }
+        throw error;
+      }
+      const observation = publicAgentObservation(extractAgent(submitted, "agent_prompted"), role, repositories);
+      return successResult(operation, {
+        status: "submitted",
+        role,
+        observation,
+        agentStatus: observation.status,
+        promptSent: true,
+        invocationCount: 1,
+        waitCount: 0,
+        readCount: 0,
+        submittedAt: new Date().toISOString(),
+      });
+    }
     if (operation === "wait") {
       const raw = await invokeHerdr(operation, request, context, options, signal);
       const status = waitStatus(raw, role, repositories);
@@ -1316,7 +1363,7 @@ export function registerHerdrCommunicationInterface(pi, options = {}) {
   pi.registerTool({
     name: HERDR_COMMUNICATION_TOOL,
     label: "Herdr Role Communication",
-    description: "Exchange bounded reports with configured Pi worker roles through Herdr. Transport is non-authorizing and exposes only list, get, prompt, wait, and latest-marked-report read.",
+    description: "Exchange bounded reports with configured Pi worker roles through Herdr. Transport is non-authorizing and exposes list, get, prompt, immediate submit (no settlement wait), wait, and latest-marked-report read.",
     promptSnippet: "Use agentic_herdr_communication only for bounded communication with configured non-coordinator worker roles; it cannot control panes, start agents, run shells, or grant authority.",
     promptGuidelines: [
       "agentic_herdr_communication accepts list, get, prompt, wait, and read for validated non-coordinator worker roles; coordinator targeting and host mechanics are unavailable.",
