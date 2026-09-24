@@ -220,6 +220,34 @@ test("policy enforcement: maxConcurrent caps active claims", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("policy enforcement: pulse role maxConcurrent caps claims atomically under the writer lock", () => {
+  const dir = freshDir();
+  try {
+    const { boardPath } = fixtureBoard(dir);
+    withPolicy(boardPath, {
+      pulse: {
+        enabled: true,
+        mode: "automated",
+        intervalSeconds: 300,
+        fillOnStart: false,
+        routing: {
+          implementer: { preferred: [{ model: "test/model", maxConcurrent: 1 }], fallback: [], maxConcurrent: 1 },
+          reviewer: { preferred: [{ model: "test/model", maxConcurrent: 1 }], fallback: [], maxConcurrent: 1 },
+        },
+        stallTimeoutSeconds: 600,
+        unattendedHostRiskAccepted: false,
+      },
+    });
+    const first = claimCard({ boardPath, role: "implementer" });
+    assert.equal(first.ok, true, JSON.stringify(first));
+    const sameRole = claimCard({ boardPath, role: "implementer" });
+    assert.equal(sameRole.ok, false);
+    assert.equal(sameRole.code, "policy-role-concurrency-refused");
+    const otherRole = claimCard({ boardPath, role: "reviewer" });
+    assert.equal(otherRole.ok, true, JSON.stringify(otherRole));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("F4: the policy is bound to the board file it applies to", () => {
   const dir = freshDir();
   try {
