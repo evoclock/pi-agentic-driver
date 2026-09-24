@@ -2238,6 +2238,16 @@ function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, rep
   if (activeClaims.length >= concurrency) {
     return { ok: false, code: "policy-concurrency-refused", reason: `the automation policy allows at most ${concurrency} concurrent claim(s); ${activeClaims.length} are active` };
   }
+  // Pulse policies also carry a role-wide ceiling. Enforce it here, under the
+  // writer lock and after expired claims are released, so concurrent claimers
+  // cannot race past the route's pre-scan capacity check.
+  const roleConcurrency = policyCheck.policy.pulse?.routing?.[role]?.maxConcurrent;
+  if (Number.isInteger(roleConcurrency)) {
+    const activeForRole = activeClaims.filter((claim) => claim.role === role).length;
+    if (activeForRole >= roleConcurrency) {
+      return { ok: false, code: "policy-role-concurrency-refused", reason: `the automation policy allows role "${role}" at most ${roleConcurrency} concurrent claim(s); ${activeForRole} are active` };
+    }
+  }
   const validatedBoard = validateBoard(readFileSync(boardPath, "utf8"), {});
   if (!validatedBoard.ok) {
     return { ok: false, code: "board-invalid", errors: validatedBoard.errors };
