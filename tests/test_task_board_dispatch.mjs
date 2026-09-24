@@ -240,9 +240,15 @@ test("policy enforcement: pulse role maxConcurrent caps claims atomically under 
     });
     const first = claimCard({ boardPath, role: "implementer" });
     assert.equal(first.ok, true, JSON.stringify(first));
+    const claimsBeforeRefusal = readFileSync(claimsPath(boardPath));
+    const signedWriterStateBeforeRefusal = readFileSync(writerStatePath(boardPath));
     const sameRole = claimCard({ boardPath, role: "implementer" });
     assert.equal(sameRole.ok, false);
     assert.equal(sameRole.code, "policy-role-concurrency-refused");
+    assert.deepEqual(readFileSync(claimsPath(boardPath)), claimsBeforeRefusal,
+      "role-cap refusal must not mutate authenticated claims bytes");
+    assert.deepEqual(readFileSync(writerStatePath(boardPath)), signedWriterStateBeforeRefusal,
+      "role-cap refusal must not mutate signed writer-state bytes");
     const otherRole = claimCard({ boardPath, role: "reviewer" });
     assert.equal(otherRole.ok, true, JSON.stringify(otherRole));
   } finally { rmSync(dir, { recursive: true, force: true }); }
