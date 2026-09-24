@@ -54,6 +54,8 @@
     "lib/typescript_ast_metrics.mjs",
     "scripts/enforcement/herdr_communication_pi.js",
     "scripts/enforcement/herdr_async_dispatch_pi.js",
+    "scripts/enforcement/herdr_async_seam_pi.js",
+    "scripts/enforcement/board_claim_bridge_pi.js",
     "README.md",
     "LICENSE",
     "extensions/herdr-lifecycle.ts",

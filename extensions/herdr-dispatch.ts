@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-export default async function herdrDispatchPi(pi) {
+async function herdrDispatchCore(pi) {
   const dispatch = await import(new URL("../scripts/enforcement/herdr_async_dispatch_pi.js", import.meta.url).href);
   const lifecycle = await import(new URL("../scripts/enforcement/herdr_lifecycle_pi.js", import.meta.url).href);
 
@@ -24,4 +24,13 @@ export default async function herdrDispatchPi(pi) {
     );
 
   return dispatch.registerWorkerDispatchInterface(pi, { spawnReplacement });
+}
+
+// Async transport seam (vogelkop phase #47): submit returns a versioned,
+// non-authorizing receipt immediately; poll/observe/read are separate
+// single-attempt operations. No retries, no resends, no authority.
+export default async function herdrDispatchPi(pi) {
+  await herdrDispatchCore(pi);
+  const asyncSeam = await import(new URL("../scripts/enforcement/herdr_async_seam_pi.js", import.meta.url).href);
+  return asyncSeam.registerAsyncDispatchInterface(pi);
 }
