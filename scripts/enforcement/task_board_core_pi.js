@@ -1777,7 +1777,11 @@ const PULSE_FIELDS = Object.freeze([
 ]);
 const PULSE_ROUTE_FIELDS = Object.freeze(["model", "maxConcurrent"]);
 const PULSE_MODES = Object.freeze(["interactive", "automated"]);
-const PULSE_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+// Pi model IDs are provider/model-id. The provider is one bounded segment;
+// model-id may contain bounded nested segments and Pi's documented colon
+// punctuation. The separate total-length check keeps the complete ID bounded.
+const PULSE_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?:\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127})+$/;
+const PULSE_MODEL_MAX_LENGTH = 192;
 
 function pulseCapacityOk(value) {
   return Number.isInteger(value) && value >= 1 && value <= 32;
@@ -1788,8 +1792,9 @@ function checkPulseRouteEntry(entry, { seen }) {
     || !exactKeys(entry, PULSE_ROUTE_FIELDS)) {
     return "each routing entry must have exactly {model, maxConcurrent}";
   }
-  if (typeof entry.model !== "string" || !PULSE_MODEL_RE.test(entry.model)) {
-    return `route model "${entry.model}" is not an exact provider/model identifier`;
+  if (typeof entry.model !== "string" || entry.model.length > PULSE_MODEL_MAX_LENGTH
+    || !PULSE_MODEL_RE.test(entry.model)) {
+    return `route model "${entry.model}" is not an exact bounded provider/model identifier`;
   }
   if (seen.has(entry.model)) {
     return `model "${entry.model}" appears more than once for this role`;

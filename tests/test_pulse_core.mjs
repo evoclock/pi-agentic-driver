@@ -14,6 +14,9 @@ import {
   PULSE_RESULTS, PULSE_SCAN_SCHEMA, modelAvailability, modelUsable,
   freeCapacity, routesForRole, evaluateCard, scanBoard,
 } from "../scripts/enforcement/pulse_core_pi.js";
+import {
+  resolveInstalledModel, validateSpawnParams,
+} from "../scripts/enforcement/herdr_lifecycle_pi.js";
 
 const basePolicy = {
   roles: ["implementer", "reviewer"],
@@ -83,6 +86,55 @@ test("pulse unknown fields fail closed", () => {
   const result = checkPulsePolicy({ ...basePulse, cron: "* * * * *" }, { roles: basePolicy.roles });
   assert.equal(result.ok, false);
   assert.match(result.reason, /fails closed/);
+});
+
+test("pulse accepts bounded nested, local-provider, and colon model IDs", () => {
+  for (const model of [
+    "merge-gateway/zai/glm-5.3-flash",
+    "glm53fdf/glm-5.3-flash-exl3",
+    "openrouter/meta-llama/llama-3.3:free",
+  ]) {
+    const pulse = structuredClone(basePulse);
+    pulse.routing.implementer.preferred[0].model = model;
+    assert.equal(checkPulsePolicy(pulse, { roles: basePolicy.roles }).ok, true, model);
+  }
+});
+
+test("pulse rejects empty, malformed, traversal, whitespace, and overlong model IDs", () => {
+  const invalid = [
+    "", "provider/", "/model", "provider//model", "provider/../model",
+    "provider/model name", "provider/model?free", `${"p".repeat(65)}/model`,
+    `provider/${"m".repeat(184)}`,
+  ];
+  for (const model of invalid) {
+    const pulse = structuredClone(basePulse);
+    pulse.routing.implementer.preferred[0].model = model;
+    const result = checkPulsePolicy(pulse, { roles: basePolicy.roles });
+    assert.equal(result.ok, false, model);
+    assert.match(result.reason, /fails closed/);
+  }
+});
+
+test("Herdr lifecycle validation and resolution preserve exact nested model IDs", () => {
+  const nested = "merge-gateway/zai/glm-5.3-flash";
+  const local = "glm53fdf/glm-5.3-flash-exl3";
+  const colon = "openrouter/meta-llama/llama-3.3:free";
+  const params = (model) => ({ placement: "tab", role: "implementer", model, repository: "driver-agents" });
+  for (const model of [nested, local, colon]) {
+    assert.equal(validateSpawnParams(params(model)).model, model);
+  }
+  for (const model of ["provider/../model", "provider//model", "provider/model name", `provider/${"m".repeat(184)}`]) {
+    assert.throws(() => validateSpawnParams(params(model)), (error) => error.code === "model_denied");
+  }
+  const listModels = [
+    "provider model context input output",
+    "merge-gateway zai/glm-5.3-flash 131k text text",
+    "glm53fdf glm-5.3-flash-exl3 131k text text",
+    "openrouter meta-llama/llama-3.3:free 131k text text",
+  ].join("\n");
+  assert.deepEqual(resolveInstalledModel(nested, { listModels, modelsPath: "/does/not/exist" }), ["--model", nested]);
+  assert.deepEqual(resolveInstalledModel(local, { listModels, modelsPath: "/does/not/exist" }), ["--model", local]);
+  assert.deepEqual(resolveInstalledModel(colon, { listModels, modelsPath: "/does/not/exist" }), ["--model", colon]);
 });
 
 test("pulse requires enabled boolean and rejects bad mode/interval", () => {

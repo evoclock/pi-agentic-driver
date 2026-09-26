@@ -116,6 +116,25 @@ test("check with enabled pulse: ready card maps to route and proposal, no claim 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("check preserves an exact nested provider/model route", () => {
+  const dir = freshDir();
+  const model = "merge-gateway/zai/glm-5.3-flash";
+  try {
+    const boardPath = fixtureBoard(dir);
+    const policyPath = automationPolicyPath(boardPath);
+    const policy = JSON.parse(readFileSync(policyPath, "utf8"));
+    policy.pulse.routing.implementer.preferred[0].model = model;
+    writeFileSync(policyPath, JSON.stringify(policy));
+    const result = pulseCheck({
+      boardPath, modelRegistry: fakeRegistry([model]), scopedModels: [model],
+      observedAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.equal(result.ok, true, result.reason);
+    assert.equal(result.scan.proposedDispatches[0].model, model);
+    assert.equal(result.scan.capacity[0].model, model);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("check with unauthenticated model: REVIEW_REQUIRED, capacity reports availability", () => {
   const dir = freshDir();
   try {
