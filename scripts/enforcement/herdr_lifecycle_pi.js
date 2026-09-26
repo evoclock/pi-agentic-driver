@@ -47,7 +47,10 @@ function resolvePiModelsPath() {
   }
   return join(homedir(), ".pi", "agent", "models.json");
 }
-const MODEL_ID_REGEXP = /^[a-z0-9][a-z0-9._-]{0,63}(?:\/[a-z0-9][a-z0-9._-]{0,127})*$/;
+// A model selection is either a unique local model id or a provider followed
+// by one or more bounded model-id segments. Pi model IDs may use colons, but
+// provider names may not. validateSpawnParams separately bounds total length.
+const MODEL_ID_REGEXP = /^[a-z0-9][a-z0-9._:-]{0,127}$|^[a-z0-9][a-z0-9._-]{0,63}(?:\/[a-z0-9][a-z0-9._:-]{0,127})+$/;
 // Closed response keys. Shapes beyond `.result.move_result.pane.pane_id` are
 // provisional from tagged-source evidence (Tranche 07) and fail closed on
 // anything extra.
@@ -494,8 +497,8 @@ export function resolveTrustedSpawnRepository(coordinatorCwd, requestedName) {
 // via the documented fixed argv `pi --list-models` table; custom models.json
 // entries remain an additional accepted source. The roll is parsed once per
 // resolveInstalledModel call and is never cached across calls.
-const PROVIDER_TOKEN_REGEXP = /^[a-z0-9][a-z0-9._-]*$/i;
-const MODEL_TOKEN_REGEXP = /^[a-z0-9][a-z0-9._/-]*$/i;
+const PROVIDER_TOKEN_REGEXP = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
+const MODEL_TOKEN_REGEXP = /^[a-z0-9][a-z0-9._:-]{0,127}(?:\/[a-z0-9][a-z0-9._:-]{0,127})*$/i;
 
 // Parses the fixed-width provider/model table emitted by `pi --list-models`.
 // Only the first two whitespace tokens of each data row are read; the header
@@ -509,8 +512,10 @@ function parseListModelsTable(raw) {
     const tokens = trimmed.split(/\s+/);
     if (tokens.length < 2) continue;
     const [provider, id] = tokens;
-    if (!PROVIDER_TOKEN_REGEXP.test(provider) || !MODEL_TOKEN_REGEXP.test(id)) continue;
-    pairs.add(`${provider}/${id}`);
+    const pair = `${provider}/${id}`;
+    if (pair.length > 192 || !PROVIDER_TOKEN_REGEXP.test(provider)
+      || !MODEL_TOKEN_REGEXP.test(id) || !MODEL_ID_REGEXP.test(pair)) continue;
+    pairs.add(pair);
   }
   return pairs;
 }
@@ -529,10 +534,11 @@ function readCustomModelPairs(modelsPath) {
   for (const [provider, config] of Object.entries(providers)) {
     const models = isPlainObject(config) && Array.isArray(config.models) ? config.models : [];
     for (const model of models) {
+      const pair = `${provider}/${model?.id}`;
       if (isPlainObject(model) && typeof model.id === "string"
-          && PROVIDER_TOKEN_REGEXP.test(provider)
-          && MODEL_TOKEN_REGEXP.test(model.id)) {
-        pairs.add(`${provider}/${model.id}`);
+          && pair.length <= 192 && PROVIDER_TOKEN_REGEXP.test(provider)
+          && MODEL_TOKEN_REGEXP.test(model.id) && MODEL_ID_REGEXP.test(pair)) {
+        pairs.add(pair);
       }
     }
   }
