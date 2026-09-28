@@ -89,9 +89,13 @@ test("submit returns a receipt immediately without waiting for settlement", asyn
   assert.equal(submitted.nonAuthorizing, true);
   assert.equal(submitted.authorityCreated, false);
   assert.equal(submitted.persisted, false);
-  // No wait command, no read: the receipt precedes settlement observation.
+  // No wait command: the receipt precedes settlement observation. The only
+  // read is the pre-delivery snapshot taken before the handoff (for later
+  // report provenance); no read follows the prompt.
   assert.ok(f.calls.every((call) => call.action !== "wait"));
-  assert.ok(f.calls.every((call) => call.action !== "read"));
+  const promptIndex = f.calls.findIndex((call) => call.action === "prompt");
+  assert.ok(promptIndex >= 0);
+  assert.ok(f.calls.slice(promptIndex + 1).every((call) => call.action !== "read"));
   // One prompt argv without --wait.
   const promptCall = f.calls.find((call) => call.action === "prompt");
   assert.ok(promptCall);
@@ -184,7 +188,8 @@ test("terminal failure: a failed submission is explicit and stores nothing", asy
   const f = fixture({ failPrompt: true });
   const submitted = await submitAsyncDispatch({ role: "worker", prompt: "x" }, context(), { runProcess: f.runProcess });
   assert.equal(submitted.ok, false);
-  assert.equal(submitted.status, "blocked");
+  // The communication layer's delivery stage refuses a failed handoff.
+  assert.equal(submitted.status, "refused");
   assert.equal(submitted.receipt, undefined);
   // A later poll cannot observe a submission that was never accepted.
   const polled = await pollAsyncDispatch({ submissionId: "sub-nonexistent" }, context(), { runProcess: f.runProcess });
