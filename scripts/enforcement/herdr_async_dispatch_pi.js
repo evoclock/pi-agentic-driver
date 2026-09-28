@@ -11,6 +11,7 @@
 
 import {
   executeHerdrCommunication,
+  executeHerdrPromptExchange,
   HERDR_REPORT_MARKERS,
   HERDR_COMMUNICATION_SCHEMA,
   HERDR_COMMUNICATION_ACTIONS,
@@ -574,8 +575,10 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
     }
 
     // One prompt exchange. Any failure is terminal for the journey; there is
-    // no invisible retry or resend.
-    const exchange = await executeHerdrCommunication(
+    // no invisible retry or resend. The legacy blocking exchange is used
+    // deliberately: a journey step is a single prompt→report round-trip, and
+    // the tool-facing prompt action is now async delivery-only.
+    const exchange = await executeHerdrPromptExchange(
       { action: "prompt", role, prompt: `${stepPrompt}\nTask: ${task.id}${task.subject ? ` — ${task.subject}` : ""}`, timeoutMs: 120000 },
       context,
       communicationOptions,
@@ -589,7 +592,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
           // automatically through the guarded seam. The replacement's first
           // prompt includes the mandatory gap-analysis instruction.
           const replacementPrompt = `${stepPrompt}\n\nMANDATORY GAP-ANALYSIS PHASE: you are a replacement agent. Before resuming implementation work: (1) read the task spec; (2) inspect the repository state (code, tests, working tree) — not what prior reports claim; (3) consult the journey history for prior step reports, handoffs, and progress judgments; (4) produce a gap analysis: remaining work and the next concrete sub-step you will execute. You may not resume implementation until this phase is complete.`;
-          const replacement = await executeHerdrCommunication(
+          const replacement = await executeHerdrPromptExchange(
             { action: "prompt", role, prompt: replacementPrompt, timeoutMs: 120000 },
             context,
             communicationOptions,
