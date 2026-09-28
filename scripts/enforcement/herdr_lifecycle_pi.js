@@ -8,7 +8,7 @@
 // allowlist constant. Pane placement uses pane split directly; tab placement
 // uses tab create. Both capture the returned pane identity and start once.
 import { createHash } from "node:crypto";
-import { readFileSync, realpathSync } from "node:fs";
+import { accessSync, constants as fsConstants, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -17,11 +17,12 @@ import {
   HERDR_ROLE_POLICY,
   resolveTrustedHerdrExecutable,
 } from "./herdr_communication_pi.js";
-import { isNativeTuiContext } from "./native_tui_context.js";
+import { isAttendedElectronContext, isNativeTuiContext } from "./native_tui_context.js";
 
 export const HERDR_SPAWN_WORKER_TOOL = "agentic_herdr_spawn_worker";
 export const HERDR_LIFECYCLE_SCHEMA = "agentic-driver.herdr-lifecycle.v1";
 export const HERDR_LIFECYCLE_VERSION = "spawn-worker.v1";
+export const ATTENDED_ELECTRON_BOUNDARY = "attended-electron";
 export const SPAWN_PLACEMENTS = Object.freeze(["tab", "right", "below"]);
 // Herdr accepts only `right` and `down` split directions;
 // the user-facing `below` is mapped, never forwarded.
@@ -636,9 +637,10 @@ function normalizeProcessResult(value) {
 
 async function invokeHerdr(argv, canonicalRoot, options, signal) {
   if (signal?.aborted) throw lifecycleError("aborted", "the spawn operation was aborted");
-  const executable = resolveTrustedHerdrExecutable(
-    typeof options.runProcess === "function" ? { runProcess: options.runProcess } : {},
-  );
+  // Forward the full options object: the internal testExecutablePath seam
+  // (offline fake Herdr process boundary) must reach executable resolution,
+  // otherwise offline tests would silently spawn the production binary.
+  const executable = resolveTrustedHerdrExecutable(options);
   const spec = {
     executable,
     argv: Object.freeze([...argv]),
@@ -883,6 +885,251 @@ function toolResult(details) {
     content: [{ type: "text", text: JSON.stringify(details, null, 2) }],
     details,
   };
+}
+
+// --- Attended Electron-specific boundary -----------------------------------
+// An explicit, closed contract for a trusted NON-TUI host: the Electron main
+// process. It is a separate context class (see native_tui_context.js), never
+// a Pi-TUI representation. The host has no Herdr session pane, so this
+// boundary NEVER reads or manufactures HERDR_PANE_ID and supports ONLY tab
+// placement (a tab create needs no coordinator pane identity). Stages:
+//   preflightAttendedElectronSpawn  — read-only validation intended to run
+//     BEFORE any board claim: context class, closed parameters, trusted
+//     repository (registry + realpath + Git root), installed model roll,
+//     trusted Herdr executable availability, and duplicate-role observation.
+//     A preflight is NOT an atomic guarantee: external state can change after
+//     it, which is why the commit stage re-validates everything and callers
+//     must preserve truthful claimed-but-not-started reconciliation.
+//   executeHerdrSpawnWorkerAttendedElectron — the single-attempt commit:
+//     one native owner confirmation from the host, then the same guarded
+//     tab create → agent start → agent get → pane get sequence with exact
+//     read-back. No retry, no automatic cleanup; failures report partial
+//     state with human cleanup guidance.
+function attendedElectronContextError(context) {
+  if (!isAttendedElectronContext(context)) {
+    throw lifecycleError(
+      "attended_electron_context_required",
+      "the attended Electron boundary requires an explicit electron-attended context with a native confirm callback (never a Pi TUI representation)",
+      "blocked",
+    );
+  }
+  if (typeof context?.cwd !== "string" || context.cwd.trim() === "") {
+    throw lifecycleError(
+      "attended_electron_context_required",
+      "the attended Electron context requires the trusted host working directory",
+      "blocked",
+    );
+  }
+}
+
+function attendedElectronParams(params) {
+  const request = validateSpawnParams(params);
+  if (request.placement !== "tab") {
+    throw lifecycleError(
+      "pane_identity_unavailable",
+      "the attended Electron host has no Herdr session pane; only tab placement is legitimate and no pane identity is manufactured or inherited",
+      "denied",
+    );
+  }
+  return request;
+}
+
+function resolveAttendedElectronPrerequisites(request, context, options) {
+  const canonicalRoot = resolveTrustedSpawnRepository(context.cwd, request.repository);
+  const modelArgv = resolveInstalledModel(request.model, options);
+  return { canonicalRoot, modelArgv };
+}
+
+function assertHerdrExecutableAvailable(options) {
+  try {
+    // The injected test seam is a real process boundary: verify the exact
+    // injected executable exists and is executable so a missing executable
+    // fails locally, without any process spawn.
+    const injected = options?.testExecutablePath;
+    if (typeof injected === "string" && injected.trim()) {
+      const real = realpathSync(injected);
+      const stat = statSync(real);
+      accessSync(real, fsConstants.X_OK);
+      if (!stat.isFile()) throw new Error("not a file");
+      return;
+    }
+    resolveTrustedHerdrExecutable(options);
+  } catch (error) {
+    if (error?.name === "HerdrLifecycleError") throw error;
+    throw lifecycleError(
+      "herdr_unavailable",
+      "the trusted Herdr executable is unavailable for the attended Electron boundary",
+    );
+  }
+}
+
+async function observeDuplicateRole(canonicalRoot, role, options, signal) {
+  const listed = await invokeHerdr(agentListArgv(), canonicalRoot, options, signal);
+  if (duplicateRoleExists(listed, role)) {
+    throw lifecycleError("duplicate_worker_name", "a live agent already holds this name", "denied");
+  }
+}
+
+export async function preflightAttendedElectronSpawn(params, context, options = {}) {
+  try {
+    attendedElectronContextError(context);
+    const request = attendedElectronParams(params);
+    assertHerdrExecutableAvailable(options);
+    const { canonicalRoot, modelArgv } = resolveAttendedElectronPrerequisites(request, context, options);
+    await observeDuplicateRole(canonicalRoot, request.role, options, null);
+    return {
+      schema: HERDR_LIFECYCLE_SCHEMA,
+      ok: true,
+      status: "preflight-verified",
+      boundary: ATTENDED_ELECTRON_BOUNDARY,
+      placement: "tab",
+      role: request.role,
+      repository: canonicalRoot,
+      modelArgv: [...modelArgv],
+      nonAuthorizing: true,
+      authorityCreated: false,
+    };
+  } catch (error) {
+    return errorResult(error);
+  }
+}
+
+function attendedElectronConfirmBody(role, modelArgv, canonicalRoot) {
+  return [
+    "One guarded attended-Electron composite spawn: create one tab, then start and verify one Pi agent.",
+    `Role: ${role}`,
+    "Placement: individual tab (the Electron host has no Herdr session pane)",
+    `Model: ${modelArgv[1]} (argv: ${modelArgv.join(" ")})`,
+    `Repository: ${canonicalRoot}`,
+    "No rollback is automatic; a failed step leaves the created state for human cleanup.",
+  ].join("\n");
+}
+
+export async function executeHerdrSpawnWorkerAttendedElectron(params, context, options = {}, signal) {
+  let request;
+  try {
+    attendedElectronContextError(context);
+    request = attendedElectronParams(params);
+    const { role, model, repository } = request;
+
+    // Resolve BEFORE any mutation: registry + realpath + Git root, plus the
+    // installed model roll. Duplicate live names are denied at spawn.
+    let canonicalRoot = resolveTrustedSpawnRepository(context.cwd, repository);
+    const modelArgv = resolveInstalledModel(model, options);
+    await observeDuplicateRole(canonicalRoot, role, options, signal);
+
+    // ONE native owner confirmation from the attended host. A denial is a
+    // stop; a throw is a structured refusal. Never re-asked, never retried.
+    let confirmed;
+    try {
+      confirmed = await context.ui.confirm(
+        "Spawn Herdr worker (attended Electron)",
+        attendedElectronConfirmBody(role, modelArgv, canonicalRoot),
+      );
+    } catch (error) {
+      throw lifecycleError(
+        "confirmation_failed",
+        `the attended confirmation failed: ${typeof error?.message === "string" ? error.message : "unknown error"}`,
+        "blocked",
+      );
+    }
+    if (confirmed !== true) {
+      return errorResult(lifecycleError("confirmation_denied", "native confirmation was not granted", "stopped"));
+    }
+
+    // Revalidation point after confirmation, before the first mutation. A
+    // change here is a post-confirmation race: the caller reports it as a
+    // refusal; nothing has been mutated yet.
+    const reconfirmedRoot = resolveTrustedSpawnRepository(context.cwd, repository);
+    if (reconfirmedRoot !== canonicalRoot) {
+      throw lifecycleError("repository_mismatch", "the trusted repository changed after confirmation");
+    }
+    canonicalRoot = reconfirmedRoot;
+
+    // Tab topology only: no coordinator pane identity is resolved, used, or
+    // manufactured anywhere on this path.
+    let tabId;
+    let rootPaneId;
+    let layoutRaw;
+    try {
+      layoutRaw = await invokeHerdr(tabCreateArgv(canonicalRoot, role), canonicalRoot, options, signal);
+      ({ rootPaneId, tabId } = parseTabCreate(layoutRaw));
+    } catch (error) {
+      return partialResult(error, {
+        partial: "tab_created", paneId: rootPaneId, tabId, role, modelArgv,
+        ...(typeof layoutRaw === "string" ? { rawResponse: layoutRaw } : {}),
+      });
+    }
+
+    let agentStartSucceeded = false;
+    try {
+      // Re-check the registry between the mutations.
+      const betweenRoot = resolveTrustedSpawnRepository(context.cwd, repository);
+      if (betweenRoot !== canonicalRoot) {
+        throw lifecycleError("repository_mismatch", "the trusted repository changed between mutations");
+      }
+
+      // Start exactly once in the tab's root pane.
+      const startCall = startArgv(role, rootPaneId, modelArgv);
+      let startRaw;
+      try {
+        startRaw = await invokeHerdr(startCall, canonicalRoot, options, signal);
+        agentStartSucceeded = true;
+      } catch (error) {
+        throw lifecycleError("start_failed", error?.message || "Herdr agent start failed");
+      }
+
+      const postStartRoot = resolveTrustedSpawnRepository(context.cwd, repository);
+      if (postStartRoot !== canonicalRoot) {
+        throw lifecycleError("repository_mismatch", "the trusted repository changed after agent start");
+      }
+      canonicalRoot = postStartRoot;
+
+      const startedPaneId = readBackStart(startRaw, role, canonicalRoot, [...modelArgv]);
+      if (startedPaneId !== rootPaneId) {
+        throw lifecycleError("pane_mismatch", "agent start returned a different pane identity");
+      }
+      const agentRaw = await invokeHerdr(["agent", "get", role], canonicalRoot, options, signal);
+      const agentReadBack = readBackAgent(agentRaw, role, canonicalRoot, [...modelArgv]);
+      if (agentReadBack.paneId !== rootPaneId) {
+        throw lifecycleError("pane_mismatch", "agent get returned a different pane identity");
+      }
+      const paneRaw = await invokeHerdr(["pane", "get", rootPaneId], canonicalRoot, options, signal);
+      readBackPane(paneRaw, rootPaneId, canonicalRoot);
+
+      return {
+        schema: HERDR_LIFECYCLE_SCHEMA,
+        ok: true,
+        status: "spawned",
+        boundary: ATTENDED_ELECTRON_BOUNDARY,
+        role,
+        reportMarkers: reportMarkersForRole(role),
+        placement: "tab",
+        direction: null,
+        paneId: rootPaneId,
+        rootPaneId,
+        tabId,
+        modelArgv: [...modelArgv],
+        repository: canonicalRoot,
+        hashes: Object.freeze({
+          request: sha256(JSON.stringify(request)),
+          layoutCreateResponse: sha256(layoutRaw),
+          startResponse: sha256(startRaw),
+        }),
+        nonAuthorizing: true,
+        authorityCreated: false,
+      };
+    } catch (error) {
+      // Once agent start exits successfully, parsing or read-back failures
+      // cannot erase that mutation: report a live-agent partial.
+      return partialResult(error, {
+        partial: agentStartSucceeded ? "agent_started" : "tab_created",
+        paneId: rootPaneId, tabId, role, modelArgv,
+      });
+    }
+  } catch (error) {
+    return errorResult(error);
+  }
 }
 
 export function registerHerdrLifecycleInterface(pi, options = {}) {

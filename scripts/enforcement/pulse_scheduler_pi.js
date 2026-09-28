@@ -24,7 +24,7 @@ import {
 import { scanBoard } from "./pulse_core_pi.js";
 import { routeDecision } from "./router_engine_pi.js";
 import { createReservation, claimReservation, renewReservationLease, consumeReservation, releaseReservation, insertRouteDecision } from "./router_store_pi.js";
-import { isNativeTuiContext } from "./native_tui_context.js";
+import { isAttendedElectronContext, isNativeTuiContext } from "./native_tui_context.js";
 
 // ---------------------------------------------------------------------------
 // Board resolution and observation
@@ -571,7 +571,7 @@ export function validateSpawnMatchesEnvelope({ envelope, model, provider = null,
   return { ok: true, code: null, reason: null };
 }
 
-export function pulseWorkerSpawnSeam({ executeHerdrSpawnWorker } = {}) {
+export function pulseWorkerSpawnSeam({ executeHerdrSpawnWorker, executeHerdrSpawnWorkerAttendedElectron = null, spawnOptions = {} } = {}) {
   if (typeof executeHerdrSpawnWorker !== "function") {
     throw new Error("pulseWorkerSpawnSeam requires the guarded herdr-lifecycle executeHerdrSpawnWorker");
   }
@@ -595,7 +595,19 @@ export function pulseWorkerSpawnSeam({ executeHerdrSpawnWorker } = {}) {
         || resolve(repository) !== resolve(coordinator, "..", repositoryName)) {
       return { ok: false, code: "repository-mismatch", reason: "the assignment repository is not a canonical sibling of the coordinator repository" };
     }
-    return executeHerdrSpawnWorker({ placement: "tab", role, model, repository: repositoryName }, context, {}, signal);
+    // Explicit context dispatch. A native Pi TUI context keeps the existing
+    // guarded lifecycle unchanged. An explicit attended-Electron context (a
+    // separate class that never satisfies the TUI predicate) routes to the
+    // attended Electron boundary when the trusted host bound it; without a
+    // bound boundary the spawn fails closed here. No other context class is
+    // dispatched: the TUI predicate itself is not weakened for any caller.
+    if (isAttendedElectronContext(context)) {
+      if (typeof executeHerdrSpawnWorkerAttendedElectron !== "function") {
+        return { ok: false, code: "attended-electron-seam-required", reason: "an attended Electron context was supplied but the attended Electron spawn boundary was not bound (fails closed)" };
+      }
+      return executeHerdrSpawnWorkerAttendedElectron({ placement: "tab", role, model, repository: repositoryName }, context, spawnOptions, signal);
+    }
+    return executeHerdrSpawnWorker({ placement: "tab", role, model, repository: repositoryName }, context, spawnOptions, signal);
   };
 }
 
