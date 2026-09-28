@@ -1,0 +1,4 @@
+#!/bin/sh
+# Repository-local gate; preserve any existing hook chain before opting in.
+repo=$(git rev-parse --show-toplevel) || exit 1
+exec python3 "$repo/scripts/codebase_inventory_gate.py" --repo "$repo"
