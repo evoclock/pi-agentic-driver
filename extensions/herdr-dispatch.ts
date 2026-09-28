@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import { createTaskStore } from "./task-store-adapter.ts";
+
 async function herdrDispatchCore(pi) {
   const dispatch = await import(new URL("../scripts/enforcement/herdr_async_dispatch_pi.js", import.meta.url).href);
   const lifecycle = await import(new URL("../scripts/enforcement/herdr_lifecycle_pi.js", import.meta.url).href);
@@ -23,7 +25,9 @@ async function herdrDispatchCore(pi) {
       signal,
     );
 
-  return dispatch.registerWorkerDispatchInterface(pi, { spawnReplacement });
+  // A fresh read-only session view per journey; registration remains keyed
+  // on the real Pi API identity for the enforcement module's dedupe guard.
+  return dispatch.registerWorkerDispatchInterface(pi, { spawnReplacement, taskStoreFactory: createTaskStore });
 }
 
 // Async transport seam (vogelkop phase #47): submit returns a versioned,

@@ -383,9 +383,8 @@ starting revision, assigned branch, allowed paths, stopping point, expiry, and
 interaction profile.
 
 Blocked, altered, expired, reused, or unauthorized assignments fail closed.
-The journey validates the authenticated envelope before each consequential
-step. It runs on the assigned branch and consumes the envelope when the
-attempt ends.
+Board Pulse handles board assignment with full route evidence. The session
+worker journey does not claim board cards or mint board envelopes.
 
 Consuming an envelope releases the claim. It does not mark the card done.
 
@@ -579,10 +578,13 @@ end" or "don't wait for me" and the journey runs in autonomous mode. Say
 "do these two things" and it runs in the normal mode, pausing for you
 between steps. The mode is recorded in the report either way.
 
-Autonomous journeys can run work you dispatch directly or work claimed from
-a task board. Board-managed journeys use the card's authenticated assignment
-envelope and the board's automation policy. Direct journeys continue to work
-without a board.
+`agentic_worker_dispatch` observes coordinator session tasks through a
+read-only task store; dispatch no longer fails for lack of that store.
+Interactive steps require native confirmation. Autonomous journeys follow
+the session's existing autonomy semantics. Board cards in canonical
+`TASKS.md` are assigned by Board Pulse and `agentic_kanban_board_dispatch`,
+which own the route evidence needed for claims and envelopes. The session
+journey never claims board cards.
 
 ### The cast
 

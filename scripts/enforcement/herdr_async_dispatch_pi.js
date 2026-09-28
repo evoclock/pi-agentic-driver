@@ -289,7 +289,10 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   }
   const role = params.role;
   const stepPrompt = params.stepPrompt;
-  const taskStore = options.taskStore;
+  // A factory scopes observational advancement to this journey. Direct callers
+  // may still inject the original read-only taskStore contract unchanged.
+  const taskStore = typeof options.taskStoreFactory === "function"
+    ? options.taskStoreFactory(context) : options.taskStore;
   const spawnReplacement = typeof options.spawnReplacement === "function" ? options.spawnReplacement : null;
   const journey = { mode, autonomy, role, steps: [], status: "failed", code: null, handoff: null };
   const dispatched = new Set();
@@ -670,11 +673,13 @@ export function registerWorkerDispatchInterface(pi, options = {}) {
   pi.registerTool({
     name: WORKER_DISPATCH_TOOL,
     label: "Worker Dispatch And Pulse",
-    description: "Observe worker liveness (pulse) or run one bounded continuous worker journey over the existing task sequence. Continuous mode is the default; turn-by-turn is explicit opt-in. Journeys emit one collated marked report, never create task cards, never retry, and are bounded by step count, not wall-clock.",
-    promptSnippet: "Use agentic_worker_dispatch to pulse a worker or run one bounded continuous journey over the existing task sequence; it observes dispatchable tasks without creating cards and grants no authority.",
+    description: "Observe worker liveness (pulse) or run a bounded journey over coordinator session tasks. Interactive dispatch requires native confirmation; autonomous journeys follow their existing session confirmation semantics. Canonical TASKS.md board cards are dispatched through Board Pulse or agentic_kanban_board_dispatch, not this journey.",
+    promptSnippet: "Use agentic_worker_dispatch for coordinator session tasks only; board cards belong to Board Pulse or agentic_kanban_board_dispatch.",
     promptGuidelines: [
-      "agentic_worker_dispatch pulse observes liveness, state, and dispatch eligibility without granting authority.",
-      "agentic_worker_dispatch dispatch runs at most maxSteps single-exchange steps; any exchange failure ends the journey explicitly with no retry or resend.",
+      "agentic_worker_dispatch pulse observes liveness and eligibility without granting authority.",
+      "agentic_worker_dispatch dispatch observes session tasks without claiming board cards; interactive steps require native confirmation, while autonomous steps follow the session's existing autonomy semantics.",
+      "Board Pulse and agentic_kanban_board_dispatch own TASKS.md claims and the full route evidence required for envelopes. A journey never claims board cards.",
+      "Dispatch runs at most maxSteps single-exchange steps; exchange failure ends the journey without retry or resend.",
     ],
     parameters: WORKER_DISPATCH_PARAMETERS,
     async execute(_id, params, signal, _update, context) {
