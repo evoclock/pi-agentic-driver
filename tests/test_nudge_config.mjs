@@ -7,7 +7,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -288,4 +288,51 @@ test("the manual verified flag is not a substitute for the probe: unverified sta
   const result = validateNudgeConfig(validConfig({ enabled: true }), { upstreamCapabilityVerified: false });
   assert.equal(result.ok, true);
   assert.equal(result.operational, false);
+});
+
+// ---------------------------------------------------------------------------
+// The probe must not execute an executable that fails the runtime's
+// realpath/Cellar trust validation. These fixtures build real paths (a plain
+// executable outside Cellar, and a symlink) and prove the probe fails closed
+// BEFORE any execution. The missing-nudge fail-closed test above is preserved.
+// ---------------------------------------------------------------------------
+
+test("the probe fails closed on an untrusted executable instead of running it", async () => {
+  const { probeNudgeUpstreamCapability } = await import("../scripts/enforcement/nudge_config_pi.js");
+  const dir = mkdtempSync(join(tmpdir(), "nudge-probe-untrusted-"));
+  try {
+    const marker = join(dir, "executed.marker");
+    const untrusted = join(dir, "herdr");
+    // This script would advertise the capability if it ever ran; the marker
+    // proves whether execution happened at all.
+    writeFileSync(untrusted, `#!/bin/sh\ntouch ${marker}\necho "herdr agent nudge"\n`);
+    chmodSync(untrusted, 0o755);
+    const verdict = await probeNudgeUpstreamCapability({ executable: untrusted });
+    assert.equal(verdict.verified, false);
+    assert.match(verdict.reason, /untrusted executable/);
+    assert.equal(existsSync(marker), false, "the probe must not execute an untrusted executable");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("the probe fails closed on a symlinked executable outside the trusted Cellar path", async () => {
+  const { probeNudgeUpstreamCapability } = await import("../scripts/enforcement/nudge_config_pi.js");
+  const dir = mkdtempSync(join(tmpdir(), "nudge-probe-symlink-"));
+  try {
+    const target = join(dir, "herdr-target");
+    writeFileSync(target, "#!/bin/sh\necho herdr agent nudge\n");
+    chmodSync(target, 0o755);
+    const link = join(dir, "herdr-link");
+    symlinkSync(target, link);
+    const verdict = await probeNudgeUpstreamCapability({ executable: link });
+    assert.equal(verdict.verified, false);
+    assert.match(verdict.reason, /untrusted executable/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a runProcess seam still verifies without a filesystem binary (trust applies to real executables only)", async () => {
+  const { probeNudgeUpstreamCapability } = await import("../scripts/enforcement/nudge_config_pi.js");
+  const verdict = await probeNudgeUpstreamCapability({
+    runProcess: async () => ({ code: 0, stdout: "herdr agent nudge <target> <text>" }),
+  });
+  assert.equal(verdict.verified, true);
 });

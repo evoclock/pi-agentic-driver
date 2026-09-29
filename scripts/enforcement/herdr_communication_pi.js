@@ -453,16 +453,27 @@ function validateParams(params) {
   return params;
 }
 
+// The single trusted-executable trust check (realpath must resolve to the
+// Cellar-installed Herdr binary, be a regular file, and be executable).
+// Extracted so other read-only seams (for example the NUDGE capability probe)
+// validate an executable path the exact same way the runtime does, instead of
+// re-implementing the check. It never weakens or replaces the runtime path:
+// productionExecutable still gates on platform and maps any failure to the
+// same trusted_executable_unavailable error.
+export function trustedHerdrExecutableRealPath(candidate) {
+  const real = realpathSync(candidate);
+  const stat = statSync(real);
+  accessSync(real, fsConstants.X_OK);
+  if (!stat.isFile() || !TRUSTED_HERDR_REALPATH_PATTERN.test(real)) throw new Error("trust mismatch");
+  return real;
+}
+
 function productionExecutable() {
   if (process.platform !== "darwin") {
     throw communicationError("trusted_executable_unavailable", `the configured Herdr ${HERDR_VERSION} executable is unavailable`);
   }
-  let real;
   try {
-    real = realpathSync(TRUSTED_HERDR_EXECUTABLE);
-    const stat = statSync(real);
-    accessSync(real, fsConstants.X_OK);
-    if (!stat.isFile() || !TRUSTED_HERDR_REALPATH_PATTERN.test(real)) throw new Error("trust mismatch");
+    trustedHerdrExecutableRealPath(TRUSTED_HERDR_EXECUTABLE);
   } catch {
     throw communicationError("trusted_executable_unavailable", `the configured Herdr ${HERDR_VERSION} executable was not observed`);
   }

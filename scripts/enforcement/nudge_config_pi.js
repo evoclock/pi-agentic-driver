@@ -2,6 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { NUDGE_STUCK_REASONS } from "./nudge_classifier_pi.js";
+import {
+  TRUSTED_HERDR_EXECUTABLE,
+  resolveTrustedHerdrExecutable,
+  trustedHerdrExecutableRealPath,
+} from "./herdr_communication_pi.js";
 
 // NUDGE §7 config schema and validation (SPEC_TASK43_NUDGE.md v3.3.1,
 // rule 30). Pure module: schema constants, the closed validator, and the
@@ -167,12 +172,26 @@ export function validateNudgeConfig(config, { upstreamCapabilityVerified = null,
 //    ---------------------------------------------------------------------
 //    The probe runs the trusted herdr binary (never PATH-resolved) with the
 //    nudge help verb and checks the pinned capability marker in the output.
-//    Any failure — missing binary, non-zero exit, missing marker — means the
-//    capability is NOT verified. A `runProcess` seam may be injected for
-//    tests; production probing uses the trusted executable directly.
+//    Any failure — missing binary, untrusted/symlinked path, non-zero exit,
+//    missing marker — means the capability is NOT verified. The executable
+//    goes through the SAME realpath/Cellar trust validation the runtime uses
+//    (herdr_communication_pi.js), so the read-only probe can never execute an
+//    untrusted path. A `runProcess` seam may be injected for tests (a fake
+//    process needs no binary); production probing uses the trusted executable.
 // ---------------------------------------------------------------------------
 
 export const NUDGE_CAPABILITY_PROBE_MARKER = "agent nudge";
+
+// Resolve and trust-validate the executable the probe will run. The production
+// constant is resolved through the runtime's own entry point (platform gate +
+// realpath/Cellar trust). A caller-supplied path (tests) receives the exact
+// same realpath/regular-file/executable/Cellar validation, so an untrusted or
+// symlinked executable fails closed just as it would in production.
+function trustedProbeExecutable(candidate) {
+  if (candidate === TRUSTED_HERDR_EXECUTABLE) return resolveTrustedHerdrExecutable({});
+  trustedHerdrExecutableRealPath(candidate);
+  return candidate;
+}
 
 export async function probeNudgeUpstreamCapability({ runProcess = null, executable = null } = {}) {
   // No probe seam and no trusted binary: the capability is unverified. This
@@ -181,6 +200,16 @@ export async function probeNudgeUpstreamCapability({ runProcess = null, executab
   const probeExecutable = typeof executable === "string" && executable.trim() ? executable : null;
   if (probeRun === null && probeExecutable === null) {
     return { verified: false, reason: "no nudge-capability probe seam or trusted executable is available; the upstream herdr nudge verb is not verified" };
+  }
+  // Fail closed BEFORE any execution when the executable does not pass the
+  // runtime's trusted-executable validation.
+  let trustedExecutable = null;
+  if (probeRun === null) {
+    try {
+      trustedExecutable = trustedProbeExecutable(probeExecutable);
+    } catch (error) {
+      return { verified: false, reason: `the nudge-capability probe refused an untrusted executable: ${String(error?.message || error).slice(0, 200)}` };
+    }
   }
   const { execFileSync } = await import("node:child_process");
   const argv = ["agent", "nudge", "--help"];
@@ -193,7 +222,7 @@ export async function probeNudgeUpstreamCapability({ runProcess = null, executab
       }
       stdout = String(result.stdout ?? "");
     } else {
-      stdout = execFileSync(probeExecutable, argv, { encoding: "utf8", timeout: 5_000, shell: false });
+      stdout = execFileSync(trustedExecutable, argv, { encoding: "utf8", timeout: 5_000, shell: false });
     }
   } catch (error) {
     return { verified: false, reason: `the nudge-capability probe failed: ${String(error?.message || error).slice(0, 200)}` };
