@@ -179,7 +179,7 @@ export function evidenceDisplayLines(reviewed) {
 const VIEW_LINES = 24;
 
 /** Minimal terminal-only overlay component for the interactive TUI. */
-export async function createEvidenceOverlay({ done, lines }) {
+export async function createEvidenceOverlay({ done, lines, tui }) {
   const { visibleWidth, truncateToWidth } = await loadWidthHelpers();
   let offset = 0;
   const maxOffset = () => Math.max(0, lines.length - VIEW_LINES);
@@ -197,13 +197,12 @@ export async function createEvidenceOverlay({ done, lines }) {
     },
     handleInput(data) {
       const previous = offset;
-      if (data === "\x1b[A") { offset = Math.max(0, offset - 1); return; }
-      if (data === "\x1b[B") { offset = Math.min(maxOffset(), offset + 1); return; }
-      if (data === " ") { offset = Math.min(maxOffset(), offset + VIEW_LINES); return; }
-      if (data === "\x1b" || data === "q" || data === "\r" || data === "\n") done(undefined);
-      // Content changed only when the scroll offset moved; callers invalidate
-      // and request a render when the returned offset differs.
-      return offset !== previous ? offset : undefined;
+      if (data === "\x1b[A") offset = Math.max(0, offset - 1);
+      else if (data === "\x1b[B") offset = Math.min(maxOffset(), offset + 1);
+      else if (data === " ") offset = Math.min(maxOffset(), offset + VIEW_LINES);
+      else if (data === "\x1b" || data === "q" || data === "\r" || data === "\n") done(undefined);
+      // Only an actual scroll change redraws; unrelated keys request nothing.
+      if (offset !== previous && typeof tui?.requestRender === "function") tui.requestRender();
     },
   };
 }
@@ -261,8 +260,9 @@ export async function registerRecoveryEvidenceReview(pi, _options = {}) {
       }
       // The only full-evidence surface: a transient terminal overlay that
       // never reaches the session transcript, tool results, or the model.
-      await context.ui.custom(async (_tui, _theme, _keybindings, done) =>
-        createEvidenceOverlay({ done, lines: evidenceDisplayLines(reviewed) }));
+      // The injected tui handle is captured so scrolling can request renders.
+      await context.ui.custom((tui, _theme, _keybindings, done) =>
+        createEvidenceOverlay({ done, lines: evidenceDisplayLines(reviewed), tui }));
       return undefined;
     },
   });

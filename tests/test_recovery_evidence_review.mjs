@@ -53,7 +53,7 @@ function fixture(t) {
 // A faithful mock of the native TUI context: mode/hasUI/custom/select mirror
 // the real ExtensionCommandContext contract used by the fail-closed gate.
 function mockTui({ customCalls = [], selectValue = null } = {}) {
-  const calls = { custom: [], notify: [], select: 0 };
+  const calls = { custom: [], notify: [], select: 0, requestRender: 0 };
   const ctx = {
     mode: "tui", hasUI: true,
     ui: {
@@ -67,7 +67,9 @@ function mockTui({ customCalls = [], selectValue = null } = {}) {
       async custom(factory) {
         calls.custom.push(factory);
         let done;
-        const component = await factory(undefined, undefined, undefined, (value) => { done = value; });
+        // A faithful stand-in for the injected Pi tui handle.
+        const tui = { requestRender: () => { calls.requestRender += 1; } };
+        const component = await factory(tui, undefined, undefined, (value) => { done = value; });
         return { component, done: () => done?.(undefined) };
       },
     },
@@ -131,7 +133,8 @@ test("TUI review shows the full entry via the overlay only and never notify outp
     const out = await registered.commands[0].handler("", ctx);
     assert.equal(out, undefined);
     assert.equal(calls.custom.length, 1);
-    const component = await calls.custom[0](undefined, undefined, undefined, () => {});
+    const tui = { requestRender: () => { calls.requestRender += 1; } };
+    const component = await calls.custom[0](tui, undefined, undefined, () => {});
     const rendered = [component.render(80).join("\n")];
     // Scroll through the whole overlay content, as the owner would.
     for (let i = 0; i < 20; i += 1) { component.handleInput(" "); rendered.push(component.render(80).join("\n")); }
@@ -143,6 +146,14 @@ test("TUI review shows the full entry via the overlay only and never notify outp
       assert.equal(message.includes("please report status"), false);
       assert.equal(message.includes("messageText"), false);
     }
+    // Scrolling must drive redraws through the injected tui handle: one
+    // requestRender per actual offset change, none for unrelated keys.
+    const renderCallsAfterScroll = calls.requestRender;
+    assert.ok(renderCallsAfterScroll >= 1, "scrolling must request renders");
+    const beforeUnrelated = calls.requestRender;
+    component.handleInput("x");
+    component.handleInput("\t");
+    assert.equal(calls.requestRender, beforeUnrelated, "unrelated keys must not request renders");
   } finally {
     if (previousRoot === undefined) delete process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT;
     else process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT = previousRoot;
@@ -301,9 +312,13 @@ test("overlay renders wide Unicode and ANSI with Pi tui width helpers", async ()
     // Offline fallback: plain-length bound still holds.
     for (const line of rendered) assert.ok(line.length <= 40 || line === "", `line too long: ${line.length}`);
   }
-  // Scrolling returns the new offset so the caller can invalidate + render;
-  // a short list cannot scroll, so arrows leave the offset unchanged.
+  // A short list cannot scroll: no offset change, no render request, and
+  // unrelated keys request nothing even with a tui handle present.
+  const tui = { requestRender: () => { renders += 1; } };
+  let renders = 0;
+  overlay.tui = tui;
   assert.equal(overlay.handleInput("\x1b[B"), undefined);
   assert.equal(overlay.handleInput("\x1b[A"), undefined);
   assert.equal(overlay.handleInput("x"), undefined);
+  assert.equal(renders, 0);
 });
