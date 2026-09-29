@@ -67,7 +67,7 @@ function mockTui({ customCalls = [], selectValue = null } = {}) {
       async custom(factory) {
         calls.custom.push(factory);
         let done;
-        const component = factory(undefined, undefined, undefined, (value) => { done = value; });
+        const component = await factory(undefined, undefined, undefined, (value) => { done = value; });
         return { component, done: () => done?.(undefined) };
       },
     },
@@ -90,6 +90,7 @@ function harness(t) {
   registerRecoveryEvidenceReviewExtension(pi);
   return { pi, registered };
 }
+
 
 test("registration adds one owner command and never a model-callable tool", () => {
   const { registered } = harness();
@@ -118,18 +119,19 @@ test("TUI review shows the full entry via the overlay only and never notify outp
   const requested = recordRecoveryRequest(store, entry());
   const terminal = recordRecoveryResult(store, requested, { result: "delivered", deliveryState: "delivered" });
   closeRecoveryEvidenceStore(store);
+  // The trusted root must be set BEFORE registration: registration snapshots it.
+  const previousRoot = process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT;
+  process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT = root;
   const { registered } = harness();
   // Select the terminal record by exact label: same-second timestamps make
   // the store's listing order non-deterministic between the two phases.
   const { ctx, calls } = mockTui({ selectValue: (labels) =>
     labels.find((label) => label.startsWith("terminal · j1 · ")) ?? null });
-  const previousRoot = process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT;
-  process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT = root;
   try {
     const out = await registered.commands[0].handler("", ctx);
     assert.equal(out, undefined);
     assert.equal(calls.custom.length, 1);
-    const component = calls.custom[0](undefined, undefined, undefined, () => {});
+    const component = await calls.custom[0](undefined, undefined, undefined, () => {});
     const rendered = [component.render(80).join("\n")];
     // Scroll through the whole overlay content, as the owner would.
     for (let i = 0; i < 20; i += 1) { component.handleInput(" "); rendered.push(component.render(80).join("\n")); }
@@ -150,10 +152,10 @@ test("TUI review shows the full entry via the overlay only and never notify outp
 test("missing store is reported without creating any storage", async (t) => {
   const { scratch, root } = fixture(t);
   rmSync(root, { recursive: true, force: true });
-  const { registered } = harness();
-  const { ctx, calls } = mockTui();
   const previousRoot = process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT;
   process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT = root;
+  const { registered } = harness();
+  const { ctx, calls } = mockTui();
   try {
     const out = await registered.commands[0].handler("", ctx);
     assert.equal(out, undefined);
@@ -196,6 +198,18 @@ test("host derives the root; arguments never influence it", async (t) => {
   process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT = "/private/var/owner-evidence";
   try {
     assert.equal(resolveReviewEvidenceRoot(), "/private/var/owner-evidence");
+    // Trailing slashes and redundant separators are canonicalized.
+    process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT = "/private/var/owner-evidence///";
+    assert.equal(resolveReviewEvidenceRoot(), "/private/var/owner-evidence");
+    process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT = "/private/var/./owner/../owner-evidence/";
+    assert.equal(resolveReviewEvidenceRoot(), "/private/var/owner-evidence");
+    // Relative and ~ paths are refused, never silently expanded.
+    process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT = "relative/root";
+    assert.throws(() => resolveReviewEvidenceRoot(), /absolute path/);
+    process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT = "~/owner-evidence";
+    assert.throws(() => resolveReviewEvidenceRoot(), /absolute path/);
+    process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT = "~/owner-evidence";
+    assert.throws(() => resolveReviewEvidenceRoot(), /~/);
     delete process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT;
     process.env.PI_CODING_AGENT_DIR = "/home/owner/.pi/agent";
     assert.equal(resolveReviewEvidenceRoot(), join("/home/owner/.pi/agent", "recovery-evidence"));
@@ -205,6 +219,30 @@ test("host derives the root; arguments never influence it", async (t) => {
   } finally {
     if (previous === undefined) delete process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT;
     else process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT = previous;
+  }
+});
+
+test("registration snapshots the trusted root; later env mutation cannot redirect", async (t) => {
+  const { root } = fixture(t);
+  const store = openRecoveryEvidenceStore({ root });
+  const requested = recordRecoveryRequest(store, entry());
+  closeRecoveryEvidenceStore(store);
+  const previousRoot = process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT;
+  process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT = root;
+  const { registered } = harness();
+  const { ctx, calls } = mockTui({ selectValue: () => null });
+  try {
+    // The first registration snapshotted the root. A second registration in
+    // the same process reuses the same WeakSet-guarded state; verify the
+    // snapshotted root survives a later env mutation.
+    process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT = "/nonexistent-redirect-target";
+    const out = await registered.commands[0].handler("", ctx);
+    assert.equal(out, undefined);
+    assert.deepEqual(calls.notify, []); // no evidence-store-missing error
+    assert.equal(calls.select, 1, "selection ran against the snapshotted root");
+  } finally {
+    if (previousRoot === undefined) delete process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT;
+    else process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT = previousRoot;
   }
 });
 
@@ -238,4 +276,34 @@ test("read-only review never mutates store permissions or files", async (t) => {
   const after = statSync(join(root, "recovery-evidence.v1.sqlite")).mtimeMs;
   assert.equal(after, before);
   assert.equal(statSync(root).mode & 0o077, 0);
+});
+
+test("overlay renders wide Unicode and ANSI with Pi tui width helpers", async () => {
+  const { createEvidenceOverlay } = reviewModule;
+  const overlay = await createEvidenceOverlay({
+    done: () => {},
+    lines: [
+      "plain ascii line",
+      "wide: 中中中中中中中中中中中中中中中中中中中中 and more content beyond width",
+      `styled: \u001b[31mred evidence text\u001b[0m with escapes and padding padding padding`,
+      "combining: e\u0301\u0301 accents e\u0301 more tail content that should survive width cuts",
+    ],
+  });
+  const rendered = overlay.render(40);
+  // Header + blank + 4 content lines, padded to the VIEW_LINES window.
+  assert.ok(rendered.length >= 6, `rendered ${rendered.length} lines`);
+  // No rendered line may exceed the available width in visible columns when
+  // the real Pi tui helpers are available.
+  try {
+    const { visibleWidth } = await import("@earendil-works/pi-tui");
+    for (const line of rendered) assert.ok(visibleWidth(line) <= 40, `line too wide: ${visibleWidth(line)}`);
+  } catch {
+    // Offline fallback: plain-length bound still holds.
+    for (const line of rendered) assert.ok(line.length <= 40 || line === "", `line too long: ${line.length}`);
+  }
+  // Scrolling returns the new offset so the caller can invalidate + render;
+  // a short list cannot scroll, so arrows leave the offset unchanged.
+  assert.equal(overlay.handleInput("\x1b[B"), undefined);
+  assert.equal(overlay.handleInput("\x1b[A"), undefined);
+  assert.equal(overlay.handleInput("x"), undefined);
 });
