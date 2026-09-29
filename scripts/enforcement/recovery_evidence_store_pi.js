@@ -90,6 +90,14 @@ function fetchRow(store, { journeyId, entryId, phase }) {
     .get(journeyId, entryId, phase);
 }
 
+/** Bounded, read-only listing of closed retrieval references; never bodies. */
+export function listRecoveryEvidenceReferences(store, { limit = 50 } = {}) {
+  if (!Number.isSafeInteger(limit) || limit < 1) throw refuse("invalid-bound", "limit must be a positive safe integer");
+  return store.db.prepare(
+    "SELECT journey_id, entry_id, phase, digest, bytes FROM evidence ORDER BY created_at DESC, journey_id, entry_id, phase LIMIT ?",
+  ).all(limit).map((row) => reference(row));
+}
+
 /** Returns exact bytes only when the caller's reference and its predecessor verify. */
 export function readRecoveryEvidence(store, ref) {
   if (!ref || ref.schema !== RECOVERY_EVIDENCE_SCHEMA || !["requested", "terminal"].includes(ref.phase)
