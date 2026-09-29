@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/evoclock/pi-agentic-driver/blob/main/config/codebase-inventory.schema.json",
+  "title": "Codebase inventory file record v1",
+  "description": "One compact JSON object per tracked code file; JSONL lines sorted by repository-relative path. Static extraction is best-effort; this is a search aid, not an authorization source.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "subdir", "filename", "blob_sha", "loc", "size_bytes", "language", "functions", "classes", "dependencies", "exported_symbols"],
+  "properties": {
+    "path": {"type": "string", "minLength": 1, "description": "Repository-relative POSIX path"},
+    "subdir": {"type": "string"},
+    "filename": {"type": "string", "minLength": 1},
+    "blob_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$", "description": "Git SHA-1 blob ID for the source bytes, even in SHA-256 repositories this v1 field denotes the SHA-1 blob computation"},
+    "loc": {"type": "integer", "minimum": 0},
+    "size_bytes": {"type": "integer", "minimum": 0},
+    "language": {"enum": ["python", "shell", "javascript", "typescript"]},
+    "functions": {"type": "array", "items": {"$ref": "#/$defs/named"}, "uniqueItems": true},
+    "classes": {"type": "array", "items": {"$ref": "#/$defs/named"}, "uniqueItems": true},
+    "dependencies": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "exported_symbols": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+  },
+  "$defs": {"named": {"type": "object", "required": ["name"], "additionalProperties": false, "properties": {"name": {"type": "string", "minLength": 1}}}}
+}
