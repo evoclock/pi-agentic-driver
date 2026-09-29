@@ -59,6 +59,8 @@
     "scripts/enforcement/nudge_classifier_pi.js",
     "scripts/enforcement/nudge_config_pi.js",
     "scripts/enforcement/nudge_ledger_pi.js",
+    "scripts/enforcement/recovery_evidence_store_pi.js",
+    "docs/recovery-evidence-store.md",
     "scripts/enforcement/nudge_reason_state_pi.js",
     "scripts/enforcement/nudge_validate_pi.js",
     ".agentic-driver/nudge.defaults.json",
