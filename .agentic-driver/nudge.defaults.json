@@ -1,0 +1,11 @@
+{
+  "schema": "agentic-driver.herdr-nudge-config.v1",
+  "revision": 1,
+  "nudge": {
+    "enabled": false,
+    "reasonAttemptWindowPolls": 12,
+    "backoffCycles": 2,
+    "backoffMaxCycles": 8,
+    "nudgeMaxBytes": 2048
+  }
+}
