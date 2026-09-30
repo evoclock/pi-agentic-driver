@@ -296,6 +296,14 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
     ? options.taskStoreFactory(context) : options.taskStore;
   const spawnReplacement = typeof options.spawnReplacement === "function" ? options.spawnReplacement : null;
   const journey = { mode, autonomy, role, steps: [], status: "failed", code: null, handoff: null };
+  // Snapshot once at journey start; observational evidence never gates or
+  // authorizes existing dispatch, replacement, or board execution.
+  let taskProvenance = { status: "source-unavailable", tasks: [] };
+  try {
+    if (typeof taskStore?.captureProvenance === "function") taskProvenance = taskStore.captureProvenance();
+  } catch {
+    taskProvenance = { status: "source-unavailable", tasks: [] };
+  }
   const dispatched = new Set();
   const communicationOptions = options.communication ?? options;
   const replacementRole = options.replacementRole ?? role;
@@ -343,6 +351,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       report: journeyReceipt(journey),
       reportMarkers: { open: "[WORKER_JOURNEY_REPORT_BEGIN]", close: "[WORKER_JOURNEY_REPORT_END]" },
       handoff: journey.handoff,
+      taskProvenance,
       nonAuthorizing: true,
       persisted: false,
     };
