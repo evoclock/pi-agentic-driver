@@ -44,7 +44,8 @@ sanitized:
   `{taskDisplayId, digest}` where `digest` is the deterministic digest of the
   frozen LOCAL capture (title, description, capturedAt are never serialized).
 - The raw ID stays internal to dispatch selection, the dispatched set, and
-  the worker prompt; it is not recoverable from the result.
+  the worker prompt. The result does not include it in driver-owned fields,
+  but guessable IDs can be inferred from the deterministic token.
 
 ## Breaking change (main → this branch)
 
