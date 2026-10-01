@@ -19,6 +19,7 @@ import {
 import { isNativeTuiContext } from "./native_tui_context.js";
 import { prepareEnvelopeForExecution, validateEnvelopeForExecution, consumeEnvelope, gitHead } from "./task_board_core_pi.js";
 import { sha256Hex } from "./task_board_core_pi.js";
+import { sessionTaskDisplayId, PROVENANCE_CAPTURE_STATUSES } from "./session_tasks_core_pi.js";
 import { execFileSync } from "node:child_process";
 
 export const WORKER_DISPATCH_TOOL = "agentic_worker_dispatch";
@@ -226,7 +227,7 @@ function journeyReceipt(journey) {
     `status: ${journey.status}`,
     ...(journey.handoff ? [`handoff: attempted=${journey.handoff.attempted} ok=${journey.handoff.ok ?? false} role=${journey.handoff.role ?? journey.role} reason=${journey.handoff.reason ?? "none"}`] : []),
     ...journey.steps.map((step, index) =>
-      `step ${index + 1}: task=${step.taskId ?? "none"} status=${step.status} report=${step.report ?? "(none)"}`),
+      `step ${index + 1}: taskDisplayId=${step.taskDisplayId ?? "none"} status=${step.status} report=${step.report ?? "(none)"}`),
     "[WORKER_JOURNEY_REPORT_END]",
   ].join("\n");
   if (Buffer.byteLength(body, "utf8") > MAX_REPORT_BYTES) {
@@ -239,10 +240,10 @@ function journeyReceipt(journey) {
 // step/terminal evidence it belongs to. Not authority, not persisted
 // separately, and not written on every timer tick — only at assignment start
 // and meaningful checkpoints. Repository observations are read-only.
-function progressSnapshot({ taskId = null, envelope = null, repository = null, workerStatus = null, lastReportAt = null }) {
+function progressSnapshot({ taskDisplayId = null, envelope = null, repository = null, workerStatus = null, lastReportAt = null }) {
   const snapshot = {
     schema: "agentic-driver.progress-snapshot.v1",
-    taskId,
+    taskDisplayId,
     at: new Date().toISOString(),
   };
   if (envelope) {
@@ -296,6 +297,36 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
     ? options.taskStoreFactory(context) : options.taskStore;
   const spawnReplacement = typeof options.spawnReplacement === "function" ? options.spawnReplacement : null;
   const journey = { mode, autonomy, role, steps: [], status: "failed", code: null, handoff: null };
+  // Snapshot once at journey start; observational evidence never gates or
+  // authorizes existing dispatch, replacement, or board execution.
+  // Full immutable capture stays local for drift revalidation. The tool
+  // result only ever carries the sanitized projection: task id, digest, and
+  // source identity — never raw title/description planning text.
+  let taskProvenance = { status: "source-unavailable", tasks: [] };
+  try {
+    if (typeof taskStore?.captureProvenance === "function") taskProvenance = taskStore.captureProvenance();
+  } catch {
+    taskProvenance = { status: "source-unavailable", tasks: [] };
+  }
+  let projectedTaskProvenance;
+  try {
+    projectedTaskProvenance = typeof taskStore?.projectProvenance === "function"
+      ? taskStore.projectProvenance(taskProvenance)
+      : null;
+  } catch {
+    projectedTaskProvenance = null;
+  }
+  if (!projectedTaskProvenance || typeof projectedTaskProvenance !== "object") {
+    // Closed fallback: a throwing or absent projector never alters dispatch,
+    // never surfaces raw task material, and never passes a status through.
+    projectedTaskProvenance = Object.freeze({
+      status: typeof taskProvenance?.status === "string" && PROVENANCE_CAPTURE_STATUSES.includes(taskProvenance.status)
+        ? taskProvenance.status
+        : "source-unavailable",
+      source: null,
+      tasks: [],
+    });
+  }
   const dispatched = new Set();
   const communicationOptions = options.communication ?? options;
   const replacementRole = options.replacementRole ?? role;
@@ -322,7 +353,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
         status = "failed";
         journey.status = "failed";
         journey.code = consumed?.code || "envelope-consume-failed";
-        journey.steps.push({ step: journey.steps.length + 1, taskId: null, status: "failed", error: consumed?.reason || "envelope consumption failed closed" });
+        journey.steps.push({ step: journey.steps.length + 1, taskDisplayId: null, status: "failed", error: consumed?.reason || "envelope consumption failed closed" });
       } else {
         envelopeConsumed = true;
       }
@@ -343,6 +374,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       report: journeyReceipt(journey),
       reportMarkers: { open: "[WORKER_JOURNEY_REPORT_BEGIN]", close: "[WORKER_JOURNEY_REPORT_END]" },
       handoff: journey.handoff,
+      taskProvenance: projectedTaskProvenance,
       nonAuthorizing: true,
       persisted: false,
     };
@@ -352,10 +384,10 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   // worker for the same trusted repository/role through the existing
   // herdr-lifecycle spawn boundary (fixed argv, shell:false) and resume the
   // pending task sequence. Reuses the same task cards; never duplicates them.
-  const handoffToReplacement = async (reason, taskId = null) => {
+  const handoffToReplacement = async (reason, taskDisplayId = null) => {
     journey.status = "worker-unresponsive";
     journey.code = "worker-unresponsive";
-    journey.steps.push({ step: journey.steps.length + 1, taskId, status: "worker-unresponsive", error: reason });
+    journey.steps.push({ step: journey.steps.length + 1, taskDisplayId, status: "worker-unresponsive", error: reason });
     if (!spawnReplacement) {
       journey.handoff = { attempted: false, reason: "replacement spawn is not available in this context" };
       return finish("worker-unresponsive");
@@ -476,13 +508,13 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
     } catch (error) {
       journey.status = "failed";
       journey.code = error?.code || "envelope-invalid";
-      journey.steps.push({ step: 0, taskId: null, status: "failed", error: String(error?.message || error).slice(0, 256) });
+      journey.steps.push({ step: 0, taskDisplayId: null, status: "failed", error: String(error?.message || error).slice(0, 256) });
       return finish("failed");
     }
     if (!guard.ok) {
       journey.status = "failed";
       journey.code = guard.code || "envelope-invalid";
-      journey.steps.push({ step: 0, taskId: null, status: "failed", error: guard.reason });
+      journey.steps.push({ step: 0, taskDisplayId: null, status: "failed", error: guard.reason });
       return finish("failed");
     }
   }
@@ -497,7 +529,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
     } catch (error) {
       journey.status = error?.code === "role_blocked" ? "role-blocked" : "failed";
       journey.code = error?.code || "pulse-failed";
-      journey.steps.push({ step: stepIndex, taskId: null, status: journey.status, error: String(error?.message || error).slice(0, 256) });
+      journey.steps.push({ step: stepIndex, taskDisplayId: null, status: journey.status, error: String(error?.message || error).slice(0, 256) });
       return finish(journey.status);
     }
     if (!pulse.alive) {
@@ -507,7 +539,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       if (pulse.status === "blocked") {
         journey.status = "role-blocked";
         journey.code = "role_blocked";
-        journey.steps.push({ step: stepIndex, taskId: null, status: "role-blocked", workerStatus: pulse.status });
+        journey.steps.push({ step: stepIndex, taskDisplayId: null, status: "role-blocked", workerStatus: pulse.status });
         return finish("role-blocked");
       }
       // Not idle within an observed exchange cycle: unresponsive for dispatch.
@@ -520,19 +552,23 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       task = selectNextTask(taskStore, dispatched);
     } catch (error) {
       journey.status = "failed";
-      journey.steps.push({ step: stepIndex, taskId: null, status: "failed", error: String(error?.message || error).slice(0, 256) });
+      journey.steps.push({ step: stepIndex, taskDisplayId: null, status: "failed", error: String(error?.message || error).slice(0, 256) });
       return finish("failed");
     }
     if (!task) {
       journey.status = "exhausted";
-      journey.steps.push({ step: stepIndex, taskId: null, status: "exhausted" });
+      journey.steps.push({ step: stepIndex, taskDisplayId: null, status: "exhausted" });
       return finish("exhausted");
     }
+    // Model-visible evidence carries only the opaque display token; the raw
+    // unbounded session ID stays internal to the store, dispatched set, and
+    // provenance revalidation lookups.
+    const displayTaskId = sessionTaskDisplayId(task.id);
 
     // Interactive opt-in: stop after each step for explicit approval.
     if (mode === "turn-by-turn" && stepIndex > 1) {
       journey.status = "waiting-approval";
-      journey.steps.push({ step: stepIndex, taskId: task.id, status: "waiting-approval" });
+      journey.steps.push({ step: stepIndex, taskDisplayId: displayTaskId, status: "waiting-approval" });
       return finish("waiting-approval");
     }
 
@@ -541,7 +577,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
     if (autonomy !== "autonomous") {
       if (!isNativeTuiContext(context) || typeof context?.ui?.confirm !== "function") {
         journey.status = "failed";
-        journey.steps.push({ step: stepIndex, taskId: task.id, status: "failed", error: "native TUI confirmation unavailable" });
+        journey.steps.push({ step: stepIndex, taskDisplayId: displayTaskId, status: "failed", error: "native TUI confirmation unavailable" });
         return finish("failed");
       }
       let confirmed;
@@ -554,12 +590,12 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
         ].join("\n"));
       } catch (error) {
         journey.status = "failed";
-        journey.steps.push({ step: stepIndex, taskId: task.id, status: "failed", error: `confirmation failed: ${error.message}` });
+        journey.steps.push({ step: stepIndex, taskDisplayId: displayTaskId, status: "failed", error: `confirmation failed: ${error.message}` });
         return finish("failed");
       }
       if (confirmed !== true) {
         journey.status = "cancelled";
-        journey.steps.push({ step: stepIndex, taskId: task.id, status: "cancelled", error: "native confirmation was not granted" });
+        journey.steps.push({ step: stepIndex, taskDisplayId: displayTaskId, status: "cancelled", error: "native confirmation was not granted" });
         return finish("cancelled");
       }
     }
@@ -572,7 +608,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       if (!guard.ok) {
         journey.status = "failed";
         journey.code = guard.code || "envelope-invalid";
-        journey.steps.push({ step: stepIndex, taskId: task.id, status: "failed", error: guard.reason });
+        journey.steps.push({ step: stepIndex, taskDisplayId: displayTaskId, status: "failed", error: guard.reason });
         return finish("failed");
       }
     }
@@ -608,7 +644,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
           const progressCredited = replacement.ok === true && (!previousScope || gapAnalysis !== previousScope);
           journey.steps.push({
             step: journey.steps.length + 1,
-            taskId: task.id,
+            taskDisplayId: displayTaskId,
             status: replacement.ok === true ? "replaced" : "worker-unresponsive",
             error: replacement.ok === true ? undefined : String(replacement.code),
             gapAnalysis,
@@ -632,22 +668,22 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
             return finish("worker-unresponsive");
           }
         }
-        return handoffToReplacement(`exchange ended with ${exchange.code}`, task.id);
+        return handoffToReplacement(`exchange ended with ${exchange.code}`, displayTaskId);
       }
       journey.status = exchange.code === "role_blocked" ? "role-blocked" : "failed";
       journey.code = exchange.code || "exchange-failed";
-      journey.steps.push({ step: stepIndex, taskId: task.id, status: journey.status, error: exchange.reason || exchange.error || exchange.code });
+      journey.steps.push({ step: stepIndex, taskDisplayId: displayTaskId, status: journey.status, error: exchange.reason || exchange.error || exchange.code });
       return finish(journey.status);
     }
     journey.steps.push({
       step: stepIndex,
-      taskId: task.id,
+      taskDisplayId: displayTaskId,
       status: "done",
       workerStatus: exchange.agentStatus,
       report: exchange.report,
       // §10.2 progress snapshot at the meaningful checkpoint (step completion).
       progress: progressSnapshot({
-        taskId: task.id,
+        taskDisplayId: displayTaskId,
         envelope: board?.envelope ?? null,
         repository: options.repository ?? null,
         workerStatus: exchange.agentStatus ?? null,

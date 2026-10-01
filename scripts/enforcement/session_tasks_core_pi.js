@@ -43,7 +43,19 @@ export const PROMOTION_LANES = Object.freeze(["backlog", "in-progress"]);
 export const COMPLETED_TASK_POLICY = Object.freeze(["skip", "promote-as-done"]);
 export const BATCH_END_POLICY = Object.freeze(["offered", "off"]);
 export const TRUSTED_HERDR_EXECUTABLE = "/opt/homebrew/bin/herdr";
+export const PROVENANCE_CAPTURE_STATUSES = Object.freeze([
+  "captured", "host-session-unavailable", "task-list-mismatch", "source-unavailable",
+]);
 export const DEFAULT_PROMOTION_LANE = "backlog";
+
+// Deterministic opaque display token for model-visible evidence. Session task
+// IDs are unbounded caller-controlled strings that can carry secret-like text;
+// only this full 64-hex SHA-256 token (no lossy truncation, no fabricated
+// identity) is ever displayed. The raw ID stays inside the task store for
+// selection, dispatch, and provenance lookups.
+export function sessionTaskDisplayId(id) {
+  return createHash("sha256").update(`agentic-driver.session-task-display.v1:${String(id ?? "")}`, "utf8").digest("hex");
+}
 
 /** picc-tasks task shape: the closed snapshot shape replay and migration read. */
 export function validateSessionTask(value) {
