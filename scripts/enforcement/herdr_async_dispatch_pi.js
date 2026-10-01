@@ -19,6 +19,7 @@ import {
 import { isNativeTuiContext } from "./native_tui_context.js";
 import { prepareEnvelopeForExecution, validateEnvelopeForExecution, consumeEnvelope, gitHead } from "./task_board_core_pi.js";
 import { sha256Hex } from "./task_board_core_pi.js";
+import { sessionTaskDisplayId, PROVENANCE_CAPTURE_STATUSES } from "./session_tasks_core_pi.js";
 import { execFileSync } from "node:child_process";
 
 export const WORKER_DISPATCH_TOOL = "agentic_worker_dispatch";
@@ -309,7 +310,13 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   }
   const projectedTaskProvenance = typeof taskStore?.projectProvenance === "function"
     ? taskStore.projectProvenance(taskProvenance)
-    : Object.freeze({ status: taskProvenance.status ?? "source-unavailable", source: null, tasks: [] });
+    : Object.freeze({
+      status: typeof taskProvenance?.status === "string" && PROVENANCE_CAPTURE_STATUSES.includes(taskProvenance.status)
+        ? taskProvenance.status
+        : "source-unavailable",
+      source: null,
+      tasks: [],
+    });
   const dispatched = new Set();
   const communicationOptions = options.communication ?? options;
   const replacementRole = options.replacementRole ?? role;
@@ -543,11 +550,15 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       journey.steps.push({ step: stepIndex, taskId: null, status: "exhausted" });
       return finish("exhausted");
     }
+    // Model-visible evidence carries only the opaque display token; the raw
+    // unbounded session ID stays internal to the store, dispatched set, and
+    // provenance revalidation lookups.
+    const displayTaskId = sessionTaskDisplayId(task.id);
 
     // Interactive opt-in: stop after each step for explicit approval.
     if (mode === "turn-by-turn" && stepIndex > 1) {
       journey.status = "waiting-approval";
-      journey.steps.push({ step: stepIndex, taskId: task.id, status: "waiting-approval" });
+      journey.steps.push({ step: stepIndex, taskId: displayTaskId, status: "waiting-approval" });
       return finish("waiting-approval");
     }
 
@@ -556,7 +567,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
     if (autonomy !== "autonomous") {
       if (!isNativeTuiContext(context) || typeof context?.ui?.confirm !== "function") {
         journey.status = "failed";
-        journey.steps.push({ step: stepIndex, taskId: task.id, status: "failed", error: "native TUI confirmation unavailable" });
+        journey.steps.push({ step: stepIndex, taskId: displayTaskId, status: "failed", error: "native TUI confirmation unavailable" });
         return finish("failed");
       }
       let confirmed;
@@ -569,12 +580,12 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
         ].join("\n"));
       } catch (error) {
         journey.status = "failed";
-        journey.steps.push({ step: stepIndex, taskId: task.id, status: "failed", error: `confirmation failed: ${error.message}` });
+        journey.steps.push({ step: stepIndex, taskId: displayTaskId, status: "failed", error: `confirmation failed: ${error.message}` });
         return finish("failed");
       }
       if (confirmed !== true) {
         journey.status = "cancelled";
-        journey.steps.push({ step: stepIndex, taskId: task.id, status: "cancelled", error: "native confirmation was not granted" });
+        journey.steps.push({ step: stepIndex, taskId: displayTaskId, status: "cancelled", error: "native confirmation was not granted" });
         return finish("cancelled");
       }
     }
@@ -587,7 +598,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       if (!guard.ok) {
         journey.status = "failed";
         journey.code = guard.code || "envelope-invalid";
-        journey.steps.push({ step: stepIndex, taskId: task.id, status: "failed", error: guard.reason });
+        journey.steps.push({ step: stepIndex, taskId: displayTaskId, status: "failed", error: guard.reason });
         return finish("failed");
       }
     }
@@ -623,7 +634,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
           const progressCredited = replacement.ok === true && (!previousScope || gapAnalysis !== previousScope);
           journey.steps.push({
             step: journey.steps.length + 1,
-            taskId: task.id,
+            taskId: displayTaskId,
             status: replacement.ok === true ? "replaced" : "worker-unresponsive",
             error: replacement.ok === true ? undefined : String(replacement.code),
             gapAnalysis,
@@ -647,22 +658,22 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
             return finish("worker-unresponsive");
           }
         }
-        return handoffToReplacement(`exchange ended with ${exchange.code}`, task.id);
+        return handoffToReplacement(`exchange ended with ${exchange.code}`, displayTaskId);
       }
       journey.status = exchange.code === "role_blocked" ? "role-blocked" : "failed";
       journey.code = exchange.code || "exchange-failed";
-      journey.steps.push({ step: stepIndex, taskId: task.id, status: journey.status, error: exchange.reason || exchange.error || exchange.code });
+      journey.steps.push({ step: stepIndex, taskId: displayTaskId, status: journey.status, error: exchange.reason || exchange.error || exchange.code });
       return finish(journey.status);
     }
     journey.steps.push({
       step: stepIndex,
-      taskId: task.id,
+      taskId: displayTaskId,
       status: "done",
       workerStatus: exchange.agentStatus,
       report: exchange.report,
       // §10.2 progress snapshot at the meaningful checkpoint (step completion).
       progress: progressSnapshot({
-        taskId: task.id,
+        taskId: displayTaskId,
         envelope: board?.envelope ?? null,
         repository: options.repository ?? null,
         workerStatus: exchange.agentStatus ?? null,

@@ -14,6 +14,7 @@ import {
   WORKER_DISPATCH_MODES,
   WORKER_DISPATCH_TERMINAL_STATES,
 } from "../scripts/enforcement/herdr_async_dispatch_pi.js";
+import { sessionTaskDisplayId } from "../scripts/enforcement/session_tasks_core_pi.js";
 
 function markerPairFor(role) {
   if (role === "reviewer") return ["[REVIEW_REPORT_BEGIN]", "[REVIEW_REPORT_END]"];
@@ -654,7 +655,7 @@ test("progress snapshot: each completed step carries a compact observation, not 
   const step = journey.steps.find((s) => s.status === "done");
   assert.ok(step?.progress, "the completed step carries a progress snapshot");
   assert.equal(step.progress.schema, "agentic-driver.progress-snapshot.v1");
-  assert.equal(step.progress.taskId, "1");
+  assert.equal(step.progress.taskId, sessionTaskDisplayId("1"));
   assert.equal(typeof step.progress.head, "string");
   assert.equal(typeof step.progress.scopedDiffHash, "string");
   assert.ok(Array.isArray(step.progress.changedPaths));

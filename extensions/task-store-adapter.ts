@@ -3,6 +3,7 @@
 
 import {
   TASK_STATE_ENTRY, resolveTaskListId, tasksMirrorPath, loadSnapshotFile, validateSnapshot,
+  sessionTaskDisplayId, PROVENANCE_CAPTURE_STATUSES,
 } from "../scripts/enforcement/session_tasks_core_pi.js";
 import { createHash } from "node:crypto";
 
@@ -50,11 +51,15 @@ export function captureSessionTaskProvenance(ctx) {
 // only. Raw titles and descriptions can carry private planning text or
 // secrets, so they never leave the local capture used for revalidation.
 export function projectSessionTaskProvenance(capture) {
-  const tasks = Array.isArray(capture?.tasks) && capture.status === "captured"
-    ? capture.tasks.map((entry) => ({ id: entry?.material?.id ?? null, digest: typeof entry?.digest === "string" ? entry.digest : null }))
+  const rawStatus = capture?.status;
+  const status = typeof rawStatus === "string" && PROVENANCE_CAPTURE_STATUSES.includes(rawStatus)
+    ? rawStatus
+    : "source-unavailable";
+  const tasks = Array.isArray(capture?.tasks) && status === "captured"
+    ? capture.tasks.map((entry) => ({ id: sessionTaskDisplayId(entry?.material?.id), digest: typeof entry?.digest === "string" ? entry.digest : null }))
     : [];
   return Object.freeze({
-    status: capture?.status ?? "source-unavailable",
+    status,
     source: capture?.source ? Object.freeze({
       hostSessionId: capture.source.hostSessionId ?? null,
       taskListId: capture.source.taskListId ?? null,
