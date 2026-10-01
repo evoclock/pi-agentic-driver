@@ -298,12 +298,18 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   const journey = { mode, autonomy, role, steps: [], status: "failed", code: null, handoff: null };
   // Snapshot once at journey start; observational evidence never gates or
   // authorizes existing dispatch, replacement, or board execution.
+  // Full immutable capture stays local for drift revalidation. The tool
+  // result only ever carries the sanitized projection: task id, digest, and
+  // source identity — never raw title/description planning text.
   let taskProvenance = { status: "source-unavailable", tasks: [] };
   try {
     if (typeof taskStore?.captureProvenance === "function") taskProvenance = taskStore.captureProvenance();
   } catch {
     taskProvenance = { status: "source-unavailable", tasks: [] };
   }
+  const projectedTaskProvenance = typeof taskStore?.projectProvenance === "function"
+    ? taskStore.projectProvenance(taskProvenance)
+    : Object.freeze({ status: taskProvenance.status ?? "source-unavailable", source: null, tasks: [] });
   const dispatched = new Set();
   const communicationOptions = options.communication ?? options;
   const replacementRole = options.replacementRole ?? role;
@@ -351,7 +357,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       report: journeyReceipt(journey),
       reportMarkers: { open: "[WORKER_JOURNEY_REPORT_BEGIN]", close: "[WORKER_JOURNEY_REPORT_END]" },
       handoff: journey.handoff,
-      taskProvenance,
+      taskProvenance: projectedTaskProvenance,
       nonAuthorizing: true,
       persisted: false,
     };

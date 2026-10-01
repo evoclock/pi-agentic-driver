@@ -46,6 +46,24 @@ export function captureSessionTaskProvenance(ctx) {
   return Object.freeze({ status: "captured", source: Object.freeze(source), tasks: Object.freeze(tasks) });
 }
 
+// Model-visible projection: task identity, deterministic digest, and source
+// only. Raw titles and descriptions can carry private planning text or
+// secrets, so they never leave the local capture used for revalidation.
+export function projectSessionTaskProvenance(capture) {
+  const tasks = Array.isArray(capture?.tasks) && capture.status === "captured"
+    ? capture.tasks.map((entry) => ({ id: entry?.material?.id ?? null, digest: typeof entry?.digest === "string" ? entry.digest : null }))
+    : [];
+  return Object.freeze({
+    status: capture?.status ?? "source-unavailable",
+    source: capture?.source ? Object.freeze({
+      hostSessionId: capture.source.hostSessionId ?? null,
+      taskListId: capture.source.taskListId ?? null,
+      kind: capture.source.kind ?? "none",
+    }) : null,
+    tasks: Object.freeze(tasks),
+  });
+}
+
 export function revalidateSessionTaskProvenance(ctx, capture, taskId) {
   if (capture?.status !== "captured") return { status: "capture-unavailable" };
   const current = captureSessionTaskProvenance(ctx);
@@ -72,6 +90,7 @@ export function createTaskStore(ctx) {
     },
     observeAdvance(id) { skipped.add(id); },
     captureProvenance() { return captureSessionTaskProvenance(ctx); },
+    projectProvenance(capture) { return projectSessionTaskProvenance(capture); },
     revalidateProvenance(capture, id) { return revalidateSessionTaskProvenance(ctx, capture, id); },
   };
 }

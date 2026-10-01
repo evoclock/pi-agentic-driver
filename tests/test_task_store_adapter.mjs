@@ -149,8 +149,44 @@ test("offline journey uses real session adapter without updating tasks", async (
   assert.equal(first.steps[0].taskId, "1");
   assert.equal(first.taskProvenance.status, "captured");
   assert.equal(first.taskProvenance.source.hostSessionId, "offline-adapter-fixture");
-  assert.equal(first.taskProvenance.tasks[0].material.title, "first");
+  assert.equal(first.taskProvenance.tasks[0].id, "1");
+  assert.match(first.taskProvenance.tasks[0].digest, /^[0-9a-f]{64}$/);
+  assert.equal(first.taskProvenance.tasks[0].material, undefined);
   assert.equal(second.steps[0].taskId, "1", "the next journey sees the real pending state");
   assert.ok(calls.includes("prompt"));
   assert.equal(state.tasks[0].status, "pending");
+});
+
+test("provenance projection leaks no raw task text while drift detection still works", async () => {
+  const SENTINEL_TITLE = "S3NT1N3L-T1TL3-αçe";
+  const SENTINEL_DESCRIPTION = "S3NT1N3L-D3SCR1PT1ON-private-planning-hunter2";
+  const sentinelTasks = structuredClone(state.tasks);
+  sentinelTasks[0].subject = SENTINEL_TITLE;
+  sentinelTasks[0].description = SENTINEL_DESCRIPTION;
+  const sentinelSession = { ...session, sessionManager: { getSessionId: () => "offline-adapter-fixture", getBranch: () => [
+    { type: "custom", customType: TASK_STATE_ENTRY, data: { highWaterMark: 3, tasks: sentinelTasks } },
+  ] } };
+  const runProcess = async ({ argv }) => {
+    if (argv[1] === "get") return { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: "worker", agent: "pi", status: "idle", repository: process.cwd() } }) };
+    if (argv[1] === "prompt") return { code: 0, stdout: JSON.stringify({ type: "agent_prompted", agent: { name: "worker", agent: "pi", status: "done", repository: process.cwd() } }) };
+    return { code: 0, stdout: "[WORKER_REPORT_BEGIN]\ncompleted\n[WORKER_REPORT_END]" };
+  };
+  let registered;
+  // options must ride on registration: execute() reads them from its closure.
+  registerWorkerDispatchInterface({ registerTool(tool) { if (!registered) registered = tool; } },
+    { taskStoreFactory: createTaskStore, runProcess });
+  const toolResult = await registered.execute("", { action: "dispatch", role: "worker", stepPrompt: "step", maxSteps: 1 }, null, null,
+    { ...sentinelSession, cwd: process.cwd(), mode: "tui", hasUI: true, ui: { confirm: async () => true } });
+  const serialized = JSON.stringify(toolResult);
+  assert.ok(toolResult.content?.[0]?.text && toolResult.details, "complete tool result shape");
+  assert.ok(!serialized.includes(SENTINEL_TITLE) && !serialized.includes(SENTINEL_DESCRIPTION)
+    && !serialized.includes("private-planning") && !serialized.includes("material"),
+  "no raw provenance text in serialized content or details");
+  assert.equal(toolResult.details.taskProvenance.status, "captured");
+  assert.deepEqual(Object.keys(toolResult.details.taskProvenance.tasks[0]).sort(), ["digest", "id"]);
+  // Local revalidation still detects description drift against the immutable capture.
+  const capture = createTaskStore(sentinelSession).captureProvenance();
+  assert.equal(createTaskStore(sentinelSession).revalidateProvenance(capture, "1").status, "matched");
+  sentinelTasks[0].description = "tampered";
+  assert.equal(createTaskStore(sentinelSession).revalidateProvenance(capture, "1").status, "content-drift");
 });
