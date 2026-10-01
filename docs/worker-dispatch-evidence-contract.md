@@ -3,15 +3,32 @@
 Privacy-driven breaking response-shape change, effective from the
 session-task-provenance work on `feat/session-task-provenance`.
 
-## Why
+## What the guarantee covers
 
-Session task IDs, titles, and descriptions are unbounded caller-controlled
-strings that can carry secret-like or private planning text. The coordinator
-facing dispatch result (model-visible `content` and `details`, including step
-records, progress snapshots, the marked journey report, handoff records, and
-the provenance projection) must not echo them. Raw task IDs remain internal
-to dispatch selection and are still given to the dispatched worker in its
-prompt so the worker can resolve the task with `TaskGet`.
+Only driver-owned task identity fields and the NEW provenance projection are
+sanitized:
+
+- Session task IDs, titles, and descriptions are unbounded caller-controlled
+  strings that can carry secret-like or private planning text. Fields the
+  driver itself constructs from them never carry the raw values.
+
+## What it does NOT cover (explicit boundary)
+
+- `steps[].report`, `steps[].error`, `steps[].gapAnalysis`, and other
+  worker/herdr-authored text are UNTRUSTED evidence passed through verbatim.
+  The worker receives the raw task ID and subject in its prompt (by design,
+  so it can resolve the task with `TaskGet`), and its reports or error
+  strings may echo the prompt, task ID, title, or description into the
+  coordinator-visible result and marked receipt. Treat them as untrusted
+  input; do not parse secrets out of them and do not assume they are clean.
+- The display token is a deterministic PSEUDONYM: anyone who knows a raw ID
+  (or can guess candidate IDs) can compute its token and correlate steps.
+  It prevents disclosure of the raw ID, not correlation. It is not a secret
+  and provides no secrecy beyond non-echo.
+- Broad redaction of worker-authored text would delete task-outcome evidence
+  this slice intentionally preserves. An owner-facing general redaction
+  policy, if wanted, is a separate follow-up decision, not part of this
+  contract.
 
 ## Field contract
 
@@ -21,21 +38,19 @@ prompt so the worker can resolve the task with `TaskGet`.
   fabricated identity. `null` when no task was selected.
 - `steps[].progress.taskDisplayId` — same token.
 - `report` marked journey receipt line: `step N: taskDisplayId=<token>`.
-- `taskProvenance.tasks[].taskDisplayId` + `taskProvenance.tasks[].digest`
-  — opaque token plus the deterministic content digest of the frozen local
-  capture (title, description, capturedAt never serialized).
-- `taskProvenance.status` is limited to the closed
-  `PROVENANCE_CAPTURE_STATUSES` enum; unknown statuses fall back to
-  `source-unavailable`.
+- `taskProvenance` (NEW on this branch) — `status` limited to the closed
+  `PROVENANCE_CAPTURE_STATUSES` enum (a throwing/absent projector falls back
+  to `source-unavailable` without altering dispatch), plus per-task
+  `{taskDisplayId, digest}` where `digest` is the deterministic digest of the
+  frozen LOCAL capture (title, description, capturedAt are never serialized).
+- The raw ID stays internal to dispatch selection, the dispatched set, and
+  the worker prompt; it is not recoverable from the result.
 
-## Breaking change
+## Breaking change (main → this branch)
 
-Earlier shapes exposed `steps[].taskId`, `steps[].progress.taskId`,
-`taskProvenance.tasks[].id`, and the receipt line `task=<id>`; these carried
-the raw session task ID and are REMOVED. The hashed value is not re-exposed
-under the old field name: consumers must read the explicit `taskDisplayId`
-fields above. The raw ID is intentionally not recoverable from the token;
-map back through the session task store, never through the result.
-
-The worker-facing prompt text (`Task: <rawId> — <subject>`) is unchanged by
-design: the dispatched worker needs the real ID for `TaskGet`.
+On main the result exposed the RAW session task ID through
+`steps[].taskId`, `steps[].progress.taskId`, and the receipt line
+`task=<id>`. These fields are REMOVED and replaced by the explicit
+`taskDisplayId` fields above; the hashed value is not re-exposed under the
+old field names, so consumers must read `taskDisplayId`. `taskProvenance`
+did not exist on main; its shape is new, not renamed.

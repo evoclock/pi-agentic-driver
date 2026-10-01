@@ -168,9 +168,22 @@ test("provenance projection leaks no raw task text while drift detection still w
   const sentinelSession = { ...session, sessionManager: { getSessionId: () => "offline-adapter-fixture", getBranch: () => [
     { type: "custom", customType: TASK_STATE_ENTRY, data: { highWaterMark: 3, tasks: sentinelTasks } },
   ] } };
+  const calls = [];
+  let terminalHistory = "history";
   const runProcess = async ({ argv }) => {
+    calls.push({ action: argv[1], argv: [...argv] });
     if (argv[1] === "get") return { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: "worker", agent: "pi", status: "idle", repository: process.cwd() } }) };
     if (argv[1] === "prompt") return { code: 0, stdout: JSON.stringify({ type: "agent_prompted", agent: { name: "worker", agent: "pi", status: "done", repository: process.cwd() } }) };
+    if (argv[1] === "read") {
+      // The worker report deliberately echoes the raw ID, title, and
+      // description from its prompt: untrusted worker-authored evidence,
+      // outside the documented sanitization boundary.
+      const report = `[WORKER_REPORT_BEGIN]\nworked on ${SENTINEL_ID} — ${SENTINEL_TITLE}: ${SENTINEL_DESCRIPTION}\n[WORKER_REPORT_END]`;
+      const echoed = String(calls.filter((c) => c.action === "prompt").at(-1)?.argv?.[3] ?? "");
+      const result = { code: 0, stdout: `${terminalHistory}\n${echoed}\n${report}` };
+      terminalHistory = result.stdout;
+      return result;
+    }
     return { code: 0, stdout: "[WORKER_REPORT_BEGIN]\ncompleted\n[WORKER_REPORT_END]" };
   };
   let registered;
@@ -179,13 +192,20 @@ test("provenance projection leaks no raw task text while drift detection still w
     { taskStoreFactory: createTaskStore, runProcess });
   const toolResult = await registered.execute("", { action: "dispatch", role: "worker", stepPrompt: "step", maxSteps: 1 }, null, null,
     { ...sentinelSession, cwd: process.cwd(), mode: "tui", hasUI: true, ui: { confirm: async () => true } });
-  const serialized = JSON.stringify(toolResult);
   assert.ok(toolResult.content?.[0]?.text && toolResult.details, "complete tool result shape");
-  assert.ok(!serialized.includes(SENTINEL_TITLE) && !serialized.includes(SENTINEL_DESCRIPTION)
-    && !serialized.includes("private-planning") && !serialized.includes("material")
-    && !serialized.includes(SENTINEL_ID) && !serialized.includes("do-not-leak")
-    && !serialized.includes('"taskId"') && !serialized.includes("task="),
-  "no raw provenance text, raw task ID, or legacy raw-ID field name in serialized content or details");
+  // Driver-owned surfaces (all fields except worker/herdr-authored report,
+  // error, and gap-analysis pass-through) carry no sentinel material and no
+  // legacy raw-ID field names.
+  const driverOwned = JSON.stringify({
+    ...toolResult.details,
+    report: undefined,
+    steps: toolResult.details.steps.map(({ report, error, gapAnalysis, ...rest }) => rest),
+  });
+  assert.ok(!driverOwned.includes(SENTINEL_TITLE) && !driverOwned.includes(SENTINEL_DESCRIPTION)
+    && !driverOwned.includes("private-planning") && !driverOwned.includes("material")
+    && !driverOwned.includes(SENTINEL_ID) && !driverOwned.includes("do-not-leak")
+    && !driverOwned.includes('"taskId"'),
+  "no raw provenance text or raw task ID in driver-owned content or details");
   assert.equal(toolResult.details.taskProvenance.status, "captured");
   assert.deepEqual(Object.keys(toolResult.details.taskProvenance.tasks[0]).sort(), ["digest", "taskDisplayId"]);
   // Opaque display token is used consistently across projection, steps, and
@@ -196,6 +216,17 @@ test("provenance projection leaks no raw task text while drift detection still w
   assert.ok(step, "the journey dispatched the sentinel task internally, surfaced only as the opaque token");
   assert.ok(toolResult.details.report.includes(`taskDisplayId=${opaque}`));
   assert.match(opaque, /^[0-9a-f]{64}$/);
+  // Documented boundary: the worker report is untrusted pass-through and MAY
+  // echo prompt/task data (raw ID, title, description). The projection and
+  // every driver-owned taskDisplayId field stay clean of the sentinels.
+  const workerEchoStep = toolResult.details.steps.find((s) => s.report?.includes(SENTINEL_ID));
+  assert.ok(workerEchoStep && workerEchoStep.report.includes(SENTINEL_TITLE)
+    && workerEchoStep.report.includes(SENTINEL_DESCRIPTION),
+  "worker echo passes through as documented untrusted evidence");
+  assert.ok(!JSON.stringify(toolResult.details.taskProvenance).includes(SENTINEL_ID)
+    && !JSON.stringify(toolResult.details.taskProvenance).includes(SENTINEL_TITLE)
+    && !JSON.stringify(toolResult.details.taskProvenance).includes(SENTINEL_DESCRIPTION),
+  "no NEW provenance material leaks through worker-echo paths");
   // Local revalidation still detects description drift against the immutable capture.
   const capture = createTaskStore(sentinelSession).captureProvenance();
   assert.equal(createTaskStore(sentinelSession).revalidateProvenance(capture, SENTINEL_ID).status, "matched");

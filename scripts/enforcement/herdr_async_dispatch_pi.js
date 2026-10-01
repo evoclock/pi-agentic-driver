@@ -308,15 +308,25 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   } catch {
     taskProvenance = { status: "source-unavailable", tasks: [] };
   }
-  const projectedTaskProvenance = typeof taskStore?.projectProvenance === "function"
-    ? taskStore.projectProvenance(taskProvenance)
-    : Object.freeze({
+  let projectedTaskProvenance;
+  try {
+    projectedTaskProvenance = typeof taskStore?.projectProvenance === "function"
+      ? taskStore.projectProvenance(taskProvenance)
+      : null;
+  } catch {
+    projectedTaskProvenance = null;
+  }
+  if (!projectedTaskProvenance || typeof projectedTaskProvenance !== "object") {
+    // Closed fallback: a throwing or absent projector never alters dispatch,
+    // never surfaces raw task material, and never passes a status through.
+    projectedTaskProvenance = Object.freeze({
       status: typeof taskProvenance?.status === "string" && PROVENANCE_CAPTURE_STATUSES.includes(taskProvenance.status)
         ? taskProvenance.status
         : "source-unavailable",
       source: null,
       tasks: [],
     });
+  }
   const dispatched = new Set();
   const communicationOptions = options.communication ?? options;
   const replacementRole = options.replacementRole ?? role;
