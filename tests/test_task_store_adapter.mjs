@@ -146,13 +146,13 @@ test("offline journey uses real session adapter without updating tasks", async (
   const params = { action: "dispatch", role: "worker", stepPrompt: "step", maxSteps: 2 };
   const first = await runWorkerJourney(params, context, options);
   const second = await runWorkerJourney(params, context, options);
-  assert.equal(first.steps[0].taskId, sessionTaskDisplayId("1"));
+  assert.equal(first.steps[0].taskDisplayId, sessionTaskDisplayId("1"));
   assert.equal(first.taskProvenance.status, "captured");
   assert.equal(first.taskProvenance.source.hostSessionId, "offline-adapter-fixture");
-  assert.equal(first.taskProvenance.tasks[0].id, sessionTaskDisplayId("1"));
+  assert.equal(first.taskProvenance.tasks[0].taskDisplayId, sessionTaskDisplayId("1"));
   assert.match(first.taskProvenance.tasks[0].digest, /^[0-9a-f]{64}$/);
   assert.equal(first.taskProvenance.tasks[0].material, undefined);
-  assert.equal(second.steps[0].taskId, sessionTaskDisplayId("1"), "the next journey sees the real pending state");
+  assert.equal(second.steps[0].taskDisplayId, sessionTaskDisplayId("1"), "the next journey sees the real pending state");
   assert.ok(calls.includes("prompt"));
   assert.equal(state.tasks[0].status, "pending");
 });
@@ -183,17 +183,18 @@ test("provenance projection leaks no raw task text while drift detection still w
   assert.ok(toolResult.content?.[0]?.text && toolResult.details, "complete tool result shape");
   assert.ok(!serialized.includes(SENTINEL_TITLE) && !serialized.includes(SENTINEL_DESCRIPTION)
     && !serialized.includes("private-planning") && !serialized.includes("material")
-    && !serialized.includes(SENTINEL_ID) && !serialized.includes("do-not-leak"),
-  "no raw provenance text or raw task ID in serialized content or details");
+    && !serialized.includes(SENTINEL_ID) && !serialized.includes("do-not-leak")
+    && !serialized.includes('"taskId"') && !serialized.includes("task="),
+  "no raw provenance text, raw task ID, or legacy raw-ID field name in serialized content or details");
   assert.equal(toolResult.details.taskProvenance.status, "captured");
-  assert.deepEqual(Object.keys(toolResult.details.taskProvenance.tasks[0]).sort(), ["digest", "id"]);
+  assert.deepEqual(Object.keys(toolResult.details.taskProvenance.tasks[0]).sort(), ["digest", "taskDisplayId"]);
   // Opaque display token is used consistently across projection, steps, and
   // marked report; the journey still dispatched the sentinel task internally.
   const opaque = sessionTaskDisplayId(SENTINEL_ID);
-  assert.equal(toolResult.details.taskProvenance.tasks[0].id, opaque);
-  const step = toolResult.details.steps.find((s) => s.taskId === opaque);
+  assert.equal(toolResult.details.taskProvenance.tasks[0].taskDisplayId, opaque);
+  const step = toolResult.details.steps.find((s) => s.taskDisplayId === opaque);
   assert.ok(step, "the journey dispatched the sentinel task internally, surfaced only as the opaque token");
-  assert.ok(toolResult.details.report.includes(`task=${opaque}`));
+  assert.ok(toolResult.details.report.includes(`taskDisplayId=${opaque}`));
   assert.match(opaque, /^[0-9a-f]{64}$/);
   // Local revalidation still detects description drift against the immutable capture.
   const capture = createTaskStore(sentinelSession).captureProvenance();

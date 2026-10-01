@@ -655,7 +655,7 @@ test("progress snapshot: each completed step carries a compact observation, not 
   const step = journey.steps.find((s) => s.status === "done");
   assert.ok(step?.progress, "the completed step carries a progress snapshot");
   assert.equal(step.progress.schema, "agentic-driver.progress-snapshot.v1");
-  assert.equal(step.progress.taskId, sessionTaskDisplayId("1"));
+  assert.equal(step.progress.taskDisplayId, sessionTaskDisplayId("1"));
   assert.equal(typeof step.progress.head, "string");
   assert.equal(typeof step.progress.scopedDiffHash, "string");
   assert.ok(Array.isArray(step.progress.changedPaths));

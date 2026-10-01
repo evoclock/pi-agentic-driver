@@ -56,7 +56,7 @@ export function projectSessionTaskProvenance(capture) {
     ? rawStatus
     : "source-unavailable";
   const tasks = Array.isArray(capture?.tasks) && status === "captured"
-    ? capture.tasks.map((entry) => ({ id: sessionTaskDisplayId(entry?.material?.id), digest: typeof entry?.digest === "string" ? entry.digest : null }))
+    ? capture.tasks.map((entry) => ({ taskDisplayId: sessionTaskDisplayId(entry?.material?.id), digest: typeof entry?.digest === "string" ? entry.digest : null }))
     : [];
   return Object.freeze({
     status,
