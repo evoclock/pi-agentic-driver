@@ -1,13 +1,14 @@
 # SEAM/NUDGE reconciliation and restart reference
 
-**As of:** driver `origin/main` `70ee08c` (PR #104), 2026-10-01. **Status:** #40 unfinished; N1 unavailable; recovery not activated. This document preserves the actionable findings of `GLM53FLASH_SEAM_AUDIT_40_v1` (2026-09-26, audit base `9011163`) **and** work and failures discovered since. The audit was read-only, before PRs #100–104. Its historical statements are not current-state assertions. Recheck main and upstream capabilities before implementing. The ratified design is the local-only `.private-planning/SPEC_TASK43_NUDGE.md` v3.4 (design, not proof of implementation); `.private-planning/TASKLIST_2026-09-26.md` contains the older task ordering. Neither private file should be copied into public source by accident.
+**As of:** driver `origin/main` `5244e49` (PR #105), 2026-10-02. **Status:** #40 unfinished; N1 unavailable; recovery not activated. This document preserves the actionable findings of `GLM53FLASH_SEAM_AUDIT_40_v1` (2026-09-26, audit base `9011163`) **and** work and failures discovered since. The audit was read-only, before PRs #100–104. Its historical statements are not current-state assertions. Recheck main and upstream capabilities before implementing. The ratified design is the local-only `.private-planning/SPEC_TASK43_NUDGE.md` v3.4 (design, not proof of implementation); `.private-planning/TASKLIST_2026-09-26.md` contains the older task ordering. Neither private file should be copied into public source by accident.
 
 ## Fast status
 
 - **Phase 1 landed:** PR #101 (`f643890`) merged the disabled NUDGE classifier, reason state, ledger, config/validation, defaults and tests, including trusted-executable capability probing. Its pure modules do not wire the journey, deliver a nudge or grant authority. PR #100 supplied the codebase inventory generator, schema and optional commit gate; the audit's “inventory absent” was true **then**, not now.
 - **Phase 2 foundation landed, not Phase 2 activation:** PR #102 (`dc9e2c2`) merged a private exact-evidence store contract; PR #103 (`da6d3ac`) merged Pi-host private-root, TUI-only `/agentic-recovery-evidence` review; PR #104 (`70ee08c`) merged observational session-task capture and a sanitized driver-owned result projection. None attaches a recovery action to a verified authorization or writes journey evidence. The review UI is privacy confinement, **not identity authentication**.
 - **Phase 2 journey remains:** no accepted ladder integration, SAFE extraction/frozen posture, durable unknown-delivery identity lock, complete receipt references, or authenticated source-specific recovery authorization. A local attempt was independently rejected; see below. Normal session dispatch remains operational and should not silently gain recovery authority.
-- **Phase 3 N1 remains blocked:** installed Herdr 0.9.1 did not provide a dedicated `herdr agent nudge`. `prompt` and `send-keys` are not substitutes. No live nudge or recovery is authorized by this document.
+- **Phase 3 N1 remains blocked:** installed Herdr 0.9.1 does not provide a dedicated `herdr agent nudge`. `prompt` and `send-keys` are not substitutes. We opened [Herdr Ideas discussion #4848](https://github.com/herdrdev/herdr/discussions/4848) with the owner's approved, signed proposal. N1 delivery is parked pending upstream response. No live nudge or recovery is authorized by this document.
+- **Pre-task confirmed replacement guard landed:** PR #105 (`5244e49`) refuses the confirmed-default replacement prompt/spawn when pulse fails before task selection, preserving autonomous and post-task legacy routes. This closes one unsafe path, **not** SAFE replacement or N1.
 - **Follow-on:** #47 worker-delivery reliability closes against the reconciled journey, not the rejected branch. #65 Pulse verification, a missed Vogelkop dev TS-baseline promotion, and the paused 1.0.0 release are separate tracks. Release cutoff is owner-selected when work resumes; no automatic release after #40.
 
 ## Historical audit: ancestry and exclusions
@@ -75,6 +76,35 @@ The spec speaks of original direct instruction, session task or board claim/enve
 | Release / host work | 1.0.0 remains paused until owner resumes and sets cutoff; no tag/install/build/publication. #65 verification and Vogelkop dev baseline are separate. |
 
 **Next bounded action:** produce a read-only, file-and-function-backed map for **each actual** journey source from origin through verified authority, scope and lifecycle revalidation. Mark unknowns explicitly. Then choose the smallest Phase 2 slice that can be safely authorized. Do not revive rejected code, perform live recovery, send upstream brief, merge or publish on the strength of this document.
+
+## Upstream Herdr discussion and possible resolutions
+
+**Public proposal:** [Send guidance to blocked agents without answering dialogs, Herdr Ideas #4848](https://github.com/herdrdev/herdr/discussions/4848), posted with the owner's approval and signed “Cheers, Julen.” It requests a dedicated agent-message operation independent of terminal input, `delivered | rejected-before-delivery | unknown` outcomes, blocked-dialog isolation, explicit prompt races and adversarial tests. The message says Julen can help test if needed. There is **no commitment from Herdr yet**; check the discussion for a reply before acting.
+
+Herdr 0.9.1 docs (`docs/next/website/src/content/docs/agent-automation.mdx`) say `agent prompt` submits terminal text plus Enter and rejects an agent already classified `blocked`; `agent send-keys` is interactive UI input. In upstream `src/app/api/agents.rs`, `queue_agent_prompt` checks `Blocked` then queues input through the PTY. Herdr [#2788](https://github.com/herdrdev/herdr/issues/2788) documented dialog-answer risk, fixed for detected blocked agents by [PR #2790](https://github.com/herdrdev/herdr/pull/2790). [Open issue #4641](https://github.com/herdrdev/herdr/issues/4641) documents a residual unknown-state dialog hazard. [Issue #4823](https://github.com/herdrdev/herdr/issues/4823) proposed a delivery hook for custom agents and was closed with direction to use Ideas; it is adjacent, not N1. A search of issues and PRs found no dedicated N1 implementation. A read-only v0.9.1 checkout exists at `scratch/herdr-readonly` in the local driver checkout; no Herdr code was edited or installed.
+
+| Herdr response | Next decision, not automatic action |
+|---|---|
+| Maintainers support the contract and invite a contribution | With owner approval, use a dedicated Herdr fork/worktree to implement and independently review an agent-native isolated channel and delivery envelope. Test working and blocked agents, adversarial modal text, unknown delivery, ordering and capability probing. Do not publish/merge/install without the applicable owner gates. Then integrate driver N1 with disabled defaults until proven. |
+| Maintainers intend to implement it | Track their issue/PR and wait for a reviewed release plus compatibility tests before enabling the driver. No `prompt`/`send-keys` workaround. |
+| Maintainers reject a generic channel or recommend a specific agent integration | Assess a separately reviewed agent-native channel per supported agent, with the same modal isolation and delivery semantics; unsupported agent/host combinations reject before delivery. Ask owner whether to invest in that narrower route. |
+| No reply yet | N1 remains parked. Offline classifier/ledger tests remain valid; do not repeatedly build replacement or journey facades to simulate live nudge availability. |
+
+## Branch and worktree register (local-only, check before cleanup)
+
+| Branch or location | Status / instruction |
+|---|---|
+| `docs/seam-nudge-current-reference` (Treehouse evidence `/1`) | This reference, rebased on PR #105; **local and unpushed**. Original audit structured archival transcription at `.private-planning/GLM53FLASH_SEAM_AUDIT_40_v1.md` in the real checkout is git-ignored and contains the full historical tables. |
+| `docs/selected-task-journey-contract` (Treehouse evidence `/7`, `cff24c6`) | Local proposed selected-task submit/observe contract, **not delivered**. Keep only as design/review evidence; its launch gate is NO. |
+| `feat/recovery-journey-ledger` (`3f7f6eb`, `62c05eb`, `3f064d0`, `a835c37`) | **Rejected, unpushed.** Do not merge or extend; review evidence only. |
+| `feat/confirmed-recovery-replacement` (`a0ee228`, Treehouse evidence `/2`) | **Rejected, unpushed.** Unwired injected gate did not establish trusted authority, SAFE extraction or lock. |
+| `feat/durable-identity-lock` (`20f0ad2`, `ab75ce0`, Treehouse evidence `/4`) | **Rejected, unpushed.** Journey-entry key is not cross-journey task identity; ambiguous release hazards remained. |
+| `zai-selected-task-journey` (`956335a`, `3efcfa3`) | **Unpushed; unsafe original commit remains in local history.** Sol removed the feature; net diff is only refusal test and inventory. Do not push this history or claim a feature. |
+| `feat/selected-task-trusted-boundary` (Treehouse evidence `/8`, at main) | Empty exploratory branch after Sol proved existing evidence-root environment resolver alone is not a trusted model-facing storage binding. No candidate implementation. |
+| `seam-v3`, `nudge-recovery` | Old divergent siblings from v0.9.3; prior-art only, never wholesale merge. |
+| Driver `origin/main` | PRs #100–105 merged. PR #105 stops confirmed replacement before task selection. No Phase 2 journey recovery activated. |
+
+Some listed worktrees remain leased to their historical roles; **do not destroy rejected worktrees without preserving review evidence or checking dirty state**. The main checkout has unrelated dirty changes and a git-ignored private-planning directory; preserve them. Release 1.0.0 remains owner-paused, README draft remains uncommitted in its separate driver worktree, and this handover does not change those gates.
 
 ## Where to verify before continuing
 
