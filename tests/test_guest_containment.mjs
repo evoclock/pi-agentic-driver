@@ -22,7 +22,7 @@ const FIXTURE = join(ROOT, "scripts/enforcement/linux_microvm_remote_fixture.sh"
 const TAXONOMY_FILE = join(ROOT, "scripts/enforcement/guest_containment_taxonomy.v1.json");
 // Pinned digest of the shipped taxonomy (design section 2: pinned per
 // repository revision; the fixture embeds and verifies the same digest).
-const TAXONOMY_SHA256 = "f0d4f11150e0f9aef562f1e7d61afd9fa8df1f40f1c90c3c011dd768e335bb84";
+const TAXONOMY_SHA256 = "0b194cdfd86f23fd68c2685c2ccfc556a0e311e2973b1ff619c6c78791d65fcd";
 const INITRAMFS = "a".repeat(64);
 
 function runFixture(args, env = {}, stdin = undefined) {

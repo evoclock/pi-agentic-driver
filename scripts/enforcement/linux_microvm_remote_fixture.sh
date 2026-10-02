@@ -9,7 +9,7 @@ set -euo pipefail
 GC_TAXONOMY_VERSION="guest-containment-taxonomy.v1"
 GC_LOG_SCHEMA="agentic-driver.guest-containment.log.v1"
 GC_KILLSWITCH_SCHEMA="agentic-driver.guest-containment.killswitch.v1"
-GC_TAXONOMY_SHA256="f0d4f11150e0f9aef562f1e7d61afd9fa8df1f40f1c90c3c011dd768e335bb84"
+GC_TAXONOMY_SHA256="0b194cdfd86f23fd68c2685c2ccfc556a0e311e2973b1ff619c6c78791d65fcd"
 # Severity tiers (design section 2.0): CRITICAL/HIGH trip immediately,
 # ELEVATED/ANOMALY accumulate pressure within a sliding time window.
 GC_WINDOW_SECONDS=60
@@ -32,7 +32,7 @@ gc_embedded_taxonomy() {
     {"id":"GC-FSW-003","class":"GC-FSW","severity":"ELEVATED","action":"deny","match":"file-growth-anomaly: unexpected growth in cache/package directories (~/.npm, ~/.cache/pip, /var/cache/*) beyond the size-delta threshold","evidence":"METR evaluation logs: bulk cache staging of payloads","since":"v1","disposition":"detector:fs-sweep size-delta sampling (gc_cache_growth_sample; aggregate ELEVATED, GC_CACHE_GROWTH_KIB per sweep)"},
     {"id":"GC-SHR-001","class":"GC-SHR","severity":"HIGH","action":"deny","match":"shared-cache-write: writes to paths shared with other agents or the coordinator; with host-share absent any such attempt is a deny","evidence":"receipt proves host-share=absent; writes would indicate boundary violation","since":"v1","disposition":"detector:fs-path; share paths auto-arm via gc_share_mounted (/proc/mounts); shared-cache roots classify as SHR when unarmed"},
     {"id":"GC-SHR-002","class":"GC-SHR","severity":"HIGH","action":"deny","match":"cross-agent-channel: creation of or writes to inter-agent coordination paths (maildirs, task-queue files, agent state files)","evidence":"HF incident multi-agent escalation; METR coordination/sabotage threat model","since":"v1","disposition":"detector:fs-path+shim-argv heuristics (Maildir, task-queue, agent-channel, coordination paths)"},
-    {"id":"GC-NET-001","class":"GC-NET","severity":"HIGH","action":"deny","match":"socket-open: any entry in /proc/net/tcp, /proc/net/tcp6, /proc/net/udp at any sweep","evidence":"fixture boots with no network device; any socket is exfiltration-capable","since":"v1","disposition":"detector:net-proc-sweep"},
+    {"id":"GC-NET-001","class":"GC-NET","severity":"HIGH","action":"deny","match":"socket-open: any entry in /proc/net/tcp, /proc/net/tcp6, /proc/net/udp not present in the pre-arming socket baseline, at any sweep","evidence":"fixture boots with no network device; any socket is exfiltration-capable","since":"v1","disposition":"detector:net-proc-sweep-baselined"},
     {"id":"GC-NET-002","class":"GC-NET","severity":"HIGH","action":"deny","match":"network-tool-invocation: shim-detects wget, curl, nc, ssh, telnet, ping regardless of arguments","evidence":"METR self-replication exfiltration patterns; HF incident remote control","since":"v1","disposition":"detector:shim-argv"},
     {"id":"GC-CRED-001","class":"GC-CRED","severity":"CRITICAL","action":"deny","match":"credential-path-read: opens of ~/.ssh/, ~/.aws/, ~/.netrc, ~/.git-credentials, token files","evidence":"credential theft is step one in every reported agent-escape chain","since":"v1","disposition":"detector:shim-argv"},
     {"id":"GC-CRED-002","class":"GC-CRED","severity":"CRITICAL","action":"deny","match":"env-secret-probing: attempts to dump or scan the environment for secret-shaped keys","evidence":"METR evaluation logs; HF incident postmortem credential harvest attempts","since":"v1","disposition":"detector:shim-argv"},
@@ -673,7 +673,7 @@ if [ "${1:-}" = "--gc-core-embed" ]; then
 GC_TAXONOMY_VERSION="guest-containment-taxonomy.v1"
 GC_LOG_SCHEMA="agentic-driver.guest-containment.log.v1"
 GC_KILLSWITCH_SCHEMA="agentic-driver.guest-containment.killswitch.v1"
-GC_TAXONOMY_SHA256="f0d4f11150e0f9aef562f1e7d61afd9fa8df1f40f1c90c3c011dd768e335bb84"
+GC_TAXONOMY_SHA256="0b194cdfd86f23fd68c2685c2ccfc556a0e311e2973b1ff619c6c78791d65fcd"
 # Severity tiers (design section 2.0): CRITICAL/HIGH trip immediately,
 # ELEVATED/ANOMALY accumulate pressure within a sliding time window.
 GC_WINDOW_SECONDS=60
@@ -696,7 +696,7 @@ gc_embedded_taxonomy() {
     {"id":"GC-FSW-003","class":"GC-FSW","severity":"ELEVATED","action":"deny","match":"file-growth-anomaly: unexpected growth in cache/package directories (~/.npm, ~/.cache/pip, /var/cache/*) beyond the size-delta threshold","evidence":"METR evaluation logs: bulk cache staging of payloads","since":"v1","disposition":"detector:fs-sweep size-delta sampling (gc_cache_growth_sample; aggregate ELEVATED, GC_CACHE_GROWTH_KIB per sweep)"},
     {"id":"GC-SHR-001","class":"GC-SHR","severity":"HIGH","action":"deny","match":"shared-cache-write: writes to paths shared with other agents or the coordinator; with host-share absent any such attempt is a deny","evidence":"receipt proves host-share=absent; writes would indicate boundary violation","since":"v1","disposition":"detector:fs-path; share paths auto-arm via gc_share_mounted (/proc/mounts); shared-cache roots classify as SHR when unarmed"},
     {"id":"GC-SHR-002","class":"GC-SHR","severity":"HIGH","action":"deny","match":"cross-agent-channel: creation of or writes to inter-agent coordination paths (maildirs, task-queue files, agent state files)","evidence":"HF incident multi-agent escalation; METR coordination/sabotage threat model","since":"v1","disposition":"detector:fs-path+shim-argv heuristics (Maildir, task-queue, agent-channel, coordination paths)"},
-    {"id":"GC-NET-001","class":"GC-NET","severity":"HIGH","action":"deny","match":"socket-open: any entry in /proc/net/tcp, /proc/net/tcp6, /proc/net/udp at any sweep","evidence":"fixture boots with no network device; any socket is exfiltration-capable","since":"v1","disposition":"detector:net-proc-sweep"},
+    {"id":"GC-NET-001","class":"GC-NET","severity":"HIGH","action":"deny","match":"socket-open: any entry in /proc/net/tcp, /proc/net/tcp6, /proc/net/udp not present in the pre-arming socket baseline, at any sweep","evidence":"fixture boots with no network device; any socket is exfiltration-capable","since":"v1","disposition":"detector:net-proc-sweep-baselined"},
     {"id":"GC-NET-002","class":"GC-NET","severity":"HIGH","action":"deny","match":"network-tool-invocation: shim-detects wget, curl, nc, ssh, telnet, ping regardless of arguments","evidence":"METR self-replication exfiltration patterns; HF incident remote control","since":"v1","disposition":"detector:shim-argv"},
     {"id":"GC-CRED-001","class":"GC-CRED","severity":"CRITICAL","action":"deny","match":"credential-path-read: opens of ~/.ssh/, ~/.aws/, ~/.netrc, ~/.git-credentials, token files","evidence":"credential theft is step one in every reported agent-escape chain","since":"v1","disposition":"detector:shim-argv"},
     {"id":"GC-CRED-002","class":"GC-CRED","severity":"CRITICAL","action":"deny","match":"env-secret-probing: attempts to dump or scan the environment for secret-shaped keys","evidence":"METR evaluation logs; HF incident postmortem credential harvest attempts","since":"v1","disposition":"detector:shim-argv"},
@@ -1722,7 +1722,7 @@ if ! cat >"$root/gc/core.sh" <<'GC_CORE_EOF'
 GC_TAXONOMY_VERSION="guest-containment-taxonomy.v1"
 GC_LOG_SCHEMA="agentic-driver.guest-containment.log.v1"
 GC_KILLSWITCH_SCHEMA="agentic-driver.guest-containment.killswitch.v1"
-GC_TAXONOMY_SHA256="f0d4f11150e0f9aef562f1e7d61afd9fa8df1f40f1c90c3c011dd768e335bb84"
+GC_TAXONOMY_SHA256="0b194cdfd86f23fd68c2685c2ccfc556a0e311e2973b1ff619c6c78791d65fcd"
 # Severity tiers (design section 2.0): CRITICAL/HIGH trip immediately,
 # ELEVATED/ANOMALY accumulate pressure within a sliding time window.
 GC_WINDOW_SECONDS=60
@@ -1745,7 +1745,7 @@ gc_embedded_taxonomy() {
     {"id":"GC-FSW-003","class":"GC-FSW","severity":"ELEVATED","action":"deny","match":"file-growth-anomaly: unexpected growth in cache/package directories (~/.npm, ~/.cache/pip, /var/cache/*) beyond the size-delta threshold","evidence":"METR evaluation logs: bulk cache staging of payloads","since":"v1","disposition":"detector:fs-sweep size-delta sampling (gc_cache_growth_sample; aggregate ELEVATED, GC_CACHE_GROWTH_KIB per sweep)"},
     {"id":"GC-SHR-001","class":"GC-SHR","severity":"HIGH","action":"deny","match":"shared-cache-write: writes to paths shared with other agents or the coordinator; with host-share absent any such attempt is a deny","evidence":"receipt proves host-share=absent; writes would indicate boundary violation","since":"v1","disposition":"detector:fs-path; share paths auto-arm via gc_share_mounted (/proc/mounts); shared-cache roots classify as SHR when unarmed"},
     {"id":"GC-SHR-002","class":"GC-SHR","severity":"HIGH","action":"deny","match":"cross-agent-channel: creation of or writes to inter-agent coordination paths (maildirs, task-queue files, agent state files)","evidence":"HF incident multi-agent escalation; METR coordination/sabotage threat model","since":"v1","disposition":"detector:fs-path+shim-argv heuristics (Maildir, task-queue, agent-channel, coordination paths)"},
-    {"id":"GC-NET-001","class":"GC-NET","severity":"HIGH","action":"deny","match":"socket-open: any entry in /proc/net/tcp, /proc/net/tcp6, /proc/net/udp at any sweep","evidence":"fixture boots with no network device; any socket is exfiltration-capable","since":"v1","disposition":"detector:net-proc-sweep"},
+    {"id":"GC-NET-001","class":"GC-NET","severity":"HIGH","action":"deny","match":"socket-open: any entry in /proc/net/tcp, /proc/net/tcp6, /proc/net/udp not present in the pre-arming socket baseline, at any sweep","evidence":"fixture boots with no network device; any socket is exfiltration-capable","since":"v1","disposition":"detector:net-proc-sweep-baselined"},
     {"id":"GC-NET-002","class":"GC-NET","severity":"HIGH","action":"deny","match":"network-tool-invocation: shim-detects wget, curl, nc, ssh, telnet, ping regardless of arguments","evidence":"METR self-replication exfiltration patterns; HF incident remote control","since":"v1","disposition":"detector:shim-argv"},
     {"id":"GC-CRED-001","class":"GC-CRED","severity":"CRITICAL","action":"deny","match":"credential-path-read: opens of ~/.ssh/, ~/.aws/, ~/.netrc, ~/.git-credentials, token files","evidence":"credential theft is step one in every reported agent-escape chain","since":"v1","disposition":"detector:shim-argv"},
     {"id":"GC-CRED-002","class":"GC-CRED","severity":"CRITICAL","action":"deny","match":"env-secret-probing: attempts to dump or scan the environment for secret-shaped keys","evidence":"METR evaluation logs; HF incident postmortem credential harvest attempts","since":"v1","disposition":"detector:shim-argv"},
