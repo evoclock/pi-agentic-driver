@@ -18,7 +18,7 @@ import {
   promotionIdempotencyKey, findExistingPromotedCard, resolveCallerOrigin, hasTasksCapability,
   TASKS_CAPABILITY_ENV,
 } from "./session_tasks_core_pi.js";
-import { validateBoard } from "./task_board_core_pi.js";
+import { validateBoard, projectionPath, parseBoard } from "./task_board_core_pi.js";
 
 function readJsonIfExists(path) {
   if (!existsSync(path)) return null;
@@ -133,6 +133,34 @@ export function validateTasksSetup({
       }
       checks.linkage = { ok: brokenLinks.length === 0, brokenLinks };
       errors.push(...brokenLinks);
+    }
+    // Derived-projection consistency (read-only). board.md is a stale-by-design
+    // view recomputed by the trusted writer after every persist, so a present
+    // projection must list exactly the canonical card IDs; a missing projection
+    // is a warning only (the writer recreates it on the next write).
+    const projection = projectionPath(resolvedBoardPath);
+    if (existsSync(projection)) {
+      try {
+        const parsed = parseBoard(readFileSync(projection, "utf8"), { surface: "obsidian" });
+        if (!parsed.ok) {
+          checks.projection = { ok: false, path: projection, reason: "the projection does not parse as an Obsidian board" };
+          errors.push(`projection invalid: ${parsed.errors?.join("; ") ?? "unparseable"}`);
+        } else {
+          const canonicalIds = [...new Set(validated.cards.map((c) => c.cardId))].sort();
+          const projectionIds = [...new Set(parsed.cards.map((c) => c.cardId))].sort();
+          const stale = canonicalIds.join("\u0000") !== projectionIds.join("\u0000");
+          checks.projection = { ok: !stale, path: projection, cards: parsed.cards.length, stale };
+          if (stale) {
+            errors.push(`projection ${projection} is stale: card IDs do not match the canonical board (it is recomputed on the next trusted write)`);
+          }
+        }
+      } catch (error) {
+        checks.projection = { ok: false, path: projection, reason: String(error?.message || error).slice(0, 200) };
+        errors.push(`projection ${projection} could not be read`);
+      }
+    } else {
+      checks.projection = { ok: true, path: projection, present: false };
+      warnings.push(`no board.md projection at ${projection} (recomputed on the next trusted write; Obsidian rendering unavailable until then)`);
     }
   } else {
     checks.board = { ok: false, path: resolvedBoardPath, reason: "no TASKS.md in this workspace" };

@@ -8,7 +8,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validateTasksSetup } from "../scripts/enforcement/session_tasks_validate_pi.js";
@@ -197,4 +197,34 @@ test("validate reports unproven origin as audit metadata, not an error", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("validate checks derived-projection consistency read-only", () => {
+  const dir = tmpRepo();
+  try {
+    const boardPath = join(dir, "TASKS.md");
+    const result = seedPromotedCard(boardPath);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    const projection = join(dir, "board.md");
+    // Fresh writer output: projection exists and matches canonical IDs.
+    const fresh = validateTasksSetup({ repoRoot: dir, session: "sess-v" });
+    assert.equal(fresh.checks.projection.ok, true, JSON.stringify(fresh.checks.projection));
+    assert.equal(fresh.checks.projection.stale, false);
+    // Hand-edited stale projection: canonical gains a card the view lacks.
+    const second = writeCard({ boardPath, input: { title: "Second", specification: "s", definitionOfDone: "d", stoppingPoint: "sp", scopePaths: ["src/"] }, authority: AUTH });
+    assert.equal(second.ok, true, JSON.stringify(second));
+    writeFileSync(projection, readFileSync(projection, "utf8").replace(second.cardId, "T-9999"));
+    const stale = validateTasksSetup({ repoRoot: dir, session: "sess-v" });
+    assert.equal(stale.checks.projection.ok, false, JSON.stringify(stale.checks.projection));
+    assert.equal(stale.checks.projection.stale, true);
+    assert.ok(stale.errors.some((e) => e.includes("stale")), stale.errors.join("; "));
+    // Missing projection: warning only, still valid.
+    rmSync(projection);
+    const missing = validateTasksSetup({ repoRoot: dir, session: "sess-v" });
+    assert.equal(missing.checks.projection.ok, true, JSON.stringify(missing.checks.projection));
+    assert.equal(missing.checks.projection.present, false);
+    assert.ok(missing.warnings.some((w) => w.includes("no board.md projection")), missing.warnings.join("; "));
+    // The validator never rewrote or created the projection.
+    assert.equal(existsSync(projection), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
