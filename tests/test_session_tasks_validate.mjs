@@ -199,6 +199,33 @@ test("validate reports unproven origin as audit metadata, not an error", () => {
   }
 });
 
+test("validate detects same-ID projection field corruption", () => {
+  const dir = tmpRepo();
+  try {
+    const boardPath = join(dir, "TASKS.md");
+    const written = writeCard({ boardPath, input: {
+      title: "Task", spec: "spec", definitionOfDone: "dod", stoppingPoint: "stop",
+      scope: ["src/"], priority: "P2",
+    }, authority: AUTH, surface: "tasks" });
+    assert.equal(written.ok, true);
+    const projection = join(dir, "board.md");
+    const original = readFileSync(projection, "utf8");
+    for (const [label, mutate] of [
+      ["title", (text) => text.replace("[ ] Task ", "[ ] Altered ")],
+      ["lane", (text) => text.replace("## Backlog", "## In Progress").replace("## backlog", "## In Progress")],
+      ["priority", (text) => text.replace("[priority:: P2]", "[priority:: P0]")],
+      ["claim annotation", (text) => text.replace("[id:: T-0001]", "[id:: T-0001] [active:: intruder]")],
+    ]) {
+      const altered = mutate(original);
+      assert.notEqual(altered, original, label);
+      writeFileSync(projection, altered);
+      const report = validateTasksSetup({ repoRoot: dir, session: "sess-v", tasksRoot: join(dir, "tasks-root") });
+      assert.equal(report.checks.projection.stale, true, label);
+      assert.equal(readFileSync(projection, "utf8"), altered, "validator must not repair projection");
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("validate checks derived-projection consistency read-only", () => {
   const dir = tmpRepo();
   try {

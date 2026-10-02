@@ -38,10 +38,12 @@ today, with no pi-side plugin required.
 `node scripts/enforcement/session_tasks_validate_pi.js --repo-root <root>`
 (read-only, rule 30) additionally checks projection consistency:
 
-- if `board.md` exists it must parse as an Obsidian board and its card-ID
-  set must equal the canonical set — a mismatch is reported as stale, with
-  the fix stated (recomputed on the next trusted write);
-- a missing projection is a warning only, never an error;
+- if `board.md` exists it must parse as an Obsidian board and its projected
+  card fields (including IDs, lane, title, priority and active-claim annotation)
+  must match the canonical board and authenticated claims state. Mismatched
+  content is reported as stale; it is recomputed on the next trusted write;
+- a missing projection is a warning only, never an error. Validation does
+  not create it; Obsidian rendering is unavailable until a trusted write;
 - `board.md` is never accepted as a promotion target.
 
 ## Hard boundary (unchanged)

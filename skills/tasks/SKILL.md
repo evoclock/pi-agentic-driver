@@ -116,9 +116,11 @@ reverted by re-installing picc-tasks.
 `node scripts/enforcement/session_tasks_validate_pi.js --repo-root <root>`
 is read-only. It validates session snapshot shape, taskListId resolution,
 promotion metadata, linkage integrity, board availability (canonical
-`TASKS.md` first; `board.md` never), and promotion target configuration.
-Exit 0 only when ready; nonzero with a machine-readable error list
-otherwise. It never mutates state, never writes the board, never promotes.
+`TASKS.md` first; `board.md` never), projection consistency when present,
+and promotion target configuration. A missing `board.md` is a warning;
+a present but stale or mismatched projection is an error. Exit 0 only when
+operational; otherwise return a machine-readable error list. It never
+mutates state, writes the board, or promotes.
 
 ## Out of scope in v1
 
