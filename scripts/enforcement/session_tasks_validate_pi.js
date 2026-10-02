@@ -18,7 +18,7 @@ import {
   promotionIdempotencyKey, findExistingPromotedCard, resolveCallerOrigin, hasTasksCapability,
   TASKS_CAPABILITY_ENV,
 } from "./session_tasks_core_pi.js";
-import { validateBoard } from "./task_board_core_pi.js";
+import { validateBoard, projectionPath, parseBoard, serializeBoard, readClaimsState } from "./task_board_core_pi.js";
 
 function readJsonIfExists(path) {
   if (!existsSync(path)) return null;
@@ -133,6 +133,48 @@ export function validateTasksSetup({
       }
       checks.linkage = { ok: brokenLinks.length === 0, brokenLinks };
       errors.push(...brokenLinks);
+    }
+    // Compare parsed semantics against the writer's existing projection format.
+    // A missing projection is a warning only (the writer recreates it on write).
+    const projection = projectionPath(resolvedBoardPath);
+    if (existsSync(projection)) {
+      try {
+        const parsed = parseBoard(readFileSync(projection, "utf8"), { surface: "obsidian" });
+        if (!parsed.ok) {
+          checks.projection = { ok: false, path: projection, reason: "the projection does not parse as an Obsidian board" };
+          errors.push(`projection invalid: ${parsed.errors?.join("; ") ?? "unparseable"}`);
+        } else {
+          const claims = readClaimsState(resolvedBoardPath);
+          if (!claims.ok) {
+            checks.projection = { ok: false, path: projection, reason: `claims state unavailable: ${claims.reason}` };
+            errors.push(`projection ${projection} cannot be verified: ${claims.reason}`);
+          } else {
+            const active = new Map(claims.state.claims.map((claim) => [claim.cardId, claim.role]));
+            const expected = parseBoard(serializeBoard(validated.cards.map((card) =>
+              active.has(card.cardId) ? { ...card, activeClaim: active.get(card.cardId) } : card
+            ), { surface: "obsidian" }), { surface: "obsidian" });
+            // Compare the parsed, writer-promised fields, not Markdown formatting.
+            // Include multiplicity: duplicate IDs cannot disappear into a Set.
+            const fields = ["cardId", "lane", "title", "priority", "done", "flags", "hash",
+              "dependencies", "base", "due", "role", "capabilities", "stoppingPoint",
+              "specHash", "dodHash", "specText", "dodText", "scope", "unchangedPaths",
+              "repositories", "tags", "provenance", "importedId", "authoritySource",
+              "authorityWriterHmac", "description", "activeClaim"];
+            const signature = (cards) => cards.map((card) => fields.map((field) =>
+              field === "activeClaim" ? card.fields?.active ?? null : card[field]
+            )).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+            const stale = JSON.stringify(signature(expected.cards)) !== JSON.stringify(signature(parsed.cards));
+            checks.projection = { ok: !stale, path: projection, cards: parsed.cards.length, stale };
+            if (stale) errors.push(`projection ${projection} is stale: content does not match the canonical board and claims (recomputed on the next trusted write)`);
+          }
+        }
+      } catch (error) {
+        checks.projection = { ok: false, path: projection, reason: String(error?.message || error).slice(0, 200) };
+        errors.push(`projection ${projection} could not be read`);
+      }
+    } else {
+      checks.projection = { ok: true, path: projection, present: false };
+      warnings.push(`no board.md projection at ${projection} (recomputed on the next trusted write; Obsidian rendering unavailable until then)`);
     }
   } else {
     checks.board = { ok: false, path: resolvedBoardPath, reason: "no TASKS.md in this workspace" };
