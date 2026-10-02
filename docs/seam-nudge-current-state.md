@@ -75,7 +75,7 @@ The spec speaks of original direct instruction, session task or board claim/enve
 | `tasks-unified-v1` @ `aa15c9f` | Separate review if still needed against current main, never incidental to #40. |
 | Release / host work | 1.0.0 remains paused until owner resumes and sets cutoff; no tag/install/build/publication. #65 verification and Vogelkop dev baseline are separate. |
 
-**Next bounded action:** produce a read-only, file-and-function-backed map for **each actual** journey source from origin through verified authority, scope and lifecycle revalidation. Mark unknowns explicitly. Then choose the smallest Phase 2 slice that can be safely authorized. Do not revive rejected code, perform live recovery, send upstream brief, merge or publish on the strength of this document.
+**Next bounded action while N1 is parked:** verify the existing disabled classifier/reason-state/ledger behavior with offline fixtures for blocked and stalled observations, varied attempts, unknown delivery and park decisions. Do not activate transport or replacement. The read-only source/authority map was completed after PR #104; it found the public session journey and board claim are separate routes, and no provenance hash authorizes recovery. Do not revive rejected code, perform live recovery or send another upstream brief on the strength of this document.
 
 ## Upstream Herdr discussion and possible resolutions
 
