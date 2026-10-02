@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/Python-3776AB?style=flat&logo=python&logoColor=white" alt="Python"/>
 </p>
 
-An agent without guardrails will rewrite code an existing abstraction already
+An agent without guardrails will sometimes rewrite code an existing abstraction already
 covers. It will ship to the wrong remote. It will lose context and report
 success without evidence. Pi is deliberately lean by design: the harness is yours to
 shape. That philosophy is exactly what these extensions practice, they make them mine (and possibly yours too). They take
@@ -21,14 +21,14 @@ some concerns I consider worth addressing, and make them part of the
 harness.
 
 **pi-agentic-driver makes agent work verifiable and controllable. The agent does
-the work and each extension makes sure the work can be checked.** Review happens
-before code is written. Communication carries reports without asserting authority that isn't granted.
-Isolation proofs verify their own cleanup. Sessions survive compaction and
+the work and each extension makes sure the work can be checked.** Reviewing happens
+before code is written. Communication involves reports without asserting authority that isn't granted.
+Isolation proofs exist to verify their own cleanup. Sessions survive compaction and
 Git operations stay exact, confirmed, and protected.
 
-Every capability passes fixture-based acceptance, native tests, live-session
-checks, and independent model review before release. I/we document each
-extension's restrictions before release, not after.
+Features have different evidence levels: focused tests and independent review
+support the shipped contracts, while live host-dependent proof is stated only
+where it has actually run. A receipt or worker report is evidence, not approval.
 
 Extensions for [Pi](https://github.com/earendil-works/pi-coding-agent):
 advisory code review, controlled role communication, and governed isolation
@@ -43,24 +43,26 @@ proofs for agentic workflows.
 | Tool | What it does | Status |
 |------|--------------|--------|
 | `code_phage` | Reviews a plan against a stated goal before code is written and advises your agent. | shipped |
-| `tasks` | Keeps a session plan close to the work, then lets the owner make selected items durable in `TASKS.md`. | shipped |
-| `agentic_herdr_communication` | Exchanges marked reports with worker agents; never grants authority. | shipped |
+| `tasks` | Keeps a priority-ordered session plan, then lets the owner make selected items durable in `TASKS.md`. | shipped |
+| `agentic_herdr_communication` | Submits one prompt and observes delivery and marked reports; never grants authority. | shipped |
 | `agentic_herdr_spawn_worker` | Starts one Pi worker in a pane or tab, with native confirmation. | shipped |
 | `agentic_aidr` | A remedy for AI;DR. Reviews writing for clarity, simplicity, brevity, and humanity. | shipped |
 | `agentic_linux_microvm_cutover` | Runs one job in a throwaway QEMU/KVM virtual machine on a Linux host, with a severity-tiered killswitch that stops escape attempts. | user-enabled, native confirmation |
-| `agentic_worker_dispatch` | Runs controlled worker journeys and observes worker liveness. | shipped |
+| `agentic_worker_dispatch` | Runs bounded worker journeys and observes worker liveness; recovery is not activated. | shipped |
 | `agentic_kanban_board` | Shows the workspace task board: lanes, flags, priorities, dependencies, and which cards can run. | shipped |
 | `agentic_kanban_board_write` | Adds cards to the board through the trusted writer, which records who authorized the work. | shipped |
 | `agentic_kanban_board_update` | Moves, closes, flags, edits, or removes cards on the board, always recording who authorized the change. | shipped |
 | `agentic_kanban_board_dispatch` | Claims an eligible board card for automated contained work and creates its assignment envelope. | shipped |
 | `agentic_kanban_pulse` | Checks for ready work and available capacity, then starts assignments under the board policy. | shipped |
+| `/agentic-recovery-evidence` | Opens private recovery evidence in the local TUI; it is not a model-callable tool or recovery authorization. | shipped, local review only |
 | Router | Capacity/policy routing for Board Pulse: seats with scope statements, tunable policy values, and a binding dispatch gate. | shipped |
 | Janus (bundled service) | Local Jev evaluation service on loopback: semantic ranking, the dispatch-gate judgment, redaction before every external call. See `janus/README.md`. | shipped |
 
-**Status: active development and testing.** Each extension ships only after
-it passes fixture-based acceptance, native tests, live-session checks, and
-independent model review. You can install released components. Pending
-components are listed here for transparency and are not packaged.
+**Status: active development and testing.** The disabled NUDGE classifier and
+private evidence store are packaged foundations, not a running recovery
+ladder. Herdr 0.9.1 has no proven modal-safe nudge channel. No terminal
+`prompt` or `send-keys` fallback is enabled. Pending integrations below are
+not presented as live features.
 
 ## Code review and planning
 
@@ -101,13 +103,13 @@ only, not a runtime dependency).
 
 Plans stay close to the work. They do not become board work by accident. The tasks skill gives Pi a familiar session list. It adds an owner-approved way to keep selected tasks in the durable `TASKS.md` board.
 
-- **Keep the working list simple.** Use `TaskCreate`, `TaskGet`, `TaskList`, and `TaskUpdate` as usual; the above-editor widget and footer pill stay live as tasks change.
+- **Keep the working list simple.** Use `TaskCreate`, `TaskGet`, `TaskList`, and `TaskUpdate` as usual. Set an optional P0–P3 session priority; ranked open work appears first, unranked work keeps ID order, and completed work appears last. Priority does not authorize board dispatch. The widget and footer stay live as tasks change.
 - **Keep the Claude-like view.** `/tasks` provides descriptions, active forms, and internal-task markers without mutating the plan.
 - **Make durable work deliberate.** `TaskPromote` never runs automatically. It previews the exact cards and destination before the owner confirms.
 - **Keep authority clear.** The trusted board writer creates and updates `TASKS.md`. The skill does not bypass it.
 - **Make migration gentle.** Existing task files remain readable. Moving to the driver-owned skill does not strand current plans.
 
-The result is a clean handoff from a session plan to durable work. Selected tasks can survive the session, appear on the shared board, and become available for controlled dispatch when ready.
+The result is a clean handoff from a session plan to durable work. Selected tasks can survive the session, appear on the shared board, and become available for controlled dispatch when ready. A session priority is not copied into a board card without an owner-approved board action.
 
 </details>
 
@@ -276,11 +278,15 @@ across versions rather than pinning one).
 - **List and observe.** Worker roles are filtered to trusted repositories: a
   checked-in registry plus canonical-path validation. Unlisted or
   symlink-escaped repositories are denied.
-- **Prompt exactly once.** The tool re-observes the role, sends one approved
-  prompt with a role-specific report contract, waits for terminal settlement,
-  and reads exactly one complete marked report. No retry, no target
-  substitution, no resend on timeout.
-- **Wait and read.** The same trust checks apply to partial journeys.
+- **Submit once and observe separately.** A prompt returns an immediate,
+  non-authorizing delivery receipt. The `delivery` action can report queued,
+  delivered, answered, failed, unknown, or unattributed. A marked answer is
+  attributed only to its own delivery boundary and exact correlation line;
+  missing or ambiguous evidence is never called success.
+- **Wait and read.** The same trust checks apply to settlement and marked
+  reports. Unknown delivery never causes an automatic retry or resend.
+  Duplicate submissions within the bounded uncertainty window return the
+  existing delivery ID, not another handoff.
 - **Grant nothing.** Fixed argv, `shell: false`, a pinned executable, the
   coordinator role class denied. Results come back as untrusted evidence. The
   tool cannot control panes, start agents, run shells, or create authority.
@@ -654,9 +660,13 @@ silently allowed.
   notes, governed checkpoint mutation, watchdog handoff, and fresh-session
   resumption that identifies goal, changed files, checks, and next step
   without executing anything.
-- **evidence ledger.** Deterministic evidence indexing, lossless source
-  projection, universal checkpoint produce/store/recover, and run-ledger
-  records with crash and corruption vectors tested.
+- **recovery journey.** A private exact-evidence store and read-only TUI review
+  are packaged. Trusted journey authorization, safe handoff, durable unknown-
+  delivery lock, and a modal-safe nudge channel are still missing. No recovery
+  action is enabled by a stored hash, receipt, or display token.
+- **broader evidence ledger.** Deterministic indexing, lossless projection,
+  checkpoint produce/store/recover, and tested multihost reconciliation remain
+  planned beyond the bounded private store.
 - **offline multihost evidence.** Record run evidence on each host while
   disconnected and reconcile it deterministically on reconnection, with no
   host as sole authority.
