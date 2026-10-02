@@ -316,7 +316,30 @@ test("a worker not idle across observed exchange cycles is unresponsive and ends
   assert.equal(journey.code, "worker-unresponsive");
   assert.match(journey.report, /status: worker-unresponsive/);
   assert.equal(journey.handoff.attempted, false, "no handoff is attempted without a spawn seam");
-  assert.match(journey.handoff.reason, /not available in this context/);
+  assert.match(journey.handoff.reason, /no task selected/);
+});
+
+test("confirmed replacement before task selection never confirms or spawns", async () => {
+  for (const status of ["working"]) {
+    let confirmations = 0;
+    let spawns = 0;
+    const journey = await runWorkerJourney(
+      { action: "dispatch", role: "worker", stepPrompt: "x" },
+      { mode: "tui", hasUI: true, cwd: root, ui: { confirm: async () => { confirmations += 1; return true; } } },
+      {
+        taskStore: taskStore([{ id: "1", status: "pending" }]),
+        runProcess: async ({ argv }) => argv[1] === "get"
+          ? { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: "worker", agent: "pi", status, repository: root } }) }
+          : { code: 0, stdout: "{}" },
+        spawnReplacement: async () => { spawns += 1; return { ok: true }; },
+      },
+    );
+    assert.equal(journey.status, "worker-unresponsive");
+    assert.equal(journey.handoff.attempted, false);
+    assert.match(journey.handoff.reason, /no task selected/);
+    assert.equal(confirmations, 0);
+    assert.equal(spawns, 0);
+  }
 });
 
 test("unresponsive-session replacement handoff records the handoff and reuses task cards", async () => {
@@ -337,14 +360,11 @@ test("unresponsive-session replacement handoff records the handoff and reuses ta
     },
   );
   assert.equal(journey.status, "worker-unresponsive");
-  assert.equal(journey.handoff.attempted, true);
-  assert.equal(journey.handoff.ok, true);
-  assert.equal(journey.handoff.role, "worker");
-  assert.equal(journey.handoff.nonAuthorizing, true);
-  assert.deepEqual(spawned, ["worker"]);
-  assert.match(journey.report, /handoff: attempted=true ok=true role=worker/);
+  assert.equal(journey.handoff.attempted, false);
+  assert.match(journey.handoff.reason, /no task selected/);
+  assert.deepEqual(spawned, []);
 
-  // Declined replacement confirmation records the explicit refusal.
+  // A pre-task pulse does not offer a replacement confirmation.
   const declined = await runWorkerJourney(
     { action: "dispatch", role: "worker", stepPrompt: "x" },
     { mode: "tui", hasUI: true, cwd: root, ui: { confirm: async () => false } },
@@ -358,9 +378,9 @@ test("unresponsive-session replacement handoff records the handoff and reuses ta
   );
   assert.equal(declined.status, "worker-unresponsive");
   assert.equal(declined.handoff.attempted, false);
-  assert.match(declined.handoff.reason, /not granted/);
+  assert.match(declined.handoff.reason, /no task selected/);
 
-  // A stuck exchange (stalled prompt) triggers the same explicit handoff.
+  // A stuck exchange after task selection retains the explicit handoff.
   const stalled = await runWorkerJourney(
     { action: "dispatch", role: "worker", stepPrompt: "x" },
     tuiContext(),
@@ -457,7 +477,7 @@ test("prohibited effects unchanged: handoff spawns through the lifecycle boundar
   assert.deepEqual(tools, ["agentic_worker_dispatch"]);
 });
 
-test("production wiring: unresponsive handoff spawns a real replacement through the lifecycle boundary", async (t) => {
+test("production wiring: pre-task unresponsive worker cannot trigger lifecycle spawn", async (t) => {
   const { executeHerdrSpawnWorker } = await import("../scripts/enforcement/herdr_lifecycle_pi.js");
   const lifecycleCalls = [];
   // Hermetic trusted-repository setup: the lifecycle resolves the worker
@@ -526,21 +546,9 @@ test("production wiring: unresponsive handoff spawns a real replacement through 
     },
   );
   assert.equal(journey.status, "worker-unresponsive");
-  assert.equal(journey.handoff.attempted, true);
-  assert.equal(journey.handoff.ok, true, "the replacement spawn must succeed through the lifecycle boundary");
-  assert.equal(journey.handoff.role, "worker");
-  assert.deepEqual(journey.handoff.modelArgv, ["--model", model]);
-  assert.equal(journey.handoff.nonAuthorizing, true);
-  assert.match(journey.report, /handoff: attempted=true ok=true role=worker/);
-
-  // Fixed lifecycle argv sequence: list (duplicate check), tab create,
-  // agent start (with the validated model tail), agent get, pane get.
-  assert.deepEqual(lifecycleCalls.map((argv) => `${argv[0]} ${argv[1]}`), [
-    "agent list", "tab create", "agent start", "agent get", "pane get",
-  ]);
-  const startArgv = lifecycleCalls.find((argv) => argv[1] === "start");
-  assert.equal(startArgv[0], "agent");
-  assert.deepEqual(startArgv.slice(-2), ["--model", model]);
+  assert.equal(journey.handoff.attempted, false);
+  assert.match(journey.handoff.reason, /no task selected/);
+  assert.deepEqual(lifecycleCalls, [], "the lifecycle boundary must not be called without a selected task");
 });
 
 test("AJ-4: autonomous replacement spawn with gap analysis", async () => {

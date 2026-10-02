@@ -532,6 +532,15 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       journey.steps.push({ step: stepIndex, taskDisplayId: null, status: journey.status, error: String(error?.message || error).slice(0, 256) });
       return finish(journey.status);
     }
+    // The pre-task pulse has not selected a task. Confirmed replacement here
+    // cannot be tied to a task identity, so it must not offer a spawn.
+    if (autonomy !== "autonomous" && (!pulse.alive || (!pulse.dispatchEligible && pulse.status !== "blocked"))) {
+      journey.status = "worker-unresponsive";
+      journey.code = "worker-unresponsive";
+      journey.steps.push({ step: stepIndex, taskDisplayId: null, status: "worker-unresponsive", error: "worker unavailable before task selection" });
+      journey.handoff = { attempted: false, reason: "no task selected for confirmed replacement" };
+      return finish("worker-unresponsive");
+    }
     if (!pulse.alive) {
       return handoffToReplacement("worker role is not alive");
     }
