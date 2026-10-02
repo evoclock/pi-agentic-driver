@@ -26,7 +26,7 @@ import {
   buildPromotionPreview, buildBatchPromotionPreview,
   reconcileDependencies, applyDependencyEdges,
   promotionIdempotencyKey, forwardLinkFor, findExistingPromotedCard,
-  resolveCallerOrigin, canPromote, hasTasksCapability,
+  resolveCallerOrigin, canPromote, hasTasksCapability, SESSION_TASK_PRIORITIES,
 } from "../scripts/enforcement/session_tasks_core_pi.js";
 import { writeCard, updateCard, parseBoard } from "../scripts/enforcement/task_board_core_pi.js";
 
@@ -69,6 +69,15 @@ export default async function tasksPi(pi) {
   const TASK_ICONS = Object.freeze({ pending: "▫", in_progress: "▪", completed: "✓" });
 
   const isVisible = (task) => task?.metadata?._internal !== true;
+  // Presentation only: priority never grants board claim or dispatch authority.
+  const orderedVisibleTasks = () => tasks.filter(isVisible).sort((a, b) => {
+    if (a.status === "completed" && b.status !== "completed") return 1;
+    if (b.status === "completed" && a.status !== "completed") return -1;
+    const rankA = SESSION_TASK_PRIORITIES.indexOf(a.priority);
+    const rankB = SESSION_TASK_PRIORITIES.indexOf(b.priority);
+    if (rankA !== rankB) return (rankA < 0 ? 4 : rankA) - (rankB < 0 ? 4 : rankB);
+    return Number(a.id) - Number(b.id) || a.id.localeCompare(b.id);
+  });
   const unresolvedTaskIds = () => new Set(
     tasks.filter((task) => task.status !== "completed").map((task) => task.id),
   );
@@ -77,6 +86,7 @@ export default async function tasksPi(pi) {
     const parts = [
       `${TASK_ICONS[task.status] ?? "?"} #${task.id}`,
       `[${task.status}]`,
+      ...(task.priority ? [`[${task.priority}]`] : []),
       task.subject,
     ];
     if (task.owner) parts.push(`(${task.owner})`);
@@ -88,7 +98,7 @@ export default async function tasksPi(pi) {
   };
 
   const renderTaskListLineForLLM = (task) => {
-    const parts = [`#${task.id}`, `[${task.status}]`, task.subject];
+    const parts = [`#${task.id}`, `[${task.status}]`, ...(task.priority ? [`[${task.priority}]`] : []), task.subject];
     if (task.owner) parts.push(`(${task.owner})`);
     let line = parts.join(" ");
     const unresolved = unresolvedTaskIds();
@@ -109,6 +119,7 @@ export default async function tasksPi(pi) {
     const parts = [
       TASK_ICONS[task.status] ?? "?",
       `[${task.status}]`,
+      ...(task.priority ? [`[${task.priority}]`] : []),
       task.subject,
     ];
     if (task.owner) parts.push(`(${task.owner})`);
@@ -136,7 +147,7 @@ export default async function tasksPi(pi) {
       return;
     }
 
-    const visible = tasks.filter(isVisible);
+    const visible = orderedVisibleTasks();
     try {
       if (typeof uiHost.ui.setWidget === "function") {
         if (visible.length === 0) {
@@ -150,9 +161,7 @@ export default async function tasksPi(pi) {
           const header = `Tasks  ${counts.pending} pending · ${counts.in_progress} in progress · ${counts.completed} done`;
           const unresolved = unresolvedTaskIds();
           const theme = uiHost.ui.theme;
-          const rows = [...visible]
-            .sort((a, b) => Number(a.id) - Number(b.id) || a.id.localeCompare(b.id))
-            .map((task) => renderWidgetTaskLine(theme, task, unresolved));
+          const rows = visible.map((task) => renderWidgetTaskLine(theme, task, unresolved));
           uiHost.ui.setWidget(WIDGET_KEY, [themed(theme, "fg", ["dim", header], header), ...rows], { placement: "aboveEditor" });
         }
       }
@@ -239,10 +248,14 @@ export default async function tasksPi(pi) {
           description: { type: "string", description: "What needs to be done" },
           activeForm: { type: "string", description: "Present continuous form shown in spinner when in_progress (e.g., \"Running tests\")" },
           metadata: { type: "object", description: "Arbitrary metadata to attach to the task", additionalProperties: true, properties: {} },
+          priority: { type: "string", enum: ["P0", "P1", "P2", "P3"], description: "Optional session-list display priority; does not affect board dispatch." },
         },
         required: ["subject", "description"],
       },
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        if (params.priority !== undefined && !SESSION_TASK_PRIORITIES.includes(params.priority)) {
+          return failResult("invalid-priority", "priority must be P0, P1, P2, or P3");
+        }
         highWaterMark += 1;
         let task = {
           id: String(highWaterMark),
@@ -253,6 +266,7 @@ export default async function tasksPi(pi) {
           blockedBy: [],
           ...(params.activeForm !== undefined ? { activeForm: params.activeForm } : {}),
           ...(params.metadata !== undefined ? { metadata: params.metadata } : {}),
+          ...(params.priority !== undefined ? { priority: params.priority } : {}),
         };
         task = stampOrigin(task);
         tasks.push(task);
@@ -273,7 +287,7 @@ export default async function tasksPi(pi) {
       async execute(_toolCallId, params) {
         const task = findTask(params.taskId);
         if (!task) return { content: [{ type: "text", text: "Task not found" }], details: { task: null } };
-        const lines = [`Task #${task.id}: ${task.subject}`, `Status: ${task.status}`, `Description: ${task.description}`];
+        const lines = [`Task #${task.id}: ${task.subject}`, `Status: ${task.status}`, ...(task.priority ? [`Priority: ${task.priority}`] : []), `Description: ${task.description}`];
         if (task.blockedBy.length > 0) lines.push(`Blocked by: ${task.blockedBy.map((id) => `#${id}`).join(", ")}`);
         if (task.blocks.length > 0) lines.push(`Blocks: ${task.blocks.map((id) => `#${id}`).join(", ")}`);
         // picc-tasks v0.2.0 TaskGet details carry the restricted task shape
@@ -299,16 +313,17 @@ export default async function tasksPi(pi) {
     pi.registerTool({
       name: "TaskList",
       label: "TaskList",
-      description: "Use this tool to list all tasks in the task list.\n\n## When to Use This Tool\n\n- To see what tasks are available to work on (status: 'pending', no owner, not blocked)\n- To check overall progress on the project\n- To find tasks that are blocked and need dependencies resolved\n- After completing a task, to check for newly unblocked work or claim the next available task\n- **Prefer working on tasks in ID order** (lowest ID first) when multiple tasks are available, as earlier tasks often set up context for later ones\n\n## Output\n\nReturns a summary of each task:\n- **id**: Task identifier (use with TaskGet, TaskUpdate)\n- **subject**: Brief description of the task\n- **status**: 'pending', 'in_progress', or 'completed'\n- **owner**: Agent ID if assigned, empty if available\n- **blockedBy**: List of open task IDs that must be resolved first (tasks with blockedBy cannot be claimed until dependencies resolve)\n\nUse TaskGet with a specific task ID to view full details including description and comments.",
+      description: "Use this tool to list all tasks in the task list.\n\n## When to Use This Tool\n\n- To see what tasks are available to work on (status: 'pending', no owner, not blocked)\n- To check overall progress on the project\n- To find tasks that are blocked and need dependencies resolved\n- After completing a task, to check for newly unblocked work or claim the next available task\n- Choose unblocked work by explicit P0–P3 priority, then stable ID order. Unranked tasks follow ranked tasks; completed tasks display last. Session priority never grants board or dispatch authority.\n\n## Output\n\nReturns a summary of each task:\n- **id**: Task identifier (use with TaskGet, TaskUpdate)\n- **subject**: Brief description of the task\n- **status**: 'pending', 'in_progress', or 'completed'\n- **priority**: P0–P3 when set; absent means unranked\n- **owner**: Agent ID if assigned, empty if available\n- **blockedBy**: List of open task IDs that must be resolved first (tasks with blockedBy cannot be claimed until dependencies resolve)\n\nUse TaskGet with a specific task ID to view full details including description and comments.",
       parameters: { type: "object", additionalProperties: false, properties: {} },
       async execute() {
-        const visible = tasks.filter(isVisible);
+        const visible = orderedVisibleTasks();
         if (visible.length === 0) return { content: [{ type: "text", text: "No tasks found" }], details: { tasks: [] } };
         const unresolved = unresolvedTaskIds();
         const list = visible.map((t) => ({
           id: t.id,
           subject: t.subject,
           status: t.status,
+          ...(t.priority !== undefined ? { priority: t.priority } : {}),
           ...(t.owner !== undefined ? { owner: t.owner } : {}),
           blockedBy: t.blockedBy.filter((id) => unresolved.has(id)),
         }));
@@ -321,7 +336,7 @@ export default async function tasksPi(pi) {
     pi.registerTool({
       name: "TaskUpdate",
       label: "TaskUpdate",
-      description: "Use this tool to update a task in the task list.\n\n## When to Use This Tool\n\n**Mark tasks as resolved:**\n- When you have completed the work described in a task\n- When a task is no longer needed or has been superseded\n- IMPORTANT: Always mark your assigned tasks as resolved when you finish them\n- After resolving, call TaskList to find your next task\n\n- ONLY mark a task as completed when you have FULLY accomplished it\n- If you encounter errors, blockers, or cannot finish, keep the task as in_progress\n- When blocked, create a new task describing what needs to be resolved\n- Never mark a task as completed if:\n  - Tests are failing\n  - Implementation is partial\n  - You encountered unresolved errors\n  - You couldn't find necessary files or dependencies\n\n**Delete tasks:**\n- When a task is no longer relevant or was created in error\n- Setting status to `deleted` permanently removes the task\n\n**Update task details:**\n- When requirements change or become clearer\n- When establishing dependencies between tasks\n\n## Fields You Can Update\n\n- **status**: The task status (see Status Workflow below)\n- **subject**: Change the task title (imperative form, e.g., \"Run tests\")\n- **description**: Change the task description\n- **activeForm**: Present continuous form shown in spinner when in_progress (e.g., \"Running tests\")\n- **owner**: Change the task owner (agent name)\n- **metadata**: Merge metadata keys into the task (set a key to null to delete it)\n- **addBlocks**: Mark tasks that cannot start until this one completes\n- **addBlockedBy**: Mark tasks that must complete before this one can start\n\n## Status Workflow\n\nStatus progresses: `pending` → `in_progress` → `completed`\n\nUse `deleted` to permanently remove a task.\n\n## Staleness\n\nMake sure to read a task's latest state using `TaskGet` before updating it.\n\n## Examples\n\nMark task as in progress when starting work:\n```json\n{\"taskId\": \"1\", \"status\": \"in_progress\"}\n```\n\nMark task as completed after finishing work:\n```json\n{\"taskId\": \"1\", \"status\": \"completed\"}\n```\n\nDelete a task:\n```json\n{\"taskId\": \"1\", \"status\": \"deleted\"}\n```\n\nClaim a task by setting owner:\n```json\n{\"taskId\": \"1\", \"owner\": \"my-name\"}\n```\n\nSet up task dependencies:\n```json\n{\"taskId\": \"2\", \"addBlockedBy\": [\"1\"]}\n```",
+      description: "Use this tool to update a task in the task list.\n\n## When to Use This Tool\n\n**Mark tasks as resolved:**\n- When you have completed the work described in a task\n- When a task is no longer needed or has been superseded\n- IMPORTANT: Always mark your assigned tasks as resolved when you finish them\n- After resolving, call TaskList to find your next task\n\n- ONLY mark a task as completed when you have FULLY accomplished it\n- If you encounter errors, blockers, or cannot finish, keep the task as in_progress\n- When blocked, create a new task describing what needs to be resolved\n- Never mark a task as completed if:\n  - Tests are failing\n  - Implementation is partial\n  - You encountered unresolved errors\n  - You couldn't find necessary files or dependencies\n\n**Delete tasks:**\n- When a task is no longer relevant or was created in error\n- Setting status to `deleted` permanently removes the task\n\n**Update task details:**\n- When requirements change or become clearer\n- When establishing dependencies between tasks\n\n## Fields You Can Update\n\n- **status**: The task status (see Status Workflow below)\n- **subject**: Change the task title (imperative form, e.g., \"Run tests\")\n- **description**: Change the task description\n- **activeForm**: Present continuous form shown in spinner when in_progress (e.g., \"Running tests\")\n- **owner**: Change the task owner (agent name)\n- **priority**: Set P0–P3, or null to clear session-list priority\n- **metadata**: Merge metadata keys into the task (set a key to null to delete it)\n- **addBlocks**: Mark tasks that cannot start until this one completes\n- **addBlockedBy**: Mark tasks that must complete before this one can start\n\n## Status Workflow\n\nStatus progresses: `pending` → `in_progress` → `completed`\n\nUse `deleted` to permanently remove a task.\n\n## Staleness\n\nMake sure to read a task's latest state using `TaskGet` before updating it.\n\n## Examples\n\nMark task as in progress when starting work:\n```json\n{\"taskId\": \"1\", \"status\": \"in_progress\"}\n```\n\nMark task as completed after finishing work:\n```json\n{\"taskId\": \"1\", \"status\": \"completed\"}\n```\n\nDelete a task:\n```json\n{\"taskId\": \"1\", \"status\": \"deleted\"}\n```\n\nClaim a task by setting owner:\n```json\n{\"taskId\": \"1\", \"owner\": \"my-name\"}\n```\n\nSet up task dependencies:\n```json\n{\"taskId\": \"2\", \"addBlockedBy\": [\"1\"]}\n```",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -331,6 +346,7 @@ export default async function tasksPi(pi) {
           description: { type: "string", description: "New description for the task" },
           activeForm: { type: "string", description: "Present continuous form shown in spinner when in_progress (e.g., \"Running tests\")" },
           owner: { type: "string", description: "New owner for the task" },
+          priority: { type: ["string", "null"], enum: ["P0", "P1", "P2", "P3", null], description: "Set P0–P3 display priority, or null to clear. No board authority." },
           metadata: { type: "object", description: "Metadata keys to merge into the task. Set a key to null to delete it.", additionalProperties: true, properties: {} },
           status: { type: "string", enum: ["pending", "in_progress", "completed", "deleted"], description: "New status for the task" },
           addBlocks: { type: "array", items: { type: "string" }, description: "Task IDs that this task blocks" },
@@ -344,12 +360,19 @@ export default async function tasksPi(pi) {
           return { content: [{ type: "text", text: "Task not found" }], details: { success: false, taskId: params.taskId, error: "Task not found", updatedFields: [] } };
         }
         const task = tasks[idx];
+        if (params.priority !== undefined && params.priority !== null && !SESSION_TASK_PRIORITIES.includes(params.priority)) {
+          return failResult("invalid-priority", "priority must be P0, P1, P2, P3, or null to clear");
+        }
         const updatedFields = [];
         let statusChange;
         if (params.subject !== undefined && params.subject !== task.subject) { task.subject = params.subject; updatedFields.push("subject"); }
         if (params.description !== undefined && params.description !== task.description) { task.description = params.description; updatedFields.push("description"); }
         if (params.activeForm !== undefined && params.activeForm !== task.activeForm) { task.activeForm = params.activeForm; updatedFields.push("activeForm"); }
         if (params.owner !== undefined && params.owner !== task.owner) { task.owner = params.owner; updatedFields.push("owner"); }
+        if (params.priority !== undefined && params.priority !== task.priority) {
+          if (params.priority === null) delete task.priority; else task.priority = params.priority;
+          updatedFields.push("priority");
+        }
         if (params.metadata !== undefined) {
           const merged = { ...(task.metadata ?? {}) };
           for (const [k, v] of Object.entries(params.metadata)) {
@@ -692,7 +715,7 @@ export default async function tasksPi(pi) {
             return;
           }
           const blocks = [];
-          for (const task of tasks) {
+          for (const task of [...orderedVisibleTasks(), ...tasks.filter((task) => !isVisible(task))]) {
             const internal = task.metadata?._internal === true ? " [internal]" : "";
             blocks.push(`${renderTaskListLine(task)}${internal}`);
             blocks.push(`    ${task.description}`);

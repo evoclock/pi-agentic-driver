@@ -36,6 +36,7 @@ export const TASK_PROMOTION_SCHEMA = "agentic-driver.task-promotion.v1";
 export const TASK_STATE_ENTRY = "picc-tasks-state";
 export const SESSION_TASK_STATUSES = Object.freeze(["pending", "in_progress", "completed"]);
 export const TASK_LIST_STATUSES = Object.freeze(["pending", "in_progress", "completed"]);
+export const SESSION_TASK_PRIORITIES = Object.freeze(["P0", "P1", "P2", "P3"]);
 export const ORIGIN_VALUES = Object.freeze(["coordinator", "worker"]);
 export const LEGACY_UNKNOWN_ORIGIN = "legacy-unknown";
 export const PROMOTED_TASK_STATUSES = Object.freeze(["pending", "in_progress"]);
@@ -63,6 +64,7 @@ export function validateSessionTask(value) {
   if (typeof value.id !== "string" || value.id === "") return false;
   if (!SESSION_TASK_STATUSES.includes(value.status)) return false;
   if (typeof value.subject !== "string" || typeof value.description !== "string") return false;
+  if (value.priority !== undefined && !SESSION_TASK_PRIORITIES.includes(value.priority)) return false;
   for (const field of ["blocks", "blockedBy"]) {
     if (!Array.isArray(value[field]) || value[field].some((entry) => typeof entry !== "string")) return false;
   }
