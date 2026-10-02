@@ -45,6 +45,8 @@ test("snapshot schema accepts the picc-tasks mirror shape", () => {
   assert.equal(validateSnapshot({ tasks: [], highWaterMark: 0 }), true);
   assert.equal(validateSnapshot({ tasks: [validTask()], highWaterMark: 1 }), true);
   assert.equal(validateSnapshot({ tasks: [validTask({ metadata: { origin: "coordinator" } })], highWaterMark: 1 }), true);
+  assert.equal(validateSnapshot({ tasks: [validTask({ priority: "P0" })], highWaterMark: 1 }), true);
+  assert.equal(validateSnapshot({ tasks: [validTask({ priority: "P4" })], highWaterMark: 1 }), false);
 });
 
 test("snapshot schema rejects bad status, bad high-water mark, non-object", () => {

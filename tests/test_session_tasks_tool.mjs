@@ -153,6 +153,41 @@ test("TaskUpdate reports statusChange and mirrors inverse dependency edges", asy
 });
 
 // ---------------------------------------------------------------------------
+// Explicit session priority is presentation, never dispatch authority.
+// ---------------------------------------------------------------------------
+
+test("TaskList and widget sort P0–P3, keep legacy IDs stable, and clear priority", async () => {
+  const h = await makeHarness({ ui: { theme: { fg: (_c, t) => t, bold: (t) => t, strikethrough: (t) => t } } });
+  try {
+    await h.event("session_start");
+    await h.call("TaskCreate", { subject: "Legacy", description: "unranked" });
+    await h.call("TaskCreate", { subject: "Later", description: "P2", priority: "P2" });
+    await h.call("TaskCreate", { subject: "Urgent", description: "P0", priority: "P0" });
+    await h.call("TaskCreate", { subject: "Also urgent", description: "P0", priority: "P0" });
+    await h.call("TaskUpdate", { taskId: "3", addBlockedBy: ["2"] });
+    const list = (await h.call("TaskList", {})).details.tasks;
+    assert.deepEqual(list.map((t) => t.id), ["3", "4", "2", "1"]);
+    assert.equal(list[0].priority, "P0");
+    assert.deepEqual(list[0].blockedBy, ["2"]);
+    assert.equal(list[3].priority, undefined);
+    assert.match(h.uiCalls.widgets.at(-1).value[1], /Urgent.*blocked by #2/);
+    assert.match((await h.call("TaskGet", { taskId: "3" })).content[0].text, /Priority: P0/);
+    await h.call("TaskUpdate", { taskId: "3", status: "completed" });
+    assert.deepEqual((await h.call("TaskList", {})).details.tasks.map((t) => t.id), ["4", "2", "1", "3"]);
+    await h.call("TaskUpdate", { taskId: "4", priority: null });
+    assert.deepEqual((await h.call("TaskList", {})).details.tasks.map((t) => t.id), ["2", "1", "4", "3"]);
+    assert.equal((await h.call("TaskList", {})).details.tasks[2].priority, undefined);
+    await h.event("session_start"); // replay from mirror must keep priorities and order
+    assert.deepEqual((await h.call("TaskList", {})).details.tasks.map((t) => t.id), ["2", "1", "4", "3"]);
+    const rejected = await h.call("TaskUpdate", { taskId: "2", priority: "P9", subject: "must not change" });
+    assert.equal(rejected.details.code, "invalid-priority");
+    assert.equal((await h.call("TaskGet", { taskId: "2" })).details.task.subject, "Later");
+    assert.equal((await h.call("TaskCreate", { subject: "Bad", description: "bad", priority: "P9" })).details.code, "invalid-priority");
+    assert.deepEqual((await h.call("TaskList", {})).details.tasks.map((t) => t.id), ["2", "1", "4", "3"]);
+  } finally { h.cleanup(); }
+});
+
+// ---------------------------------------------------------------------------
 // picc-tasks UI parity: live widget, footer pill, and /tasks command
 // ---------------------------------------------------------------------------
 
