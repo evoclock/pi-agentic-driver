@@ -58,7 +58,9 @@ const MAX_PROCESS_OUTPUT_BYTES = 128 * 1024;
 const MAX_FAILURE_DIAGNOSTIC_BYTES = 4 * 1024;
 const MAX_REPORT_BYTES = 32 * 1024;
 const MAX_IDENTITY_FIELD_BYTES = 4 * 1024;
-const MAX_MARKER_HORIZONTAL_WHITESPACE = 128;
+// Herdr pads a standalone marker to the terminal width (observed 206 spaces
+// after the opening marker). Keep a finite cap without rejecting that padding.
+const MAX_MARKER_HORIZONTAL_WHITESPACE = 512;
 const MAX_PROMPT_CONTRACT_ECHO_BYTES = 4 * 1024;
 const MAX_READ_LINES = 400;
 // A valid 32 KiB report can contain more than 400 short lines. A second,
@@ -1060,10 +1062,12 @@ function allMarkerOccurrences(text, standaloneOnly = false, additionalPair = und
         ? text.length
         : (newline > end && text[newline - 1] === "\r" ? newline - 1 : newline);
       const trailing = text.slice(end, trailingEnd);
+      // Herdr's recent-unwrapped snapshot can retain Pi's right-hand box
+      // border after a padded marker, even for a real completed report.
       const horizontalOnly = Buffer.byteLength(leading, "utf8") <= MAX_MARKER_HORIZONTAL_WHITESPACE
         && Buffer.byteLength(trailing, "utf8") <= MAX_MARKER_HORIZONTAL_WHITESPACE
         && /^[ \t]*$/.test(leading)
-        && /^[ \t]*$/.test(trailing);
+        && /^[ \t]*(?:│)?$/.test(trailing);
       const lineEnd = newline < 0 || text[newline] === "\n";
       if (!standaloneOnly || (horizontalOnly && lineEnd)) occurrences.push({ marker, index, end });
       from = end;
@@ -1087,7 +1091,9 @@ function promptContractRange(text, marker, occurrenceIndex, { boundEnd = false }
   if (deliveryTail) end += deliveryTail[0].length;
   if (boundEnd && end > occurrenceIndex) return undefined;
   if (Buffer.byteLength(text.slice(anchor, end), "utf8") > MAX_PROMPT_CONTRACT_ECHO_BYTES) return undefined;
-  if (!/^\s*$/.test(text.slice(markerStart, open)) || !/^\s*$/.test(text.slice(open + marker.open.length, close))) return undefined;
+  // The same box border may appear in the echoed report template. Only
+  // whitespace and that exact border are allowed between its markers.
+  if (!/^[\s│]*$/.test(text.slice(markerStart, open)) || !/^[\s│]*$/.test(text.slice(open + marker.open.length, close))) return undefined;
   const otherMarkers = [...new Set(Object.values(REPORT_MARKERS)
     .flatMap((pair) => [pair.open, pair.close]))]
     .filter((value) => value !== marker.open && value !== marker.close);

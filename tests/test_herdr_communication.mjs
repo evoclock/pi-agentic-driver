@@ -222,6 +222,23 @@ test("Herdr extraction ignores echoed contract markers but rejects nested marker
   );
 });
 
+test("Herdr boxed terminal padding does not hide a complete marked report", () => {
+  const box = (line) => ` ${line}${" ".repeat(240 - line.length - 2)}│`;
+  const echo = [
+    box("Return exactly one complete role report, and no additional report, bounded by these literal markers:"),
+    box("[REVIEW_REPORT_BEGIN]"),
+    box("[REVIEW_REPORT_END]"),
+  ].join("\n");
+  const transcript = `${echo}\n${box("[REVIEW_REPORT_BEGIN]")}\nDelivery: dlv-1234567890abcdef-abc\nVerdict: reviewed\n[REVIEW_REPORT_END]`;
+  const body = extractLatestHerdrReport(transcript, "reviewer");
+  assert.match(body, /Verdict: reviewed/);
+  assert.match(body, /Delivery: dlv-1234567890abcdef-abc/);
+  assert.throws(
+    () => extractLatestHerdrReport(`${box("[REVIEW_REPORT_BEGIN]")} malicious\n[REVIEW_REPORT_END]`, "reviewer"),
+    (error) => error.code === "report_reversed",
+  );
+});
+
 test("stalled-before-delivery", async () => {
   const f = exchangeFixture({ promptFailure: { code: 2, stdout: JSON.stringify({ error: { code: "agent_prompt_stalled" } }) } });
   const r = await executeHerdrPromptExchange({ action: "prompt", role: "reviewer", prompt: "x", timeoutMs: 100 }, { cwd: root }, { runProcess: f.runProcess });
