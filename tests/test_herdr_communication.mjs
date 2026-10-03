@@ -108,7 +108,7 @@ test("Herdr communication isolates concurrent marked exchanges", async () => {
     assert.doesNotMatch(prompt[3], /MANDATORY ATOMIC EXECUTION CONTRACT|acceptance-checked step|Remain strictly read-only/);
     assert.equal(prompt[4], "--wait");
     assert.deepEqual(prompt.slice(5), [
-      "--until", "idle", "--until", "done", "--until", "blocked", "--timeout", "1000",
+      "--until", "idle", "--until", "done", "--until", "blocked",
     ]);
   }
 
@@ -272,6 +272,7 @@ function deliveryFixture({ status = "idle", report = "fresh worker findings", fa
     if (action === "prompt") {
       promptCount += 1;
       assert.ok(!argv.includes("--wait"), "delivery must not block on --wait");
+      if (argv.includes("--timeout")) return { code: 2, stdout: "", stderr: "--timeout requires --wait" };
       return { code: 0, stdout: JSON.stringify({ type: "agent_prompted", agent: { name: role, agent: "pi", status: "working", repository: root } }) };
     }
     if (action === "read") {
@@ -312,7 +313,7 @@ test("prompt returns an immediate delivery receipt with no model round-trip", as
   assert.deepEqual(f.calls.map((call) => call.action), ["get", "read", "prompt"]);
   const promptCall = f.calls.find((call) => call.action === "prompt");
   assert.ok(!promptCall.argv.includes("--wait"));
-  assert.deepEqual(promptCall.argv.slice(-2), ["--timeout", "15000"]);
+  assert.equal(promptCall.argv.includes("--timeout"), false);
   assert.match(promptCall.argv[3], /Return exactly one complete role report/);
   // timeoutMs is validated but never forwarded as a blocking wait bound.
   assert.ok(!promptCall.argv.includes("120000"));
@@ -536,7 +537,7 @@ test("wait and read keep their existing contracts", async () => {
     { cwd: root },
     { runProcess: async ({ argv }) => {
       assert.equal(argv[1], "wait");
-      assert.ok(argv.includes("--timeout"));
+      assert.ok(!argv.includes("--timeout"));
       return { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: "worker", agent: "pi", status: "idle", repository: root } }) };
     } },
   );

@@ -100,7 +100,7 @@ test("submit returns a receipt immediately without waiting for settlement", asyn
   const promptCall = f.calls.find((call) => call.action === "prompt");
   assert.ok(promptCall);
   assert.ok(!promptCall.argv.includes("--wait"));
-  assert.deepEqual(promptCall.argv.slice(-2), ["--timeout", "15000"]);
+  assert.ok(!promptCall.argv.includes("--timeout"));
 });
 
 test("an identical submit returns the original receipt without a duplicate prompt", async () => {
