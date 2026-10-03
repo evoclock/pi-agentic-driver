@@ -7,6 +7,10 @@ import {
 } from "../scripts/enforcement/session_tasks_core_pi.js";
 import { createHash } from "node:crypto";
 
+// Pi discovers every packaged extensions/*.ts file. This helper also needs a
+// harmless default factory so discovery can load it without registering tools.
+export default function taskStoreAdapter() {}
+
 // Match TaskList's branch-first/high-water-mark observation in tasks.ts.
 // The session mirror is a fallback; neither reader changes either source.
 function observeSessionTasks(ctx) {
