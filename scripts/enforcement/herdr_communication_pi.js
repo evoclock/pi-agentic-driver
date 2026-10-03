@@ -505,7 +505,6 @@ function fixedArgv(action, params) {
         "agent", "prompt", params.role, promptWithReportRequirement(params.role, params.prompt),
         "--wait",
         "--until", "idle", "--until", "done", "--until", "blocked",
-        "--timeout", String(params.timeoutMs),
       ];
     case "prompt_async":
     case "submit": {
@@ -518,14 +517,12 @@ function fixedArgv(action, params) {
         : promptWithReportRequirement(params.role, params.prompt);
       return [
         "agent", "prompt", params.role, text,
-        "--timeout", String(COMMAND_TIMEOUT_MS),
       ];
     }
     case "wait":
       return [
         "agent", "wait", params.role,
         "--until", "idle", "--until", "done", "--until", "blocked",
-        "--timeout", String(params.timeoutMs),
       ];
     case "read":
       return [
