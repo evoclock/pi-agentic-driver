@@ -4,6 +4,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import registerLinuxMicroVMCutover from "../extensions/linux-microvm.ts";
+import taskStoreAdapter, { createTaskStore } from "../extensions/task-store-adapter.ts";
 import { isNativeTuiContext } from "../scripts/enforcement/native_tui_context.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -17,6 +18,12 @@ test("public extension set registers cutover without agentic_work_mode", async (
   assert.equal(result, undefined);
   assert.deepEqual(registered, ["agentic_linux_microvm_cutover"]);
   assert.equal(registered.includes("agentic_work_mode"), false);
+});
+
+test("discovered task-store adapter loads without registering tools", () => {
+  assert.equal(typeof taskStoreAdapter, "function");
+  assert.equal(taskStoreAdapter({ registerTool() { throw new Error("helper must not register tools"); } }), undefined);
+  assert.equal(typeof createTaskStore, "function");
 });
 
 // The public native-TUI predicate stays shipped and fail-closed: the cutover
