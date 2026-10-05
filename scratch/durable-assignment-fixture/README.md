@@ -25,7 +25,7 @@ Admission commits a task and receipt before scheduling. The host must explicitly
 
 Phases: admitted -> committed dispatch intent -> one fake send -> committed acknowledgement -> observe original delivery. Reentering intent after process exit holds `delivery-unknown` and never resends. Correlated report commits only if delivery ID, assignment ID, artifact and role all match with bounded nonempty text. Role idle and wrong/stale reports do not settle the assignment. Results never grant owner completion. A Durable task terminal `completed` outcome means its fixture state machine finished; inspect the result's disposition (`held`, `cancelled`, `reported`), not that task outcome as worker success.
 
-Hold/cancel target the receipt identity and do not send an external stop. Cancellation observed at the pre-send boundary prevents a not-yet-started send; cancellation once an effect has begun cannot retract that effect. A received acknowledgement is retained even if cancellation happened in flight; no report is then attributed. This is not an atomic cross-system cancellation guarantee.
+Hold/cancel target the receipt identity and do not send an external stop or invoke the task abort path. Controls are observed at phase boundaries, not immediately. A cancellation present at the final state recheck prevents that invocation's send, but cancellation racing between the recheck and send start is handled as in-flight cancellation: effect not retracted, acknowledgement retained when received, no report attributed. This is best-effort, not an atomic cross-system cancellation guarantee.
 
 ## Acceptance and limits
 
@@ -39,7 +39,7 @@ No CodingTools, execution environment or model provider is installed in the Harn
 
 ## Decision
 
-Use Durable custom tasks/documents as the preferred persistence/reporter primitive for the next separately approved adapter slice. Do not extend the process-local submission Map into a bespoke persistence engine. Do not migrate to the experimental coding-agent TUI or install a second canonical scheduler. Keep this fixture separate until exact-artifact independent review and owner integration decision.
+Use Durable custom tasks/documents as the preferred persistence/reporter primitive for the next separately approved adapter slice. Do not extend the process-local submission Map into a bespoke persistence engine. Do not migrate to the experimental coding-agent TUI or install a second canonical scheduler. Independent source review of commit 411fc909ced3750e29f285efada04620a88de5ae accepted with no blockers; review considerations are recorded in EVIDENCE.md. Keep this fixture separate pending owner integration decision. Before any registration, move the runtime out of the experimental scratch dependency location into approved supported packaging; missing scratch files currently make open fail explicitly.
 
 ## Prior art and credit
 
