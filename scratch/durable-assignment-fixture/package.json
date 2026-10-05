@@ -1,0 +1,6 @@
+{
+  "name": "durable-assignment-fixture",
+  "private": true,
+  "type": "module",
+  "dependencies": { "@earendil-works/pi-durable": "1.0.4" }
+}
