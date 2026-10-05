@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
-import { openDurableAssignmentFixture as open } from "../scripts/enforcement/durable_assignment_pi.js";
+import { openDurableAssignmentFixture as open, openDurableSeamStore } from "../scripts/enforcement/durable_assignment_pi.js";
 
 const fixtureRoot = fileURLToPath(new URL("../scratch/durable-assignment-fixture/", import.meta.url));
 mkdirSync(join(fixtureRoot, "evidence"), { recursive: true, mode: 0o700 });
@@ -166,3 +166,51 @@ for (const [crashAt, sends, expected] of [["after-admit", 0, "acknowledged"], ["
     assert.deepEqual(await reopened.admit(assignment()), receipt);
   });
 }
+
+const seamRecord = (changes = {}) => ({ id: "sub-offline-1", digest: "a".repeat(64), role: "worker", repository: fixtureRoot, createdAt: 1, phase: "pending", ...changes });
+
+test("seam store commits one stable receipt across concurrent reservation and reopen", async (t) => {
+  const dir = directory();
+  const store = await openDurableSeamStore({ directory: dir });
+  t.after(() => store.close());
+  const results = await Promise.all([store.reserve("submission", seamRecord()), store.reserve("submission", seamRecord({ createdAt: 2 }))]);
+  assert.equal(results.filter((r) => r.created).length, 1);
+  assert.deepEqual(results[0].record, results[1].record);
+  await store.update("submission", "sub-offline-1", "a".repeat(64), { phase: "accepted", deliveryId: "dlv-offline-1" });
+  await store.close();
+  const reopened = await openDurableSeamStore({ directory: dir });
+  t.after(() => reopened.close());
+  assert.equal((await reopened.get("submission", "sub-offline-1")).deliveryId, "dlv-offline-1");
+  assert.equal((await reopened.reserve("submission", seamRecord())).created, false);
+  await assert.rejects(reopened.reserve("submission", seamRecord({ digest: "b".repeat(64) })), /identity conflict/);
+  await assert.rejects(reopened.update("submission", "sub-offline-1", "b".repeat(64), { phase: "accepted" }), /unknown seam identity/);
+});
+
+test("seam store refuses raw snapshots, prompts, unproved reports and mutable identities", async (t) => {
+  const store = await openDurableSeamStore({ directory: directory() });
+  t.after(() => store.close());
+  for (const field of ["pre", "post", "sentPrompt", "prompt", "snapshot", "reportMarkers"]) {
+    await assert.rejects(store.reserve("submission", seamRecord({ [field]: "must not persist" })), /unsupported seam field/);
+  }
+  await store.reserve("submission", seamRecord());
+  await assert.rejects(store.update("submission", "sub-offline-1", "a".repeat(64), { role: "other" }), /immutable seam identity/);
+  const delivery = seamRecord({ id: "dlv-offline-1", phase: undefined, state: "delivered" });
+  delete delivery.phase;
+  await store.reserve("delivery", delivery);
+  await assert.rejects(store.update("delivery", delivery.id, delivery.digest, { report: "unproved" }), /proof required/);
+  await store.update("delivery", delivery.id, delivery.digest, { state: "answered", report: "proven report", proof: "snapshot-backed-v1" });
+  await assert.rejects(store.update("delivery", delivery.id, delivery.digest, { state: "answered", report: "replacement", proof: "snapshot-backed-v1" }), /immutable/);
+  assert.equal((await store.get("delivery", delivery.id)).report, "proven report");
+});
+
+test("seam store refuses competing owners and preserves tombstones when full", async (t) => {
+  const dir = directory();
+  const store = await openDurableSeamStore({ directory: dir });
+  t.after(() => store.close());
+  await assert.rejects(openDurableSeamStore({ directory: dir }), /EEXIST/);
+  for (let i = 0; i < 64; i++) await store.reserve("submission", seamRecord({ id: `sub-${i}` }));
+  await assert.rejects(store.reserve("submission", seamRecord({ id: "sub-overflow" })), /capacity reached/);
+  assert.equal((await store.get("submission", "sub-0")).phase, "pending");
+  await store.close();
+  await assert.rejects(store.get("submission", "sub-0"), /closed/);
+});

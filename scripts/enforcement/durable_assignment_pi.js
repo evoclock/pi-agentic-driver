@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-only
-// Experimental OFFLINE fixture. Not registered with Pi or included in release files.
+// Experimental OFFLINE fixture and seam store. Not registered with Pi or included in release files.
 import { createHash } from "node:crypto";
 import { mkdirSync, rmdirSync, realpathSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -161,6 +161,112 @@ export async function openDurableAssignmentFixture({ directory, transport, bound
         // No stop/send/close effect against any external worker or newer assignment.
       },
       resume() { harness.resume(); },
+      async close() {
+        if (closed) return;
+        await harness.close(context);
+        closed = true;
+        rmdirSync(lock);
+      },
+    };
+  } catch (error) {
+    if (harness) await harness.close(context);
+    rmdirSync(lock);
+    throw error;
+  }
+}
+
+// A bounded persistence port for the approved OFFLINE seam integration. This
+// stores identity/state and already-attributed report bodies, never prompts,
+// terminal history or transport authority. No task scheduler or automatic resume.
+export async function openDurableSeamStore({ directory }) {
+  const { Harness, createRegistry, defineDoc, openNodeSqliteStorage, createModels,
+    BACKGROUND_CONTEXT: context, durablePackage } =
+    await import(new URL("../../scratch/durable-assignment-fixture/runtime.mjs", import.meta.url));
+  if (durablePackage.version !== "1.0.4") throw new Error("seam fixture requires pi-durable 1.0.4");
+  if (realpathSync(directory) !== directory) throw new Error("canonical seam directory required");
+  const info = statSync(directory);
+  if (!info.isDirectory() || info.uid !== process.getuid() || (info.mode & 0o077) !== 0) {
+    throw new Error("private same-owner seam directory required");
+  }
+  const lock = join(directory, "owner.lock");
+  mkdirSync(lock, { mode: 0o700 });
+  let harness;
+  try {
+    const Records = defineDoc({ kind: "fixture.seam-records", version: 1, scope: "conversation",
+      history: "latest", fork: "initial", initial: () => ({ submission: {}, delivery: {} }) });
+    harness = await Harness.open(await openNodeSqliteStorage(join(directory, "state.sqlite")),
+      { models: createModels(), registry: createRegistry() }, context);
+    const root = await harness.root(context);
+    let closed = false;
+    const identity = ["id", "digest", "role", "repository", "createdAt"];
+    const fields = {
+      submission: new Set([...identity, "phase", "acceptedAt", "deliveryId"]),
+      delivery: new Set([...identity, "state", "acceptedAt", "code", "report", "answeredAt", "proof"]),
+    };
+    function check(kind, record, partial = false) {
+      if (closed) throw new Error("seam store closed");
+      const allowed = fields[kind];
+      if (!allowed || !record || Object.getPrototypeOf(record) !== Object.prototype) throw new Error("invalid seam record");
+      if (Object.keys(record).some((key) => !allowed.has(key))) throw new Error("unsupported seam field; snapshots and prompts are forbidden");
+      for (const [key, value] of Object.entries(record)) {
+        const limit = key === "report" ? 16384 : 4096;
+        if (key === "createdAt") {
+          if (!Number.isSafeInteger(value) || value < 0) throw new Error("invalid seam timestamp");
+        } else if (typeof value !== "string" || !value || Buffer.byteLength(value, "utf8") > limit) {
+          throw new Error("invalid bounded seam field");
+        }
+      }
+      if (!partial && identity.some((key) => record[key] === undefined)) throw new Error("missing seam identity");
+      if (record.digest !== undefined && !/^[a-f0-9]{64}$/.test(record.digest)) throw new Error("invalid seam digest");
+      if (record.report !== undefined && (record.state !== "answered" || record.proof !== "snapshot-backed-v1")) {
+        throw new Error("attributed report proof required");
+      }
+    }
+    function checkHandle(kind, id) {
+      if (closed) throw new Error("seam store closed");
+      if (!fields[kind] || typeof id !== "string" || !/^[a-z0-9-]{1,128}$/.test(id)) throw new Error("invalid seam handle");
+    }
+    return {
+      schema: "agentic-driver.offline-seam-store.v1",
+      async get(kind, id) {
+        checkHandle(kind, id);
+        const snapshot = await harness.snapshot(Records, root.id, context);
+        return structuredClone(snapshot?.[kind]?.[id]);
+      },
+      async reserve(kind, record) {
+        check(kind, record);
+        checkHandle(kind, record.id);
+        return root.commit(async (tx) => {
+          const records = (await tx.doc(Records, root.id))[kind];
+          const existing = records[record.id];
+          if (existing) {
+            if (identity.some((key) => key !== "createdAt" && existing[key] !== record[key])) throw new Error("seam identity conflict");
+            // Durable commit documents are draft proxies; permitted fields are
+            // primitives, so materialize the record before returning it.
+            return { created: false, record: { ...existing } };
+          }
+          // Never evict a send tombstone to make room: eviction could enable replay.
+          if (Object.keys(records).length >= 64) throw new Error("seam store capacity reached; owner reconciliation required");
+          records[record.id] = structuredClone(record);
+          return { created: true, record: structuredClone(record) };
+        }, context);
+      },
+      async update(kind, id, digest, patch) {
+        checkHandle(kind, id);
+        check(kind, patch, true);
+        if (identity.some((key) => Object.hasOwn(patch, key))) throw new Error("immutable seam identity");
+        return root.commit(async (tx) => {
+          const records = (await tx.doc(Records, root.id))[kind];
+          const current = records[id];
+          if (!current || current.digest !== digest) throw new Error("unknown seam identity");
+          const next = { ...current, ...patch };
+          check(kind, next);
+          // Once proven and committed, a report cannot be replaced by later text.
+          if (current.state === "answered" && JSON.stringify(next) !== JSON.stringify(current)) throw new Error("answered seam record is immutable");
+          records[id] = next;
+          return structuredClone(next);
+        }, context);
+      },
       async close() {
         if (closed) return;
         await harness.close(context);
