@@ -198,8 +198,16 @@ export async function openDurableSeamStore({ directory }) {
   try {
     const Records = defineDoc({ kind: "fixture.seam-records", version: 1, scope: "conversation",
       history: "latest", fork: "initial", initial: () => ({ submission: {}, delivery: {} }) });
+    // Satisfy the pinned Models interface without importing a provider registry.
+    // Every model/auth operation fails closed; this store supports documents only.
+    const models = Object.freeze(Object.fromEntries([
+      "getProviders", "getProvider", "getModels", "getModel", "getModelsOfType", "getModelOfType", "getAllModels",
+      "refresh", "checkAuth", "getAvailable", "getAvailableOfType", "getAllAvailable", "getAuth", "login", "logout",
+      "stream", "complete", "streamSimple", "completeSimple", "streamDeferred", "fetchDeferred", "cancelDeferred",
+      "generateImages", "classify",
+    ].map((name) => [name, () => { throw new Error("model operations are disabled for the document store"); }])));
     harness = await Harness.open(await openNodeSqliteStorage(join(directory, "state.sqlite")),
-      { registry: createRegistry() }, context);
+      { models, registry: createRegistry() }, context);
     const root = await harness.root(context);
     let closed = false;
     const identity = ["id", "digest", "role", "repository", "createdAt"];
