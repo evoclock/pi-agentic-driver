@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Where we are: automation, persistence and supervision",
+    "subtitle": "5 Oct 2026. #7/#11: 11 offline tests passed; review accepted. #13 integration is next. No live bridge or VM deployment.",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "output": "scratch/archify-trial/output/where-we-are.html",
+    "repository": { "url": "https://github.com/evoclock/pi-agentic-driver.git", "revision": "ec0962cb11e279a6d7cc331249eaa79a2c152c78", "link_mode": "local-only" }
+  },
+  "components": [
+    { "id": "task6", "type": "backend", "label": "P0 #6: usable route", "sublabel": "IN PROGRESS: assemble route", "tag": "IN PROGRESS", "pos": [70, 70], "size": [190, 70], "sources": [{ "path": "scripts/enforcement/board_claim_bridge_pi.js", "label": "Existing admission bridge" }] },
+    { "id": "task8", "type": "backend", "label": "P0 #8: supervision", "sublabel": "RESEARCH ONLY: not deployed", "tag": "RESEARCH; NOT DEPLOYED", "pos": [380, 70], "size": [190, 70], "sources": [{ "path": "scratch/durable-assignment-fixture/README.md", "line": 36, "end_line": 37, "label": "No VM / OpenDots runtime proof" }] },
+    { "id": "task13", "type": "database", "label": "P0 #13: Durable adapter", "sublabel": "APPROVED: not integrated", "tag": "APPROVED; NOT BUILT", "pos": [690, 70], "size": [190, 70], "sources": [{ "path": "scratch/durable-assignment-fixture/EVIDENCE.md", "label": "Reviewed offline prototype evidence" }] },
+    { "id": "admission", "type": "security", "label": "1. Claim + scoped brief", "sublabel": "TOOLS EXIST: driver authority", "tag": "EXISTING TOOLS", "pos": [70, 310], "size": [190, 70], "sources": [{ "path": "scripts/enforcement/task_board_core_pi.js", "line": 2127, "end_line": 2153, "label": "Canonical claim entry" }] },
+    { "id": "contained", "type": "security", "label": "2. Workspace + isolation", "sublabel": "REQUIRED: isolation proof due", "tag": "REQUIRED; JOB PROOF PENDING", "pos": [380, 310], "size": [190, 70], "sources": [{ "path": "scratch/durable-assignment-fixture/EVIDENCE.md", "line": 5, "end_line": 9, "label": "Treehouse fixture allocation" }, { "path": "scratch/durable-assignment-fixture/README.md", "line": 32, "end_line": 37, "label": "Not production containment proof" }] },
+    { "id": "handoff", "type": "messagebus", "label": "3. Dispatch once", "sublabel": "EXISTS: receipts are volatile", "tag": "EXISTS; MEMORY-ONLY", "pos": [690, 310], "size": [190, 70], "sources": [{ "path": "scripts/enforcement/herdr_async_seam_pi.js", "line": 155, "end_line": 209, "label": "Guarded async submission" }, { "path": "scripts/enforcement/herdr_communication_pi.js", "line": 1250, "end_line": 1299, "label": "Volatile delivery records" }] },
+    { "id": "report", "type": "messagebus", "label": "4. Attributed report", "sublabel": "GAPS: correlation + restart", "tag": "GAPS: #3 + RESTART", "pos": [690, 490], "size": [190, 70], "sources": [{ "path": "scripts/enforcement/herdr_communication_pi.js", "line": 1544, "end_line": 1642, "label": "Exact delivery correlation" }] },
+    { "id": "review", "type": "security", "label": "5. Independent review", "sublabel": "USED: fixture source reviewed", "tag": "USED ON FIXTURE", "pos": [380, 490], "size": [190, 70], "sources": [{ "path": "scratch/durable-assignment-fixture/EVIDENCE.md", "line": 48, "label": "Independent source review" }] },
+    { "id": "owner", "type": "external", "label": "6. Your decision", "sublabel": "YOU decide: no auto merge", "tag": "NO AUTOMATIC MERGE", "pos": [70, 490], "size": [190, 70], "sources": [{ "path": "scratch/durable-assignment-fixture/README.md", "line": 39, "end_line": 42, "label": "Owner integration decision remains" }] },
+    { "id": "hold", "type": "security", "label": "Hold; do not resend", "sublabel": "TESTED offline; bridge next", "tag": "FIXTURE TESTED; BRIDGE NEXT", "pos": [690, 680], "size": [190, 70], "sources": [{ "path": "scripts/enforcement/durable_assignment_pi.js", "line": 60, "end_line": 97, "label": "Committed intent and unknown hold" }, { "path": "tests/test_durable_assignment.mjs", "line": 140, "end_line": 168, "label": "Real process-exit tests" }] }
+  ],
+  "connections": [
+    { "id": "route-admission", "from": "task6", "to": "admission", "label": "assemble route", "variant": "dashed" },
+    { "id": "adapter-handoff", "from": "task13", "to": "handoff", "label": "planned opt-in", "variant": "dashed" },
+    { "id": "supervisor-request", "from": "task8", "to": "admission", "label": "future: request driver", "variant": "dashed", "fromSide": "top", "toSide": "left", "via": [[475, 25], [25, 25], [25, 345]], "labelAt": [260, 25] },
+    { "id": "admit-contain", "from": "admission", "to": "contained", "label": "grant + isolation", "variant": "security" },
+    { "id": "contain-send", "from": "contained", "to": "handoff", "label": "scope valid", "variant": "security" },
+    { "id": "send-report", "from": "handoff", "to": "report", "label": "one handoff", "variant": "emphasis" },
+    { "id": "report-review", "from": "report", "to": "review", "label": "correlated artifact", "variant": "emphasis" },
+    { "id": "review-owner", "from": "review", "to": "owner", "label": "reviewed evidence", "variant": "emphasis" },
+    { "id": "send-unknown", "from": "handoff", "to": "hold", "label": "effect unknown", "variant": "security", "fromSide": "right", "toSide": "right", "via": [[940, 345], [940, 715]], "labelAt": [940, 610] },
+    { "id": "report-unknown", "from": "report", "to": "hold", "label": "proof missing", "variant": "security" }
+  ],
+  "cards": [
+    { "dot": "violet", "title": "#6 — Make useful work repeatable", "items": ["Pi coordinates; the driver owns claims, scope and routing. Existing tools and six skills are available.", "Assemble and verify the full route. Repairs #3/#4 are demonstration work, not a full-platform prerequisite."] },
+    { "dot": "amber", "title": "#13 — The current implementation step", "items": ["#7 evaluation and #11 prototype are complete: 11 offline tests passed; independent review accepted.", "The opt-in adapter is approved but not implemented. Both receipt and delivery maps currently disappear on restart.", "No live registration or deployment. Missing attribution after restart must hold, not resend."] },
+    { "dot": "cyan", "title": "#8 — Observe and request, never take authority", "items": ["Reuse Firstmate watcher patterns; evaluate OpenDots status/UI. Nothing is deployed.", "OpenDots app AND services must be in an approved VM; future work requests go through the driver."] },
+    { "dot": "rose", "title": "How this fits the rest of our work", "items": ["Treehouse is mandatory; a workspace lease alone is not containment. Each real job still needs its accepted isolation boundary.", "Reports and independent reviews are evidence, not owner completion or merge permission.", "Dashed arrows are planned attachments. Numbered arrows show the intended route, not an already-proved automated cycle."] },
+    { "dot": "slate", "title": "Readiness, evidence and limits", "items": ["Read the status subtitles; colors indicate responsibilities, not completion percentages.", "Task status is a manual session snapshot. Click nodes for commit-pinned local source references; no private repository links are published.", "No live transport, model/provider or VM activation has occurred in this integration slice."] }
+  ]
+}
