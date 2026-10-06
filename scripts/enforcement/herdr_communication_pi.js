@@ -1818,6 +1818,9 @@ export async function executeHerdrCommunication(params, context, options = {}, s
     request = validateParams(params);
     operation = request.action;
     requireOfflinePersistence(options);
+    if (options.offlinePersistence && !["prompt", "submit", "delivery"].includes(operation)) {
+      throw communicationError("offline_delivery_required", "offline persistence requires a delivery-bound operation; role-keyed fallback is refused", "denied");
+    }
     const repository = expectedRepository(context);
     const repositories = trustedRepositories(repository);
     if (operation === "list") {
@@ -1839,7 +1842,8 @@ export async function executeHerdrCommunication(params, context, options = {}, s
         : await deliverPrompt(operation, request, context, options, signal, repositories);
     }
     if (operation === "delivery") {
-      // Read-only, non-authorizing per-delivery state query.
+      // Non-authorizing observation. Offline mode may persist proof or an
+      // attribution-loss hold, but never sends; default mode is unchanged.
       return options.offlinePersistence
         ? await queryPersistedDelivery(request, context, options, signal, repositories)
         : await queryDelivery(request, context, options, signal, repositories);

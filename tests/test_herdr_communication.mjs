@@ -383,6 +383,38 @@ function deliveryFixture({ status = "idle", report = "fresh worker findings", fa
   return { calls, runProcess, markAnswered: () => { answered = true; }, get promptCount() { return promptCount; } };
 }
 
+test("offline communication refuses every role-keyed observation without transport", async (t) => {
+  const { store } = await offlineStore(t);
+  const f = deliveryFixture();
+  for (const action of ["get", "wait", "read", "list"]) {
+    const params = action === "list" ? { action } : { action, role: "worker", ...(action === "wait" ? { timeoutMs: 1000 } : {}) };
+    const refused = await executeHerdrCommunication(params, { cwd: root }, { runProcess: f.runProcess, offlinePersistence: store });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.code, "offline_delivery_required", JSON.stringify(refused));
+    assert.equal(refused.report, undefined);
+  }
+  assert.deepEqual(f.calls, []);
+});
+
+test("direct offline delivery failed ack commit retains intent and never resends", async (t) => {
+  const { store } = await offlineStore(t);
+  const f = deliveryFixture();
+  const port = { schema: store.schema, get: store.get, reserve: store.reserve,
+    async update(kind, id, digest, patch) {
+      if (patch.state === "delivered") throw new Error("simulated direct ack failure");
+      return store.update(kind, id, digest, patch);
+    } };
+  const options = { runProcess: f.runProcess, offlinePersistence: port };
+  const request = { action: "submit", role: "worker", prompt: "direct ack failure", timeoutMs: 1000 };
+  const failed = await executeHerdrCommunication(request, { cwd: root }, options);
+  assert.equal(failed.ok, false);
+  const duplicate = await executeHerdrCommunication(request, { cwd: root }, options);
+  assert.equal(duplicate.promptSent, false);
+  assert.equal(duplicate.held, true);
+  assert.equal((await store.get("delivery", duplicate.deliveryId)).state, "queued");
+  assert.equal(f.promptCount, 1);
+});
+
 test("prompt returns an immediate delivery receipt with no model round-trip", async () => {
   const f = deliveryFixture();
   const started = Date.now();
