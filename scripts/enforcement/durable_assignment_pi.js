@@ -179,9 +179,13 @@ export async function openDurableAssignmentFixture({ directory, transport, bound
 // stores identity/state and already-attributed report bodies, never prompts,
 // terminal history or transport authority. No task scheduler or automatic resume.
 export async function openDurableSeamStore({ directory }) {
-  const { Harness, createRegistry, defineDoc, openNodeSqliteStorage, createModels,
-    BACKGROUND_CONTEXT: context, durablePackage } =
-    await import(new URL("../../scratch/durable-assignment-fixture/runtime.mjs", import.meta.url));
+  const [{ Harness, createRegistry, defineDoc }, { openNodeSqliteStorage },
+    { BACKGROUND_CONTEXT: context }, { default: durablePackage }] = await Promise.all([
+    import("@earendil-works/pi-durable"),
+    import("@earendil-works/pi-durable/storage/sqlite/node"),
+    import("@earendil-works/chord/context"),
+    import("@earendil-works/pi-durable/package.json", { with: { type: "json" } }),
+  ]);
   if (durablePackage.version !== "1.0.4") throw new Error("seam fixture requires pi-durable 1.0.4");
   if (realpathSync(directory) !== directory) throw new Error("canonical seam directory required");
   const info = statSync(directory);
@@ -195,7 +199,7 @@ export async function openDurableSeamStore({ directory }) {
     const Records = defineDoc({ kind: "fixture.seam-records", version: 1, scope: "conversation",
       history: "latest", fork: "initial", initial: () => ({ submission: {}, delivery: {} }) });
     harness = await Harness.open(await openNodeSqliteStorage(join(directory, "state.sqlite")),
-      { models: createModels(), registry: createRegistry() }, context);
+      { registry: createRegistry() }, context);
     const root = await harness.root(context);
     let closed = false;
     const identity = ["id", "digest", "role", "repository", "createdAt"];

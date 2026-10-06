@@ -13,9 +13,9 @@
 // trust seam (fixed argv, shell:false, trusted executable, closed adapters).
 
 import { createHash } from "node:crypto";
-import { resolve } from "node:path";
 import {
   executeHerdrCommunication,
+  expectedRepository,
   reportMarkersForRole,
   HERDR_COMMUNICATION_SCHEMA,
 } from "./herdr_communication_pi.js";
@@ -164,8 +164,7 @@ function offlineOptions(options) {
 }
 
 function offlineRepository(context) {
-  if (typeof context?.cwd !== "string" || !context.cwd) throw submissionError("repository-required", "repository context required", "denied");
-  return resolve(context.cwd);
+  return expectedRepository(context);
 }
 
 function restoredSubmission(saved) {
@@ -204,17 +203,17 @@ async function submitPersistedAsync(params, context, options, signal) {
     if ((await store.get("submission", id)).phase !== "pending") throw submissionError("submission-held", "submission held before handoff");
     const sent = await executeHerdrCommunication({ action: "submit", role: params.role, prompt: params.prompt, timeoutMs: 15000 },
       context, { ...communication, offlineRequestId: id }, signal);
-    if (!sent.ok || sent.deliveryId !== deliveryId) throw submissionError("delivery-unconfirmed", "delivery not confirmed; do not resend");
+    if (!sent.ok || sent.deliveryId !== deliveryId) throw submissionError(sent.code ?? "delivery-unconfirmed", sent.reason ?? "delivery not confirmed; do not resend");
     const accepted = await store.update("submission", id, digest, { phase: "accepted", acceptedAt: sent.acceptedAt });
     await options.offlineBoundary?.("after-submission-ack", { submissionId: id, deliveryId });
     if (accepted.phase !== "accepted") throw submissionError("submission-held", "ack retained for held submission");
     return submitResult(restoredSubmission(accepted), { duplicate: false, inFlight: false, promptSent: true });
-  } catch {
+  } catch (error) {
     // An intent tombstone is retained even if its transport/ack commit failed.
     // No automatic retry or role-keyed latest-report fallback can follow.
     await store.update("submission", id, digest, { phase: "held" });
     return { ...baseFields(record), ok: false, action: "submit", status: "held", held: true,
-      deliveryId, code: "delivery-unconfirmed" };
+      deliveryId, code: error?.code ?? "delivery-unconfirmed" };
   }
 }
 

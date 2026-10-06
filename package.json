@@ -5,7 +5,7 @@
   "type": "module",
   "license": "AGPL-3.0-only",
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=22.19.0"
   },
   "keywords": [
     "pi-package",
@@ -56,6 +56,8 @@
     "scripts/enforcement/herdr_communication_pi.js",
     "scripts/enforcement/herdr_async_dispatch_pi.js",
     "scripts/enforcement/herdr_async_seam_pi.js",
+    "scripts/enforcement/durable_assignment_pi.js",
+    "docs/durable-persistence.md",
     "scripts/enforcement/board_claim_bridge_pi.js",
     "scripts/enforcement/nudge_classifier_pi.js",
     "scripts/enforcement/nudge_config_pi.js",
@@ -111,6 +113,8 @@
     ]
   },
   "dependencies": {
+    "@earendil-works/chord": "1.0.4",
+    "@earendil-works/pi-durable": "1.0.4",
     "typescript": "5.9.2"
   },
   "repository": {

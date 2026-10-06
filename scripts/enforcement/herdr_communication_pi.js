@@ -219,7 +219,7 @@ function boundedString(value, field, maxBytes = MAX_PROCESS_OUTPUT_BYTES) {
   return value;
 }
 
-function expectedRepository(context) {
+export function expectedRepository(context) {
   const value = context?.repository ?? context?.cwd;
   if (typeof value !== "string" || !value.trim()) {
     throw communicationError("repository_unavailable", "the current repository is unavailable");

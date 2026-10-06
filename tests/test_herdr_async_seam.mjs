@@ -191,6 +191,21 @@ test("offline cancellation observed before handoff and failed ack persistence ca
   assert.equal(f.calls.filter((c) => c.action === "prompt").length, 1);
 });
 
+test("packaged persistence shares repository precedence and preserves validation errors", async (t) => {
+  const { store } = await seamStore(t);
+  const f = fixture();
+  const options = { runProcess: f.runProcess, offlinePersistence: store };
+  const differentCwd = { repository: root, cwd: join(root, "scratch") };
+  const submitted = await submitAsyncDispatch({ role: "worker", prompt: "canonical repository" }, differentCwd, options);
+  assert.equal(submitted.ok, true, JSON.stringify(submitted));
+  assert.equal((await store.get("submission", submitted.submissionId)).repository, root);
+  f.calls.length = 0;
+  const denied = await submitAsyncDispatch({ role: "worker", prompt: "x".repeat(33 * 1024) }, differentCwd, options);
+  assert.equal(denied.code, "prompt_oversized");
+  assert.equal(denied.held, true);
+  assert.deepEqual(f.calls, []);
+});
+
 test("the async seam registers exactly one new tool", () => {
   const registered = [];
   const pi = { registerTool: (tool) => registered.push(tool.name) };
