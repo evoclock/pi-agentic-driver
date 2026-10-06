@@ -13,6 +13,7 @@
 // trust seam (fixed argv, shell:false, trusted executable, closed adapters).
 
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import {
   executeHerdrCommunication,
   reportMarkersForRole,
@@ -74,7 +75,7 @@ function baseFields(submission) {
     driverSchema: ASYNC_DISPATCH_SCHEMA,
     nonAuthorizing: true,
     authorityCreated: false,
-    persisted: false,
+    persisted: submission.persisted === true,
   };
 }
 
@@ -150,6 +151,89 @@ function getSubmission(id) {
   return submission;
 }
 
+// Explicit OFFLINE opt-in. The store is injected; importing this module never
+// opens SQLite, changes registration, or selects a live transport.
+function offlineOptions(options) {
+  const communication = options.communication ?? options;
+  const store = options.offlinePersistence;
+  if (store?.schema !== "agentic-driver.offline-seam-store.v1" || typeof communication.runProcess !== "function" ||
+      ["get", "reserve", "update"].some((name) => typeof store?.[name] !== "function")) {
+    throw submissionError("offline-persistence-required", "offline store and injected process adapter required", "denied");
+  }
+  return { ...communication, offlinePersistence: store };
+}
+
+function offlineRepository(context) {
+  if (typeof context?.cwd !== "string" || !context.cwd) throw submissionError("repository-required", "repository context required", "denied");
+  return resolve(context.cwd);
+}
+
+function restoredSubmission(saved) {
+  return { ...saved, submissionId: saved.id, idempotencyKey: saved.digest, persisted: true };
+}
+
+async function persistedSubmission(id, context, options) {
+  offlineOptions(options);
+  if (typeof id !== "string" || !id.trim()) throw submissionError("submission-id-required", "submissionId required", "denied");
+  const saved = await options.offlinePersistence.get("submission", id);
+  if (!saved) throw submissionError("unknown-submission", "no persisted submission is known", "denied");
+  if (saved.repository !== offlineRepository(context)) throw submissionError("repository-mismatch", "submission belongs to another repository", "denied");
+  return restoredSubmission(saved);
+}
+
+async function submitPersistedAsync(params, context, options, signal) {
+  const communication = offlineOptions(options);
+  const repository = offlineRepository(context);
+  const digest = sha256Hex(JSON.stringify({ repository, role: params.role, prompt: params.prompt }));
+  const requestId = options.offlineRequestId ?? digest;
+  if (typeof requestId !== "string" || !/^[a-z0-9-]{1,128}$/.test(requestId)) throw submissionError("request-id-invalid", "bounded offline identity required", "denied");
+  const id = `sub-${sha256Hex(`${repository}\u0000${requestId}`).slice(0, 32)}`;
+  const deliveryIdentity = sha256Hex(`${repository}\u0000${id}`);
+  const deliveryId = `dlv-${deliveryIdentity.slice(0, 16)}-${deliveryIdentity.slice(16, 32)}`;
+  const store = options.offlinePersistence;
+  const reserved = await store.reserve("submission", { id, digest, role: params.role, repository,
+    createdAt: Date.now(), phase: "pending", deliveryId });
+  const record = restoredSubmission(reserved.record);
+  if (!reserved.created) {
+    const accepted = record.phase === "accepted";
+    return { ...submitResult(record, { duplicate: true, inFlight: false, promptSent: false }),
+      ok: accepted, status: accepted ? ASYNC_SUBMIT_STATUS : "held", held: !accepted };
+  }
+  try {
+    await options.offlineBoundary?.("after-submission-intent", { submissionId: id, deliveryId });
+    if ((await store.get("submission", id)).phase !== "pending") throw submissionError("submission-held", "submission held before handoff");
+    const sent = await executeHerdrCommunication({ action: "submit", role: params.role, prompt: params.prompt, timeoutMs: 15000 },
+      context, { ...communication, offlineRequestId: id }, signal);
+    if (!sent.ok || sent.deliveryId !== deliveryId) throw submissionError("delivery-unconfirmed", "delivery not confirmed; do not resend");
+    const accepted = await store.update("submission", id, digest, { phase: "accepted", acceptedAt: sent.acceptedAt });
+    await options.offlineBoundary?.("after-submission-ack", { submissionId: id, deliveryId });
+    if (accepted.phase !== "accepted") throw submissionError("submission-held", "ack retained for held submission");
+    return submitResult(restoredSubmission(accepted), { duplicate: false, inFlight: false, promptSent: true });
+  } catch {
+    // An intent tombstone is retained even if its transport/ack commit failed.
+    // No automatic retry or role-keyed latest-report fallback can follow.
+    await store.update("submission", id, digest, { phase: "held" });
+    return { ...baseFields(record), ok: false, action: "submit", status: "held", held: true,
+      deliveryId, code: "delivery-unconfirmed" };
+  }
+}
+
+async function observePersistedAsync(action, params, context, options, signal) {
+  const submission = await persistedSubmission(params?.submissionId, context, options);
+  if (submission.phase !== "accepted") {
+    return { ...baseFields(submission), ok: action !== "read", action, state: "unknown", terminal: false,
+      held: true, code: "delivery-unconfirmed", deliveryId: submission.deliveryId };
+  }
+  const observed = await executeHerdrCommunication({ action: "delivery", deliveryId: submission.deliveryId }, context, offlineOptions(options), signal);
+  const ready = observed.ok === true && observed.deliveryState === "answered";
+  const held = observed.held === true || ["unknown", "failed", "unattributed"].includes(observed.deliveryState);
+  return { ...baseFields(submission), ok: action === "read" ? ready : observed.ok === true, action,
+    state: ready ? "report-ready" : "unknown", terminal: false, held, deliveryId: submission.deliveryId,
+    deliveryState: observed.deliveryState, reportAvailable: ready,
+    ...(action === "read" && ready ? { report: observed.report, reportMarkers: observed.reportMarkers } : {}),
+    ...(!ready && action === "read" ? { code: "report-not-ready" } : {}), observedAt: new Date().toISOString() };
+}
+
 // Async submit: one guarded submission attempt, receipt returned immediately.
 // No settlement wait, no retry, no resend. A repeated idempotencyKey returns
 // the original receipt without sending a second prompt (no duplicate prompt).
@@ -162,6 +246,7 @@ export async function submitAsyncDispatch(params, context, options = {}, signal)
     if (typeof params?.prompt !== "string" || !params.prompt.trim()) {
       throw submissionError("prompt-required", "submit requires non-empty brief text", "denied");
     }
+    if (options.offlinePersistence) return await submitPersistedAsync(params, context, options, signal);
     const keyMaterial = JSON.stringify({ role: params.role, prompt: params.prompt });
     const idempotencyKey = sha256Hex(keyMaterial);
     evictExpired();
@@ -212,6 +297,7 @@ export async function submitAsyncDispatch(params, context, options = {}, signal)
 export async function pollAsyncDispatch(params, context, options = {}, signal) {
   const action = "poll";
   try {
+    if (options.offlinePersistence) return await observePersistedAsync(action, params, context, options, signal);
     const submission = getSubmission(params?.submissionId);
     const observed = await executeHerdrCommunication(
       { action: "get", role: submission.role },
@@ -242,6 +328,7 @@ export async function pollAsyncDispatch(params, context, options = {}, signal) {
 export async function observeAsyncDispatch(params, context, options = {}, signal) {
   const action = "observe";
   try {
+    if (options.offlinePersistence) return await observePersistedAsync(action, params, context, options, signal);
     const submission = getSubmission(params?.submissionId);
     const observed = await executeHerdrCommunication(
       { action: "get", role: submission.role },
@@ -272,6 +359,7 @@ export async function observeAsyncDispatch(params, context, options = {}, signal
 export async function readAsyncDispatch(params, context, options = {}, signal) {
   const action = "read";
   try {
+    if (options.offlinePersistence) return await observePersistedAsync(action, params, context, options, signal);
     const submission = getSubmission(params?.submissionId);
     const read = await executeHerdrCommunication(
       { action: "read", role: submission.role },

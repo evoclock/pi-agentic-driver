@@ -1257,10 +1257,81 @@ export function extractLatestHerdrReport(text, role) {
 // ---------------------------------------------------------------------------
 
 const deliveries = new Map();
+let offlineDeliveries = new WeakMap();
 let deliverySeq = 0;
+
+function deliveryRecords(options) {
+  if (!options.offlinePersistence) return deliveries;
+  if (!offlineDeliveries.has(options.offlinePersistence)) offlineDeliveries.set(options.offlinePersistence, new Map());
+  return offlineDeliveries.get(options.offlinePersistence);
+}
+
+function requireOfflinePersistence(options) {
+  const store = options.offlinePersistence;
+  if (!store) return;
+  if (store.schema !== "agentic-driver.offline-seam-store.v1" || typeof options.runProcess !== "function" ||
+      ["get", "reserve", "update"].some((name) => typeof store[name] !== "function")) {
+    throw communicationError("offline_persistence_required", "persistence requires the offline store and injected process adapter", "denied");
+  }
+}
+
+async function deliverPersistedPrompt(operation, request, context, options, signal, repositories) {
+  const repository = expectedRepository(context);
+  const digest = createHash("sha256").update(JSON.stringify({ repository, role: request.role, prompt: request.prompt })).digest("hex");
+  const requestId = options.offlineRequestId ?? digest;
+  if (typeof requestId !== "string" || !/^[a-z0-9-]{1,128}$/.test(requestId)) throw communicationError("offline_request_invalid", "bounded offline request identity required", "denied");
+  const identity = createHash("sha256").update(`${repository}\u0000${requestId}`).digest("hex");
+  // Retain the existing correlation grammar; the suffix is opaque, not a clock.
+  const id = `dlv-${identity.slice(0, 16)}-${identity.slice(16, 32)}`;
+  // Validate the complete framed brief before leaving a persistent tombstone.
+  promptWithReportRequirement(request.role, request.prompt, id);
+  const store = options.offlinePersistence;
+  const reserved = await store.reserve("delivery", { id, digest, repository, role: request.role, createdAt: Date.now(), state: "queued" });
+  if (!reserved.created) {
+    const accepted = ["delivered", "answered"].includes(reserved.record.state);
+    return { schema: HERDR_COMMUNICATION_SCHEMA, ok: accepted, status: accepted ? "accepted" : "refused", operation,
+      deliveryId: id, role: request.role, deliveryState: reserved.record.state, acceptedAt: reserved.record.acceptedAt,
+      duplicate: true, promptSent: false, held: !accepted, persisted: true, nonAuthorizing: true, authorityCreated: false };
+  }
+  await options.offlineBoundary?.("after-delivery-intent", { deliveryId: id });
+  const sent = await deliverPrompt(operation, request, context, { ...options, offlineDeliveryId: id }, signal, repositories);
+  await options.offlineBoundary?.("after-delivery-send", { deliveryId: id });
+  const latest = await store.get("delivery", id);
+  const patch = { state: latest.state === "held" ? "held" : sent.deliveryState ?? "failed" };
+  if (sent.acceptedAt) patch.acceptedAt = sent.acceptedAt;
+  if (sent.code) patch.code = sent.code;
+  const committed = await store.update("delivery", id, digest, patch);
+  await options.offlineBoundary?.("after-delivery-ack", { deliveryId: id });
+  return { ...sent, ...(committed.state === "held" ? { ok: false, status: "refused", held: true, deliveryState: "unknown" } : {}), deliveryId: id, persisted: true };
+}
+
+async function queryPersistedDelivery(request, context, options, signal, repositories) {
+  const store = options.offlinePersistence;
+  const saved = await store.get("delivery", request.deliveryId);
+  if (!saved) return deliveryRefusal("delivery", communicationError("delivery_unknown", "no persisted delivery is known"));
+  if (saved.repository !== expectedRepository(context)) throw communicationError("repository_mismatch", "delivery belongs to another repository", "denied");
+  requireRole(saved.role);
+  if (saved.state === "held") return deliverySnapshot({ ...saved, deliveryId: saved.id, state: "unknown" }, { held: true, code: saved.code ?? "delivery-held", persisted: true });
+  if (saved.state === "answered" && saved.proof === "snapshot-backed-v1") {
+    return deliverySnapshot({ ...saved, deliveryId: saved.id }, { report: saved.report, reportMarkers: reportMarkersForRole(saved.role), answeredAt: saved.answeredAt, persisted: true });
+  }
+  if (!deliveryRecords(options).has(saved.id)) {
+    // Neither terminal snapshots nor framed echoes are restored from disk.
+    // Original proof lost means hold, even if the role is now idle/done.
+    if (saved.state !== "failed" && saved.state !== "held") await store.update("delivery", saved.id, saved.digest, { state: "held", code: "attribution-lost" });
+    return deliverySnapshot({ ...saved, deliveryId: saved.id, state: saved.state === "failed" ? "failed" : "unknown" },
+      { held: saved.state !== "failed", code: saved.state === "failed" ? saved.code : "attribution-lost", persisted: true });
+  }
+  const observed = await queryDelivery(request, context, options, signal, repositories);
+  if (observed.deliveryState === "answered") {
+    await store.update("delivery", saved.id, saved.digest, { state: "answered", report: observed.report, answeredAt: observed.answeredAt, proof: "snapshot-backed-v1" });
+  }
+  return { ...observed, persisted: true };
+}
 
 export function resetHerdrDeliveriesForTests() {
   deliveries.clear();
+  offlineDeliveries = new WeakMap();
 }
 
 function evictDeliveries() {
@@ -1280,12 +1351,12 @@ function stateChangeSeq(value) {
   return Number.isSafeInteger(seq) && seq >= 0 ? seq : undefined;
 }
 
-function createDelivery(role, prompt, pre, seqBefore) {
-  evictDeliveries();
+function createDelivery(role, prompt, pre, seqBefore, options = {}) {
+  if (!options.offlinePersistence) evictDeliveries();
   const createdAt = Date.now();
   const seq = (deliverySeq += 1);
   const digest = createHash("sha256").update(`${role}\u0000${createdAt}\u0000${seq}`).digest("hex");
-  const deliveryId = `dlv-${digest.slice(0, 16)}-${createdAt.toString(36)}`;
+  const deliveryId = options.offlineDeliveryId ?? `dlv-${digest.slice(0, 16)}-${createdAt.toString(36)}`;
   const sentPrompt = promptWithReportRequirement(role, prompt, deliveryId);
   const record = {
     deliveryId,
@@ -1304,7 +1375,7 @@ function createDelivery(role, prompt, pre, seqBefore) {
     code: undefined,
     reason: undefined,
   };
-  deliveries.set(record.deliveryId, record);
+  deliveryRecords(options).set(record.deliveryId, record);
   return record;
 }
 
@@ -1370,7 +1441,7 @@ async function deliverPrompt(operation, request, context, options, signal, repos
   // unconfirmed returns the existing delivery instead of re-handing off.
   // After the window, or once the prior delivery is confirmed
   // (delivered/answered/failed), a repeat is a genuinely new delivery.
-  const duplicate = findUnconfirmedDelivery(role, request.prompt);
+  const duplicate = options.offlinePersistence ? undefined : findUnconfirmedDelivery(role, request.prompt);
   if (duplicate) {
     if (duplicate.state === "queued") {
       return {
@@ -1419,7 +1490,11 @@ async function deliverPrompt(operation, request, context, options, signal, repos
     } catch {
       pre = undefined;
     }
-    record = createDelivery(role, request.prompt, pre, stateChangeSeq(current));
+    record = createDelivery(role, request.prompt, pre, stateChangeSeq(current), options);
+    if (options.offlinePersistence) {
+      const latest = await options.offlinePersistence.get("delivery", record.deliveryId);
+      if (latest?.state !== "queued") throw communicationError("delivery_held", "persisted delivery is held; no handoff started");
+    }
     // Handoff: `agent prompt` without --wait returns as soon as the CLI
     // accepts the brief. The acceptance window is internal
     // (COMMAND_TIMEOUT_MS); timeoutMs never schedules a model round-trip.
@@ -1542,7 +1617,7 @@ function regionBody(text, role, region, correlationLine) {
 }
 
 async function queryDelivery(request, context, options, signal, repositories) {
-  const record = typeof request.deliveryId === "string" ? deliveries.get(request.deliveryId) : undefined;
+  const record = typeof request.deliveryId === "string" ? deliveryRecords(options).get(request.deliveryId) : undefined;
   if (!record) {
     return deliveryRefusal("delivery", communicationError("delivery_unknown", "no live delivery record is known for this deliveryId (bounded, in-memory)"));
   }
@@ -1742,6 +1817,7 @@ export async function executeHerdrCommunication(params, context, options = {}, s
   try {
     request = validateParams(params);
     operation = request.action;
+    requireOfflinePersistence(options);
     const repository = expectedRepository(context);
     const repositories = trustedRepositories(repository);
     if (operation === "list") {
@@ -1758,11 +1834,15 @@ export async function executeHerdrCommunication(params, context, options = {}, s
       // return an explicit receipt immediately. No model round-trip happens
       // on this path; settlement is observed through the `delivery` action,
       // get, wait, and read.
-      return await deliverPrompt(operation, request, context, options, signal, repositories);
+      return options.offlinePersistence
+        ? await deliverPersistedPrompt(operation, request, context, options, signal, repositories)
+        : await deliverPrompt(operation, request, context, options, signal, repositories);
     }
     if (operation === "delivery") {
       // Read-only, non-authorizing per-delivery state query.
-      return await queryDelivery(request, context, options, signal, repositories);
+      return options.offlinePersistence
+        ? await queryPersistedDelivery(request, context, options, signal, repositories)
+        : await queryDelivery(request, context, options, signal, repositories);
     }
     if (operation === "wait") {
       const raw = await invokeHerdr(operation, request, context, options, signal);

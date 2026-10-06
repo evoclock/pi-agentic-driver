@@ -3,6 +3,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync } from "node:fs";
+import { join } from "node:path";
+import { openDurableSeamStore } from "../scripts/enforcement/durable_assignment_pi.js";
 import {
   registerAsyncDispatchInterface,
   submitAsyncDispatch,
@@ -53,6 +56,140 @@ function context() {
 }
 
 test.beforeEach(() => resetAsyncDispatchStoreForTests());
+
+async function seamStore(t) {
+  const parent = join(root, "scratch/durable-assignment-fixture/evidence");
+  mkdirSync(parent, { recursive: true, mode: 0o700 });
+  const directory = mkdtempSync(join(parent, "async-seam-"));
+  const store = await openDurableSeamStore({ directory });
+  t.after(() => store.close());
+  return { store, directory };
+}
+
+test("offline async receipt binds a delivery, idle cannot complete, and lost restart attribution holds", async (t) => {
+  const { store, directory } = await seamStore(t);
+  const f = fixture();
+  const options = { runProcess: f.runProcess, offlinePersistence: store };
+  const request = { role: "worker", prompt: "persistent offline assignment" };
+  const submitted = await submitAsyncDispatch(request, context(), options);
+  assert.equal(submitted.ok, true, JSON.stringify(submitted));
+  assert.equal(submitted.persisted, true);
+  const id = submitted.submissionId;
+  assert.match((await store.get("submission", id)).deliveryId, /^dlv-/);
+  const polled = await pollAsyncDispatch({ submissionId: id }, context(), options);
+  assert.equal(polled.terminal, false);
+  assert.equal(polled.state, "unknown");
+  const stale = await readAsyncDispatch({ submissionId: id }, context(), options);
+  assert.equal(stale.ok, false, "a role-keyed latest report is not this submission's answer");
+  await store.close();
+  resetAsyncDispatchStoreForTests();
+  const reopened = await openDurableSeamStore({ directory });
+  t.after(() => reopened.close());
+  const resumed = { ...options, offlinePersistence: reopened };
+  f.calls.length = 0;
+  const held = await observeAsyncDispatch({ submissionId: id }, context(), resumed);
+  assert.equal(held.held, true);
+  assert.equal(held.terminal, false);
+  const duplicate = await submitAsyncDispatch(request, context(), resumed);
+  assert.equal(duplicate.submissionId, id);
+  assert.equal(duplicate.promptSent, false);
+  assert.deepEqual(f.calls, []);
+});
+
+test("offline async read returns only proven correlated text and retains it across reopen", async (t) => {
+  const { store, directory } = await seamStore(t);
+  const f = fixture();
+  let answer = false;
+  const runProcess = async (input) => {
+    const response = await f.runProcess(input);
+    if (input.argv[1] === "read" && answer) {
+      const sent = f.calls.find((c) => c.action === "prompt").argv[3];
+      const correlation = sent.split("\n").at(-2);
+      return { code: 0, stdout: `history\n${sent}\n[WORKER_REPORT_BEGIN]\n${correlation}\nexact offline answer\n[WORKER_REPORT_END]` };
+    }
+    return response;
+  };
+  const options = { runProcess, offlinePersistence: store };
+  const submitted = await submitAsyncDispatch({ role: "worker", prompt: "prove submission report" }, context(), options);
+  answer = true;
+  const request = { submissionId: submitted.submissionId };
+  const read = await readAsyncDispatch(request, context(), options);
+  assert.equal(read.report, "exact offline answer", JSON.stringify(read));
+  assert.equal(read.terminal, false, "a report is evidence, not owner completion");
+  await store.close();
+  const reopened = await openDurableSeamStore({ directory });
+  t.after(() => reopened.close());
+  f.calls.length = 0;
+  const restored = await readAsyncDispatch(request, context(), { ...options, offlinePersistence: reopened });
+  assert.equal(restored.report, read.report);
+  assert.deepEqual(f.calls, []);
+});
+
+test("offline async rejects missing fake transport and conflicting request identity without a new send", async (t) => {
+  const { store } = await seamStore(t);
+  const request = { role: "worker", prompt: "bound async brief" };
+  const denied = await submitAsyncDispatch(request, context(), { offlinePersistence: store });
+  assert.equal(denied.code, "offline-persistence-required");
+  const f = fixture();
+  const options = { runProcess: f.runProcess, offlinePersistence: store, offlineRequestId: "assignment-1" };
+  assert.equal((await submitAsyncDispatch(request, context(), options)).ok, true);
+  f.calls.length = 0;
+  assert.equal((await submitAsyncDispatch({ ...request, prompt: "different artifact" }, context(), options)).ok, false);
+  assert.deepEqual(f.calls, []);
+});
+
+test("offline concurrent identical submissions hand off once and retain the same identity", async (t) => {
+  const { store } = await seamStore(t);
+  const f = fixture();
+  let release, started;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const ready = new Promise((resolve) => { started = resolve; });
+  const runProcess = async (input) => {
+    if (input.argv[1] === "prompt") { started(); await gate; }
+    return f.runProcess(input);
+  };
+  const options = { runProcess, offlinePersistence: store };
+  const request = { role: "worker", prompt: "one persistent handoff" };
+  const first = submitAsyncDispatch(request, context(), options);
+  await ready;
+  const duplicate = await submitAsyncDispatch(request, context(), options);
+  assert.equal(duplicate.promptSent, false);
+  release();
+  const accepted = await first;
+  assert.equal(accepted.ok, true);
+  assert.equal(duplicate.submissionId, accepted.submissionId);
+  assert.equal(f.calls.filter((c) => c.action === "prompt").length, 1);
+});
+
+test("offline cancellation observed before handoff and failed ack persistence cannot cause resend", async (t) => {
+  const { store } = await seamStore(t);
+  const f = fixture();
+  const held = await submitAsyncDispatch({ role: "worker", prompt: "hold before send" }, context(), {
+    runProcess: f.runProcess, offlinePersistence: store,
+    offlineBoundary: async (name, value) => {
+      if (name === "after-delivery-intent") {
+        const record = await store.get("delivery", value.deliveryId);
+        await store.update("delivery", record.id, record.digest, { state: "held" });
+      }
+    },
+  });
+  assert.equal(held.held, true);
+  assert.equal(f.calls.filter((c) => c.action === "prompt").length, 0);
+  const port = { schema: store.schema, get: store.get, reserve: store.reserve,
+    async update(kind, id, digest, patch) {
+      if (kind === "delivery" && patch.state === "delivered") throw new Error("simulated ack commit failure");
+      return store.update(kind, id, digest, patch);
+    } };
+  const options = { runProcess: f.runProcess, offlinePersistence: port };
+  const request = { role: "worker", prompt: "one send despite failed ack commit" };
+  const failed = await submitAsyncDispatch(request, context(), options);
+  assert.equal(failed.held, true);
+  assert.equal((await store.get("delivery", failed.deliveryId)).state, "queued");
+  const repeated = await submitAsyncDispatch(request, context(), options);
+  assert.equal(repeated.promptSent, false);
+  assert.equal(repeated.submissionId, failed.submissionId);
+  assert.equal(f.calls.filter((c) => c.action === "prompt").length, 1);
+});
 
 test("the async seam registers exactly one new tool", () => {
   const registered = [];

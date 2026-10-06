@@ -1,6 +1,6 @@
 # Offline Durable assignment fixture
 
-This is an experimental comparison, not a registered Pi extension or release dependency. Current driver admission, scheduling, transport and authority are unchanged. It uses Pi Durable documents/custom tasks instead of a new persistence engine. The fake transport has no live worker/provider integration.
+This is an experimental offline fixture and opt-in seam adapter, not a registered Pi extension or release dependency. Default driver admission, scheduling, transport and authority are unchanged. It uses Pi Durable documents/custom tasks instead of a new persistence engine. The fake transport has no live worker/provider integration.
 
 ## Reproduce in an approved Treehouse workspace
 
@@ -45,4 +45,24 @@ Use Durable custom tasks/documents as the preferred persistence/reporter primiti
 
 Pi Durable by Earendil Works, version 1.0.4, MIT: <https://github.com/earendil-works/pi/tree/28dcce2ba45ce4a9efeb0f5b686f0be830fd89b9/packages/durable>. Accessed 2026-10-05. API patterns derive from the README/custom task recovery and persistent background-reporter examples. No upstream executable was copied or run. Source-commit/tarball byte equivalence is not claimed; installed APIs were actually exercised.
 
-Existing driver `herdr_async_seam_pi.js` was inspected and retained unchanged: it does process-local receipts, whereas this fixture tests restart-safe external-assignment identity/state. Existing `test_herdr_async_seam.mjs` supplied the Node test-framework precedent. New isolated authorship is justified by avoiding changes to shipped/live integrations while evaluating an external durable engine.
+During the original evaluation, `herdr_async_seam_pi.js` was inspected and retained unchanged: it supplied process-local receipts, whereas the fixture tested restart-safe assignment state. Existing `test_herdr_async_seam.mjs` supplied the Node test-framework precedent. The subsequent approved offline seam integration is described below; the original fixture review does not cover these later changes.
+
+## Approved offline opt-in seam adapter
+
+`openDurableSeamStore({ directory })` uses a Durable document behind the same private-directory/exclusive-owner convention. No background task runner, automatic resume, live worker or provider is opened. The store contains bounded identity/state fields and already-attributed report bodies, never briefs or terminal snapshots. It refuses additional records at 64 per namespace rather than evicting effect tombstones. Holds cannot be overwritten by racing acknowledgements; received acknowledgement metadata is retained. The proof label is an assertion from trusted driver code, not an authenticator.
+
+Pass the returned handle as `offlinePersistence` and an existing fake `runProcess` adapter to the communication or async seam's options. Missing process injection refuses before any Herdr invocation. Injection is trusted same-user test code, not a sandbox or network firewall. No extension/settings registration supplies these options automatically.
+
+`offlineRequestId` optionally binds a caller-owned request identity. Reuse with changed role/brief/repository binding refuses. Otherwise identity is derived from repository, role and brief. Persistent repeats never resend, even outside the legacy two-minute window; a genuinely new approved assignment needs a distinct request identity. An accepted duplicate receipt describes the original handoff, not new execution or current report readiness. A pending duplicate is conservatively held; the original already-running invocation may still finish. Identity is not authorization.
+
+Async admission commits submission and delivery identity before transport. Delivery commits its intent before handing off. Restart at either ambiguous intent holds without replay; loss of the original volatile snapshot/framed echo holds without trying fresh role-based attribution. An already-proven committed report can be read after reopening without transport. Opted-in poll/observe use delivery-specific attribution, not the legacy get-only observation. A proven report yields `report-ready` with `terminal: false`: it is evidence, not worker success or owner completion. No role-idle state can complete the opted-in assignment. The default legacy get/read behavior is retained explicitly, including its previous lifecycle normalization.
+
+Controls are best-effort phase-boundary checks; no external stop or cross-system atomic cancellation is provided. Failed commits never trigger a retry. The five new abrupt-exit windows cover submission intent, delivery intent, send, delivery ack and submission ack. The parent proves exact child exit before retaining its test lock and reopening; production lock recovery, power-loss durability and live reconciliation remain unproved.
+
+Run the three existing suites together in the approved workspace:
+
+```sh
+node --test tests/test_durable_assignment.mjs tests/test_herdr_async_seam.mjs tests/test_herdr_communication.mjs
+```
+
+Full-slice independent review is required before handback. Live registration, supported dependency packaging, real transports/providers, VM deployment, release activation and owner integration remain separate gates.

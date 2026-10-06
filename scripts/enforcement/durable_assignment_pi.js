@@ -260,6 +260,10 @@ export async function openDurableSeamStore({ directory }) {
           const current = records[id];
           if (!current || current.digest !== digest) throw new Error("unknown seam identity");
           const next = { ...current, ...patch };
+          // A hold observed by this transaction cannot be overwritten by a
+          // racing ack. Keep its ack metadata, but never resume/attribute it.
+          if (current.phase === "held") next.phase = "held";
+          if (current.state === "held") next.state = "held";
           check(kind, next);
           // Once proven and committed, a report cannot be replaced by later text.
           if (current.state === "answered" && JSON.stringify(next) !== JSON.stringify(current)) throw new Error("answered seam record is immutable");

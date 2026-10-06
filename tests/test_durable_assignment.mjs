@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { openDurableAssignmentFixture as open, openDurableSeamStore } from "../scripts/enforcement/durable_assignment_pi.js";
+import { submitAsyncDispatch, observeAsyncDispatch } from "../scripts/enforcement/herdr_async_seam_pi.js";
 
 const fixtureRoot = fileURLToPath(new URL("../scratch/durable-assignment-fixture/", import.meta.url));
 mkdirSync(join(fixtureRoot, "evidence"), { recursive: true, mode: 0o700 });
@@ -167,6 +168,32 @@ for (const [crashAt, sends, expected] of [["after-admit", 0, "acknowledged"], ["
   });
 }
 
+for (const [crashAt, sends] of [["after-submission-intent", 0], ["after-delivery-intent", 0], ["after-delivery-send", 1], ["after-delivery-ack", 1], ["after-submission-ack", 1]]) {
+  test(`real seam process exit at ${crashAt}: identities survive; no replay or guessed attribution`, async (t) => {
+    const dir = directory();
+    const child = spawnSync(process.execPath, [join(fixtureRoot, "crash-runner.mjs"), dir, crashAt], { encoding: "utf8", timeout: 10000 });
+    assert.equal(child.status, 73, child.stderr);
+    const receipt = JSON.parse(readFileSync(join(dir, "receipt.json"), "utf8"));
+    const sent = existsSync(join(dir, "sent.log")) ? readFileSync(join(dir, "sent.log"), "utf8").trim().split("\n").length : 0;
+    assert.equal(sent, sends);
+    await assert.rejects(openDurableSeamStore({ directory: dir }), /EEXIST/);
+    // The parent has observed this exact child exit and retains its lock.
+    renameSync(join(dir, "owner.lock"), join(dir, "exited-owner.lock"));
+    const store = await openDurableSeamStore({ directory: dir });
+    t.after(() => store.close());
+    const calls = [];
+    const options = { offlinePersistence: store, async runProcess(input) { calls.push(input); throw new Error("restart must not access transport"); } };
+    const observation = await observeAsyncDispatch({ submissionId: receipt.submissionId }, { cwd: process.cwd() }, options);
+    assert.equal(observation.held, true);
+    assert.equal(observation.terminal, false);
+    assert.equal(observation.deliveryId, receipt.deliveryId);
+    const repeated = await submitAsyncDispatch({ role: "worker", prompt: "offline crash seam" }, { cwd: process.cwd() }, options);
+    assert.equal(repeated.submissionId, receipt.submissionId);
+    assert.equal(repeated.promptSent === true, false);
+    assert.deepEqual(calls, []);
+  });
+}
+
 const seamRecord = (changes = {}) => ({ id: "sub-offline-1", digest: "a".repeat(64), role: "worker", repository: fixtureRoot, createdAt: 1, phase: "pending", ...changes });
 
 test("seam store commits one stable receipt across concurrent reservation and reopen", async (t) => {
@@ -201,6 +228,25 @@ test("seam store refuses raw snapshots, prompts, unproved reports and mutable id
   await store.update("delivery", delivery.id, delivery.digest, { state: "answered", report: "proven report", proof: "snapshot-backed-v1" });
   await assert.rejects(store.update("delivery", delivery.id, delivery.digest, { state: "answered", report: "replacement", proof: "snapshot-backed-v1" }), /immutable/);
   assert.equal((await store.get("delivery", delivery.id)).report, "proven report");
+});
+
+test("seam store retains racing ack metadata without clearing holds or attributing a held report", async (t) => {
+  const store = await openDurableSeamStore({ directory: directory() });
+  t.after(() => store.close());
+  const sub = seamRecord();
+  await store.reserve("submission", sub);
+  await store.update("submission", sub.id, sub.digest, { phase: "held" });
+  const ack = await store.update("submission", sub.id, sub.digest, { phase: "accepted", acceptedAt: "2026-10-05T00:00:00.000Z" });
+  assert.equal(ack.phase, "held");
+  assert.equal(typeof ack.acceptedAt, "string");
+  const delivery = { ...sub, id: "dlv-held-1", state: "queued" };
+  delete delivery.phase;
+  await store.reserve("delivery", delivery);
+  await store.update("delivery", delivery.id, delivery.digest, { state: "held" });
+  const observed = await store.update("delivery", delivery.id, delivery.digest, { state: "delivered", acceptedAt: ack.acceptedAt });
+  assert.equal(observed.state, "held");
+  assert.equal(observed.acceptedAt, ack.acceptedAt);
+  await assert.rejects(store.update("delivery", delivery.id, delivery.digest, { state: "answered", report: "held report", proof: "snapshot-backed-v1" }), /proof required/);
 });
 
 test("seam store refuses competing owners and preserves tombstones when full", async (t) => {
