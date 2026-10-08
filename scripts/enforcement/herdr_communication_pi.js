@@ -1468,28 +1468,88 @@ async function deliverPrompt(operation, request, context, options, signal, repos
   }
 }
 
-// The per-handoff echo boundary. A boundary exists only where the FULL
-// framed prompt — caller text, contract line, marker template, this
-// delivery's correlation line, and the instruction line — is echoed at a
-// line start and parses as one echoed contract unit. A bare or partially
-// fabricated "Delivery:" line in live terminal text mints no boundary, and
-// a delivery without a pre-delivery snapshot is unattributed before any
-// boundary is ever searched. The correlation line is not an authenticator:
-// terminal text stays untrusted evidence, and no authority is ever derived
-// from it.
+// The per-handoff echo boundary. A boundary exists only where a FULL
+// echoed contract unit is observable in the snapshot: the caller's prompt
+// text (bounded terminal normalization), the contract line at
+// a line start (bounded horizontal whitespace only), the marker template
+// (with the same horizontal padding and right-hand box-border tolerance
+// marker parsing already applies — Herdr's recent-unwrapped snapshot pads
+// standalone marker lines to the terminal width and can retain Pi's `│`
+// border, so a byte-exact sentPrompt echo must not be required), this
+// delivery's correlation line, and the instruction line. A bare or partially
+// fabricated "Delivery:" line mints no boundary, and a delivery without a
+// pre-delivery snapshot is unattributed before any boundary is ever
+// searched. The correlation line is not an authenticator: terminal text
+// stays untrusted evidence, and no authority is ever derived from it.
+// A framed echo renders the caller's prompt text immediately before the
+// contract line. Compare its complete, bounded line sequence so embedded
+// contract text in the caller prompt cannot truncate the expected text.
+// Preserve caller whitespace and line breaks; allow only bounded extra
+// horizontal terminal padding (and its optional right-hand box border) after
+// each exact caller line. A contract-plus-tail echo with a missing caller line
+// is a partial echo.
+function echoedCallerPromptPrecedes(text, range, callerPrompt) {
+  const expectedLines = callerPrompt.replace(/\r\n/g, "\n").split("\n");
+  const window = Math.min(
+    MAX_PROCESS_OUTPUT_BYTES,
+    Buffer.byteLength(callerPrompt, "utf8")
+      + expectedLines.length * (MAX_MARKER_HORIZONTAL_WHITESPACE + 8) + 8,
+  );
+  const from = Math.max(0, range.start - window);
+  const beforeContract = text.slice(from, range.start).replace(/\r\n/g, "\n");
+  if (!beforeContract.endsWith("\n")) return false;
+  const observedLines = beforeContract.slice(0, -1).split("\n");
+  if (observedLines.length < expectedLines.length) return false;
+  const callerLines = observedLines.slice(-expectedLines.length);
+  return expectedLines.every((expected, index) => {
+    const observed = callerLines[index];
+    if (!observed.startsWith(expected)) return false;
+    let padding = observed.slice(expected.length);
+    if (padding.endsWith("│")) padding = padding.slice(0, -1);
+    return Buffer.byteLength(padding, "utf8") <= MAX_MARKER_HORIZONTAL_WHITESPACE
+      && /^[ \t]*$/.test(padding);
+  });
+}
+
+function handoffEchoTailEnd(text, from, correlationLine) {
+  // Each padded line may consume up to MAX_MARKER_HORIZONTAL_WHITESPACE
+  // bytes; the window must span three framing lines plus the literal tail.
+  const window = text.slice(from, from + MAX_MARKER_HORIZONTAL_WHITESPACE * 3 + correlationLine.length + 128);
+  const match = new RegExp(
+    "^[ \\t]*(?:│)?\\r?\\n[ \\t]*(?:│)?" + correlationLine + "[ \\t│]*\\r?\\n"
+    + "[ \\t]*(?:│)?Begin your report with the Delivery line above, exactly as written\\.[ \\t│]*(?:\\r?\\n|$)",
+  ).exec(window);
+  return match ? from + match[0].length : undefined;
+}
+
 function handoffBoundaryIn(text, record) {
   const marker = reportMarkersForRole(record.role);
-  const starts = lineStarts(text);
-  let from = 0;
-  while (true) {
-    const start = text.indexOf(record.sentPrompt, from);
-    if (start < 0) return undefined;
-    from = start + 1;
-    if (!starts.includes(start)) continue;
-    const range = promptContractRange(text, marker, start + record.sentPrompt.length, { boundEnd: true });
-    if (!range || range.end !== start + record.sentPrompt.length) continue;
-    return { start, end: range.end };
+  const correlationLine = `Delivery: ${record.deliveryId}`;
+  for (const occurrence of allMarkerOccurrences(text, true, marker)) {
+    if (occurrence.marker !== marker.close) continue;
+    // promptContractRange validates the echoed contract structure tolerantly
+    // (contract line, both markers, bounded size, no foreign markers) and
+    // already tolerates horizontal padding and the box border between the
+    // markers themselves.
+    const range = promptContractRange(text, marker, occurrence.index);
+    if (!range || range.end <= occurrence.index) continue;
+    // The echoed contract must begin at a line start, exactly as the
+    // byte-exact boundary it replaces did.
+    const lineStart = text.lastIndexOf("\n", range.start - 1) + 1;
+    const leading = text.slice(lineStart, range.start);
+    if (Buffer.byteLength(leading, "utf8") > MAX_MARKER_HORIZONTAL_WHITESPACE || !/^[ \\t]*$/.test(leading)) continue;
+    // The tail must self-identify THIS handoff by its unique correlation
+    // line, with the same padding/border tolerance as marker lines.
+    const end = handoffEchoTailEnd(text, occurrence.end, correlationLine);
+    if (end === undefined) continue;
+    // The caller's own prompt text must be echoed immediately before the
+    // contract line under the same bounded terminal normalization. A bare
+    // contract-plus-tail echo is a fabricated partial echo and mints no
+    // boundary even when it quotes this delivery's correlation line.
+    if (!echoedCallerPromptPrecedes(text, range, record.prompt)) continue;
+    return { start: range.start, end };
   }
+  return undefined;
 }
 
 function reportRegionsAfter(text, role, fromIndex) {
