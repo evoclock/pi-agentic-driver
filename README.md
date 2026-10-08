@@ -243,7 +243,7 @@ cd janus
 ```
 
 ```sh
-npm install
+sfw npm install
 ```
 
 ```sh
@@ -275,9 +275,12 @@ configured Pi worker roles running under [Herdr](https://herdr.dev/) (validated
 against Herdr 0.9.1; the trust seam accepts the Homebrew-managed herdr binary
 across versions rather than pinning one).
 
-- **List and observe.** Worker roles are filtered to trusted repositories: a
-  checked-in registry plus canonical-path validation. Unlisted or
-  symlink-escaped repositories are denied.
+- **List and observe.** The integration checks a repository-local
+  `config/herdr-worker-repositories.v1.json` first, then the same file in the
+  active Pi profile under `PI_CODING_AGENT_DIR` (default `~/.pi/agent`). If no
+  registry is available, spawning is refused and communication trusts only
+  the current repository; malformed registries are rejected. Canonical path
+  checks reject unlisted or symlink-escaped repositories.
 - **Submit once and observe separately.** A prompt returns an immediate,
   non-authorizing delivery receipt. The `delivery` action can report queued,
   delivered, answered, failed, unknown, or unattributed. A marked answer is
@@ -558,16 +561,8 @@ rules watch the same directories by design, and together they are stricter
 than either alone, so the growth-sampling trip is covered by automated tests
 rather than a live run.
 
-The repository carries an acceptance matrix of 79 scenarios, one executable
-test per row, covering every rule, every way a command can be invoked, and
-every threshold boundary. It grows as new scenarios come to light.
-
-### A note on review quality
-
-A quantized GLM-5.3-Flash model running locally on an NVIDIA DGX Spark
-reviewed this work alongside two frontier reviews at high reasoning. The
-local model matched their coverage and found one issue they all missed.
-Small models on your own desk are worth taking seriously as reviewers.
+Automated tests exercise the containment taxonomy, killswitch decisions, and
+threshold behavior.
 
 </details>
 
