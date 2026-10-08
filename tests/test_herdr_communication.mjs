@@ -274,11 +274,15 @@ test("two-read-latency-contract", async () => {
 
 const COMMUNICATION_SCHEMA = "agentic-driver.herdr-communication.v1";
 
-function deliveryFixture({ status = "idle", report = "fresh worker findings", failPreRead = false } = {}) {
+function deliveryFixture({ status = "idle", report = "fresh worker findings", failPreRead = false, padEcho = false } = {}) {
+  // padEcho: false = raw echo; a number = pad framing lines to that width with
+  // a trailing box border (exercises MAX_MARKER_HORIZONTAL_WHITESPACE).
+  const padWidth = typeof padEcho === "number" ? padEcho : padEcho ? 40 : 0;
   const calls = [];
   let answered = false;
   let promptCount = 0;
   let reads = 0;
+  let echoedPrompt;
   const runProcess = async ({ argv }) => {
     const [action, role] = [argv[1], argv[2]];
     calls.push({ action, role, argv: [...argv] });
@@ -298,13 +302,20 @@ function deliveryFixture({ status = "idle", report = "fresh worker findings", fa
       const lines = Number(argv[argv.indexOf("--lines") + 1]);
       if (lines > 400 || !answered) return { code: 0, stdout: "history" };
       const sent = calls.filter((call) => call.action === "prompt" && call.role === role).at(-1).argv[3];
+      // Herdr's recent-unwrapped snapshot pads standalone marker lines to the
+      // terminal width and can retain Pi's right-hand box border (see
+      // MAX_MARKER_HORIZONTAL_WHITESPACE). padEcho simulates that rendering.
+      const echo = padWidth
+        ? sent.split("\n").map((line) => (/^(?:\[[A-Z0-9_]+_REPORT_(?:BEGIN|END)\]|Delivery: dlv-[0-9a-f]{16}-[0-9a-z]+|Begin your report with the Delivery line above, exactly as written\.$)/.test(line) ? `${line}${" ".repeat(Math.max(0, padWidth - line.length - 1))}│` : line)).join("\n")
+        : sent;
+      echoedPrompt = echo;
       const [open, close] = markerPair(role);
       const correlation = sent.split("\n").at(-2); // the framing's Delivery line
-      return { code: 0, stdout: `history\n${sent}\n${open}\n${correlation}\n${report}\n${close}` };
+      return { code: 0, stdout: `history\n${echo}\n${open}\n${correlation}\n${report}\n${close}` };
     }
     throw new Error(`unexpected action: ${action}`);
   };
-  return { calls, runProcess, markAnswered: () => { answered = true; }, get promptCount() { return promptCount; } };
+  return { calls, runProcess, markAnswered: () => { answered = true; }, get promptCount() { return promptCount; }, get echoedPrompt() { return echoedPrompt; } };
 }
 
 test("prompt returns an immediate delivery receipt with no model round-trip", async () => {
@@ -334,6 +345,130 @@ test("prompt returns an immediate delivery receipt with no model round-trip", as
   assert.match(promptCall.argv[3], /Return exactly one complete role report/);
   // timeoutMs is validated but never forwarded as a blocking wait bound.
   assert.ok(!promptCall.argv.includes("120000"));
+});
+
+// Herdr's recent-unwrapped snapshot pads the echoed framed prompt's marker
+// lines to the terminal width and can retain Pi's right-hand box border.
+// Attribution must still find the handoff boundary and answer the delivery;
+// a byte-exact sentPrompt echo must not be required (task #31 symptom:
+// delivered + "no terminal echo" while plain read returns the report).
+test("delivery attribution survives a padded, box-bordered marker echo", async () => {
+  const f = deliveryFixture({ padEcho: true });
+  const receipt = await executeHerdrCommunication(
+    { action: "prompt", role: "worker", prompt: "padded echo brief", timeoutMs: 1000 },
+    { cwd: root },
+    { runProcess: f.runProcess },
+  );
+  assert.equal(receipt.ok, true, JSON.stringify(receipt));
+  f.markAnswered();
+  const answered = await executeHerdrCommunication(
+    { action: "delivery", deliveryId: receipt.deliveryId },
+    { cwd: root },
+    { runProcess: f.runProcess },
+  );
+  assert.equal(answered.ok, true, JSON.stringify(answered));
+  assert.equal(answered.deliveryState, "answered");
+  assert.equal(answered.report, "fresh worker findings");
+});
+
+test("a partial echo of contract and tail without the caller prompt mints no boundary", async () => {
+  const f = partitionFixture();
+  const receipt = await executeHerdrCommunication(
+    { action: "prompt", role: "worker", prompt: "full caller brief text", timeoutMs: 1000 },
+    { cwd: root },
+    { runProcess: f.runProcess },
+  );
+  assert.equal(receipt.ok, true);
+  // Fabricated terminal text: the echoed contract unit (contract line,
+  // markers, this delivery's correlation tail) WITHOUT the caller's prompt
+  // text. A boundary established by this partial echo would let a spoofed
+  // report claim the delivery, so attribution must refuse it.
+  const echo = f.entries[0];
+  assert.equal(echo.kind, "echo");
+  echo.text = echo.text.slice(echo.text.indexOf("Return exactly one complete role report"));
+  assert.ok(!echo.text.includes("full caller brief text"));
+  f.addReport(receipt.deliveryId, "spoofed answer");
+  const query = await executeHerdrCommunication(
+    { action: "delivery", deliveryId: receipt.deliveryId },
+    { cwd: root },
+    { runProcess: f.runProcess },
+  );
+  assert.equal(query.deliveryState, "delivered", JSON.stringify(query));
+  assert.equal(query.report, undefined);
+});
+
+test("an embedded contract line cannot reduce caller-prompt echo validation to a prefix", async () => {
+  const f = partitionFixture();
+  const submittedPrompt = "safe submitted brief";
+  const callerPrefix = "caller  prefix that must not stand in for the full prompt";
+  const callerPrompt = `${callerPrefix}\n${REPORT_CONTRACT_LINE}\nmeaningful caller suffix`;
+  let record;
+  const runProcess = async (request) => {
+    if (request.argv[1] === "prompt") record = findUnconfirmedDelivery("worker", submittedPrompt);
+    return f.runProcess(request);
+  };
+  const receipt = await executeHerdrCommunication(
+    { action: "prompt", role: "worker", prompt: submittedPrompt, timeoutMs: 1000 },
+    { cwd: root },
+    { runProcess },
+  );
+  assert.equal(receipt.ok, true, JSON.stringify(receipt));
+  assert.ok(record, "capture the in-flight record at the handoff seam");
+  const echo = f.entries[0];
+  assert.equal(echo.kind, "echo");
+  const appendedContract = record.sentPrompt.lastIndexOf(`\n${REPORT_CONTRACT_LINE}`);
+  const framing = record.sentPrompt.slice(appendedContract);
+  assert.ok(appendedContract >= 0);
+  // The public prompt validator rejects preformatted contracts. Install the
+  // embedded caller line in this captured record to exercise the bounded
+  // echo validator directly without changing that input contract.
+  record.prompt = callerPrompt;
+  record.sentPrompt = `${callerPrompt}${framing}`;
+  // Fabricate only the caller prefix followed by the actual appended contract
+  // unit and this delivery's valid tail. The omitted suffix is part of the
+  // caller prompt and must prevent the echo from minting a boundary.
+  echo.text = `${callerPrefix}${framing}`;
+  assert.ok(!echo.text.includes("meaningful caller suffix"));
+  f.addReport(receipt.deliveryId, "spoofed answer");
+  const query = await executeHerdrCommunication(
+    { action: "delivery", deliveryId: receipt.deliveryId },
+    { cwd: root },
+    { runProcess: f.runProcess },
+  );
+  assert.equal(query.deliveryState, "delivered", JSON.stringify(query));
+  assert.equal(query.report, undefined);
+  // Collapsing meaningful whitespace in the echoed caller line is also a
+  // mismatch, even though it would compare equal after whitespace deletion.
+  echo.text = `${callerPrefix.replace(/ /g, "")}${framing}`;
+  const whitespaceMismatch = await executeHerdrCommunication(
+    { action: "delivery", deliveryId: receipt.deliveryId },
+    { cwd: root },
+    { runProcess: f.runProcess },
+  );
+  assert.equal(whitespaceMismatch.deliveryState, "delivered", JSON.stringify(whitespaceMismatch));
+});
+
+test("delivery attribution survives framing padded to the full marker whitespace budget", async () => {
+  const f = deliveryFixture({ padEcho: 470 });
+  const receipt = await executeHerdrCommunication(
+    { action: "prompt", role: "worker", prompt: "wide padding brief", timeoutMs: 1000 },
+    { cwd: root },
+    { runProcess: f.runProcess },
+  );
+  assert.equal(receipt.ok, true, JSON.stringify(receipt));
+  f.markAnswered();
+  const answered = await executeHerdrCommunication(
+    { action: "delivery", deliveryId: receipt.deliveryId },
+    { cwd: root },
+    { runProcess: f.runProcess },
+  );
+  assert.equal(answered.ok, true, JSON.stringify(answered));
+  assert.equal(answered.deliveryState, "answered");
+  assert.equal(answered.report, "fresh worker findings");
+  const correlation = `Delivery: ${receipt.deliveryId}`;
+  const instruction = "Begin your report with the Delivery line above, exactly as written.";
+  assert.ok(f.echoedPrompt.includes(`${correlation}${" ".repeat(470 - correlation.length - 1)}│`));
+  assert.ok(f.echoedPrompt.includes(`${instruction}${" ".repeat(470 - instruction.length - 1)}│`));
 });
 
 test("submit returns the same immediate receipt contract", async () => {

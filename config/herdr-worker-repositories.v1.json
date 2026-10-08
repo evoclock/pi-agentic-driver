@@ -1,9 +1,0 @@
-{
-  "schema": "agentic-driver.herdr-worker-repositories.v1",
-  "repositories": [
-    "manuscript-reproducibility-coordination",
-    "manuscript-orchestration",
-    "agentic-driver",
-    "pi-agentic-driver"
-  ]
-}
