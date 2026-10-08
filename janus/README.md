@@ -1,8 +1,7 @@
 # janus — Jev evaluation wrapper service
 
-janus is the local wrapper service for the Jev decision layer (design of
-record: `.private-planning/JEV_DECISION_LAYER_DESIGN.md` §5–§7, Revision 2.1).
-It wraps the official `@typesafe-ai/sdk` (TypeSafe Direct — the sole
+janus is the local wrapper service for the Jev decision layer. It wraps the
+official `@typesafe-ai/sdk` (TypeSafe Direct — the sole
 provider; the Vercel AI Gateway and merge gateway were dropped by owner
 decision) and exposes one evaluation endpoint plus health/readiness/version
 probes on loopback.
