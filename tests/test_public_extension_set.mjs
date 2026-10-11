@@ -38,7 +38,9 @@ test("shipped native-TUI helper stays importable and fail-closed", () => {
 // set needs and does not advertise an agentic_work_mode registration file.
 test("package file list matches the public extension set", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.ok(pkg.pi?.skills?.includes("./skills/decision-to-spec"), "decision-to-spec must be discoverable as a Pi skill");
   const required = [
+    "skills/decision-to-spec/SKILL.md",
     "extensions/linux-microvm.ts",
     "scripts/enforcement/linux_microvm_cutover_pi.js",
     "scripts/enforcement/linux_microvm_remote_fixture.sh",
