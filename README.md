@@ -44,6 +44,7 @@ proofs for agentic workflows.
 |------|--------------|--------|
 | `code_phage` | Reviews a plan against a stated goal before code is written and advises your agent. | shipped |
 | `tasks` | Keeps a priority-ordered session plan, then lets the owner make selected items durable in `TASKS.md`. | shipped |
+| `decision-to-spec` skill | Drafts one reviewable assignment from an owner-selected decision, with observable outcomes and a stop point. | packaged skill |
 | `agentic_herdr_communication` | Submits one prompt and observes delivery and marked reports; never grants authority. | shipped |
 | `agentic_herdr_spawn_worker` | Starts one Pi worker in a pane or tab, with native confirmation. | shipped |
 | `agentic_aidr` | A remedy for AI;DR. Reviews writing for clarity, simplicity, brevity, and humanity. | shipped |
@@ -66,7 +67,12 @@ not presented as live features.
 
 ## Code review and planning
 
-*Extensions that review, route, and control what an agent does.*
+*Extensions and skills that help make work reviewable.*
+
+The packaged `decision-to-spec` skill turns an owner-selected decision into one
+reviewable planning brief. Invoke `/skill:decision-to-spec` or explicitly ask
+for the workflow; Pi can load the skill description without granting permission
+to draft. It does not implement a plan or create a board task.
 
 <details>
 <summary><strong>code-phage, advisory code review</strong> <em>(released, 0.1.1)</em></summary>
@@ -110,6 +116,26 @@ Plans stay close to the work. They do not become board work by accident. The tas
 - **Make migration gentle.** Existing task files remain readable. Moving to the driver-owned skill does not strand current plans.
 
 The result is a clean handoff from a session plan to durable work. Selected tasks can survive the session, appear on the shared board, and become available for controlled dispatch when ready. A session priority is not copied into a board card without an owner-approved board action.
+
+</details>
+
+<details>
+<summary><strong>decision-to-spec, one reviewable assignment</strong> <em>(packaged skill)</em></summary>
+
+Start with the user's problem and inspect existing behavior before asking a
+focused round of consequential questions. The skill drafts one assignment with:
+
+- Observable success and meaningful failure in Given/When/Then terms, plus a
+  test seam that can detect a broken implementation.
+- Scope, exclusions, evidence sources and a stop point. Implementation work
+  requires an identified Treehouse lease; drafting does not.
+- An independent standards and boundary review, followed by acceptance review
+  of the exact artifact.
+
+The output is a private planning brief for the requester, **not** a dispatch
+record. It cannot approve implementation or publication, write a board card,
+create an issue, or change a provider route. Unresolved decisions remain
+explicit instead of becoming assumed requirements.
 
 </details>
 
