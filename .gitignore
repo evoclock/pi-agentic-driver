@@ -7,3 +7,6 @@ node_modules/
 
 # asgrep code-search index
 .asgrep/
+
+# Do not track the obsolete local push hook.
+.githooks/pre-push
