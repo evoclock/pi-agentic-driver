@@ -8,7 +8,7 @@
 // allowlist constant. Pane placement uses pane split directly; tab placement
 // uses tab create. Both capture the returned pane identity and start once.
 import { createHash } from "node:crypto";
-import { accessSync, constants as fsConstants, readFileSync, realpathSync, statSync } from "node:fs";
+import { accessSync, constants as fsConstants, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -73,6 +73,10 @@ export const HERDR_SPAWN_WORKER_PARAMETERS = Object.freeze({
     role: { type: "string", pattern: HERDR_ROLE_PATTERN, maxLength: 64 },
     model: { type: "string", pattern: MODEL_ID_REGEXP.source, maxLength: 192 },
     repository: { type: "string", pattern: SAFE_NAME_REGEXP.source, maxLength: 64 },
+    // Optional bounded worktree target. It is a request, never authority: it
+    // must resolve to the canonical Git worktree root of the registered
+    // repository and carry an active Treehouse lease observed read-only.
+    worktreePath: { type: "string", minLength: 1, maxLength: 1024 },
   },
   required: ["placement", "role", "model", "repository"],
 });
@@ -166,11 +170,25 @@ export function validateSpawnParams(params) {
   if (!isPlainObject(params)) {
     throw lifecycleError("invalid_parameters", "spawn parameters must be an object", "denied");
   }
+  const requiredKeys = ["placement", "role", "model", "repository"];
   const keys = Object.keys(params);
-  if (keys.length !== 4 || ["placement", "role", "model", "repository"].some((k) => !keys.includes(k))) {
-    throw lifecycleError("closed_parameters", "spawn_worker accepts exactly placement, role, model, and repository", "denied");
+  if (keys.length < requiredKeys.length || keys.length > requiredKeys.length + 1
+      || requiredKeys.some((k) => !keys.includes(k))
+      || keys.some((k) => !requiredKeys.includes(k) && k !== "worktreePath")) {
+    throw lifecycleError("closed_parameters", "spawn_worker accepts exactly placement, role, model, repository, and optional worktreePath", "denied");
   }
-  const { placement, role, model, repository } = params;
+  const { placement, role, model, repository, worktreePath } = params;
+  if (worktreePath !== undefined) {
+    if (typeof worktreePath !== "string" || worktreePath.length > 1024 || !worktreePath.trim()
+        || worktreePath.includes("\0")) {
+      throw lifecycleError("worktree_target_invalid", "worktreePath must be a bounded absolute path", "denied");
+    }
+    // A relative target is refused here; canonical/realpath identity is
+    // decided later against real Git and Treehouse evidence.
+    if (!worktreePath.startsWith("/")) {
+      throw lifecycleError("worktree_target_invalid", "worktreePath must be an absolute path", "denied");
+    }
+  }
   if (!SPAWN_PLACEMENTS.includes(placement)) {
     throw lifecycleError("unsupported_placement", "placement must be tab, right, or below", "denied");
   }
@@ -184,7 +202,9 @@ export function validateSpawnParams(params) {
   if (typeof model !== "string" || model.length > 192 || !MODEL_ID_REGEXP.test(model)) {
     throw lifecycleError("model_denied", "the model must be an installed Pi provider/id or unique model id", "denied");
   }
-  return { placement, role, model, repository };
+  return worktreePath === undefined
+    ? { placement, role, model, repository }
+    : { placement, role, model, repository, worktreePath };
 }
 
 function parseJsonEnvelope(raw, label, { requireResult = false } = {}) {
@@ -408,12 +428,39 @@ function validateRegistry(registryPath) {
   return registry.repositories;
 }
 
-function gitRoot(path) {
-  const value = spawnSync("git", ["-C", path, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
-  if (value.status !== 0 || !value.stdout.trim()) {
-    throw lifecycleError("repository_not_git_root", "the requested repository is not a Git work tree root");
+const GIT_PROBE_TIMEOUT_MS = 10_000;
+
+// Repository-selection environment is process input, never tool input, but an
+// inherited GIT_DIR/GIT_COMMON_DIR/GIT_WORK_TREE would silently redirect an
+// authoritative Git probe to another repository. Every lifecycle Git probe
+// therefore runs with all GIT_* variables removed, bounded by timeout and
+// fixed argv with shell:false. This is host-level defense in depth: it does not
+// claim containment of a deliberately hostile parent process tree.
+function controlledEnv() {
+  const env = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (/^GIT_/i.test(key)) continue;
+    env[key] = value;
   }
-  return resolve(value.stdout.trim());
+  return env;
+}
+
+function gitProbe(path, args, code = "repository_not_git_root") {
+  const value = spawnSync("git", ["-C", path, ...args], {
+    encoding: "utf8",
+    shell: false,
+    env: controlledEnv(),
+    timeout: GIT_PROBE_TIMEOUT_MS,
+    maxBuffer: MAX_PROCESS_OUTPUT_BYTES,
+  });
+  if (value.error || value.status !== 0 || typeof value.stdout !== "string" || !value.stdout.trim()) {
+    throw lifecycleError(code, "an authoritative Git probe could not be completed");
+  }
+  return value.stdout.trim();
+}
+
+function gitRoot(path) {
+  return resolve(gitProbe(path, ["rev-parse", "--show-toplevel"]));
 }
 
 // Resolves the requested registry name BEFORE any mutation and re-checks it
@@ -490,6 +537,347 @@ export function resolveTrustedSpawnRepository(coordinatorCwd, requestedName) {
     throw lifecycleError("repository_not_git_root", "the requested repository resolved outside its Git root", "denied");
   }
   return candidateReal;
+}
+
+// --- Optional worktree target (real Git identity + Treehouse lease) ---------
+// The requested worktreePath is a request, never authority. It is trusted only
+// when ALL of the following hold, each observed read-only:
+//   1. it is absolute, lexically canonical, and resolves (realpath) to itself,
+//      so a symlink, a `..` segment, or a copied directory never qualifies;
+//   2. it is a genuine registered linked worktree of the registry-authorized
+//      canonical repository: same Git common directory, a per-worktree
+//      administrative directory under <common>/worktrees/<name>, and an exact
+//      `gitdir` backpointer from that administrative directory to the target's
+//      own `.git` file. Root/common-dir string equality alone is NOT identity;
+//   3. the stable physical identity of the target directory, canonical
+//      repository root, common directory, and administrative directory
+//      (device + inode) is bound, so a rename-and-recreate at identical paths
+//      is a different target. HEAD and dirty/clean state are deliberately NOT
+//      identity: an ordinary legitimately dirty worktree stays valid;
+//   4. Treehouse reports exactly one active lease on that path and its lease id
+//      is bound for the rest of the operation.
+// The bound identity is re-observed after confirmation, after coordinator pane
+// observation and immediately before the split, between mutations, after agent
+// start, and after the final read-back; any change fails closed with truthful
+// partial state.
+const MAX_WORKTREE_PATH_CHARS = 1024;
+const LEASE_ID_REGEXP = /^[a-f0-9]{32}$/i;
+const TREEHOUSE_STATUS_TIMEOUT_MS = 10_000;
+
+function treehouseStatusJson(options, targetPath) {
+  const injected = options?.treehouseStatus;
+  if (typeof injected === "function") {
+    const value = injected(targetPath);
+    if (value && typeof value.then === "function") {
+      throw lifecycleError("worktree_lease_untrusted", "asynchronous Treehouse evidence is not supported");
+    }
+    return value;
+  }
+  if (typeof injected === "string") return injected;
+  // Production path: the read-only status query only. No lease acquire, no
+  // return, no prune, no mutation of any kind. Repository-selection variables
+  // are stripped for the same reason as the Git probes.
+  const result = spawnSync("treehouse", ["status", "--json"], {
+    encoding: "utf8",
+    shell: false,
+    cwd: targetPath,
+    env: controlledEnv(),
+    timeout: TREEHOUSE_STATUS_TIMEOUT_MS,
+    maxBuffer: MAX_PROCESS_OUTPUT_BYTES,
+  });
+  if (result.error || result.status !== 0 || typeof result.stdout !== "string") {
+    throw lifecycleError("worktree_lease_untrusted", "the Treehouse lease state could not be read", "denied");
+  }
+  return result.stdout;
+}
+
+function gitCommonDir(path) {
+  try {
+    return realpathSync(gitProbe(path, ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+      "worktree_target_invalid"));
+  } catch {
+    return null;
+  }
+}
+
+function gitAbsoluteDir(path) {
+  try {
+    return realpathSync(gitProbe(path, ["rev-parse", "--absolute-git-dir"], "worktree_target_invalid"));
+  } catch {
+    return null;
+  }
+}
+
+function statIdentity(path, code, label) {
+  let stats;
+  try {
+    stats = statSync(path);
+  } catch {
+    throw lifecycleError(code, `${label} could not be observed`);
+  }
+  if (!stats.isDirectory()) {
+    throw lifecycleError(code, `${label} is not a directory`);
+  }
+  return `${stats.dev}:${stats.ino}`;
+}
+
+function fileIdentity(path, code, label) {
+  let stats;
+  try {
+    stats = lstatSync(path);
+  } catch {
+    throw lifecycleError(code, `${label} could not be observed`);
+  }
+  if (!stats.isFile()) {
+    throw lifecycleError(code, `${label} is not a regular file`);
+  }
+  return `${stats.dev}:${stats.ino}`;
+}
+
+function containedWorktreeAdminDir(commonDir, adminDir) {
+  // A linked worktree's administrative directory is one direct child of
+  // <common>/worktrees. Anything else is not a registered linked worktree.
+  const root = join(commonDir, "worktrees");
+  let rootReal;
+  try {
+    rootReal = realpathSync(root);
+  } catch {
+    return null;
+  }
+  if (rootReal !== root) return null;
+  const prefix = `${root}/`;
+  if (!adminDir.startsWith(prefix)) return null;
+  const name = adminDir.slice(prefix.length);
+  if (!name || name.includes("/") || name === "." || name === "..") return null;
+  return adminDir;
+}
+
+function assertCanonicalWorktreePath(worktreePath) {
+  if (typeof worktreePath !== "string" || worktreePath.length > MAX_WORKTREE_PATH_CHARS
+      || !worktreePath.startsWith("/") || worktreePath.trim() !== worktreePath) {
+    throw lifecycleError("worktree_target_invalid", "worktreePath must be a bounded absolute path", "denied");
+  }
+  // Lexical canonicality: reject `..`, doubled separators, and a trailing
+  // separator even when the filesystem would resolve them.
+  if (resolve(worktreePath) !== worktreePath) {
+    throw lifecycleError("worktree_target_invalid", "worktreePath is not lexically canonical", "denied");
+  }
+  let observedReal;
+  try {
+    observedReal = realpathSync(worktreePath);
+  } catch {
+    throw lifecycleError("worktree_target_unavailable", "worktreePath does not exist", "denied");
+  }
+  if (observedReal !== worktreePath) {
+    throw lifecycleError("worktree_target_invalid", "worktreePath resolves through a link or is not canonical", "denied");
+  }
+  return observedReal;
+}
+
+function worktreeAdministrativeIdentity(targetReal, canonicalRoot) {
+  if (targetReal === canonicalRoot) {
+    throw lifecycleError("worktree_target_untrusted", "worktreePath is the canonical repository root, not a worktree", "denied");
+  }
+  let targetRoot;
+  try {
+    targetRoot = gitRoot(targetReal);
+  } catch {
+    throw lifecycleError("worktree_target_invalid", "worktreePath is not a Git work tree root", "denied");
+  }
+  if (realpathSync(targetRoot) !== targetReal) {
+    throw lifecycleError("worktree_target_invalid", "worktreePath is not the Git work tree root", "denied");
+  }
+  const registeredCommon = gitCommonDir(canonicalRoot);
+  const targetCommon = gitCommonDir(targetReal);
+  if (!registeredCommon || !targetCommon || registeredCommon !== targetCommon) {
+    throw lifecycleError("worktree_target_untrusted", "worktreePath is not a worktree of the registered repository", "denied");
+  }
+  const adminDir = gitAbsoluteDir(targetReal);
+  const registeredAdminDir = containedWorktreeAdminDir(registeredCommon, adminDir ?? "");
+  if (!adminDir || !registeredAdminDir) {
+    throw lifecycleError("worktree_target_untrusted", "worktreePath has no registered per-worktree Git administration", "denied");
+  }
+  // Genuine backpointer: the administrative directory must point back at THIS
+  // worktree's own .git file. A copied .git pointer that borrows another
+  // slot's administration fails here even when root/common-dir match.
+  const dotGit = join(targetReal, ".git");
+  let dotGitStats;
+  try {
+    dotGitStats = lstatSync(dotGit);
+  } catch {
+    throw lifecycleError("worktree_target_untrusted", "worktreePath has no Git worktree pointer", "denied");
+  }
+  if (!dotGitStats.isFile() || dotGitStats.isSymbolicLink()) {
+    throw lifecycleError("worktree_target_untrusted", "worktreePath does not use a linked-worktree Git pointer", "denied");
+  }
+  let pointerText;
+  try {
+    pointerText = readFileSync(dotGit, "utf8").trim();
+  } catch {
+    throw lifecycleError("worktree_target_untrusted", "worktreePath Git pointer is unreadable", "denied");
+  }
+  if (!pointerText.startsWith("gitdir: ")) {
+    throw lifecycleError("worktree_target_untrusted", "worktreePath Git pointer is malformed", "denied");
+  }
+  let pointerAdmin;
+  try {
+    pointerAdmin = realpathSync(resolve(targetReal, pointerText.slice("gitdir: ".length).trim()));
+  } catch {
+    throw lifecycleError("worktree_target_untrusted", "worktreePath Git pointer does not resolve", "denied");
+  }
+  if (pointerAdmin !== adminDir) {
+    throw lifecycleError("worktree_target_untrusted", "worktreePath Git pointer names a different administrative directory", "denied");
+  }
+  let backpointerText;
+  try {
+    backpointerText = readFileSync(join(adminDir, "gitdir"), "utf8").trim();
+  } catch {
+    throw lifecycleError("worktree_target_untrusted", "worktreePath Git administrative record is unreadable", "denied");
+  }
+  let backpointer;
+  try {
+    backpointer = realpathSync(resolve(adminDir, backpointerText));
+  } catch {
+    throw lifecycleError("worktree_target_untrusted", "worktreePath Git administrative backpointer does not resolve", "denied");
+  }
+  let dotGitReal;
+  try {
+    dotGitReal = realpathSync(dotGit);
+  } catch {
+    throw lifecycleError("worktree_target_untrusted", "worktreePath Git pointer cannot be canonicalized", "denied");
+  }
+  if (backpointer !== dotGitReal) {
+    throw lifecycleError("worktree_target_untrusted", "worktreePath Git administrative backpointer names a different worktree", "denied");
+  }
+  return Object.freeze({
+    repositoryPath: canonicalRoot,
+    target: targetReal,
+    commonDir: registeredCommon,
+    adminDir,
+    dotGit: dotGitReal,
+    targetIdentity: statIdentity(targetReal, "worktree_target_untrusted", "the worktree target"),
+    repositoryIdentity: statIdentity(canonicalRoot, "worktree_target_untrusted", "the registered repository"),
+    commonIdentity: statIdentity(registeredCommon, "worktree_target_untrusted", "the Git common directory"),
+    adminIdentity: statIdentity(adminDir, "worktree_target_untrusted", "the worktree administrative directory"),
+    dotGitIdentity: fileIdentity(dotGitReal, "worktree_target_untrusted", "the worktree Git pointer"),
+  });
+}
+
+function observedLeaseIdentity(targetReal, options) {
+  const raw = treehouseStatusJson(options, targetReal);
+  if (typeof raw !== "string" || !raw.trim()
+      || Buffer.byteLength(raw, "utf8") > MAX_PROCESS_OUTPUT_BYTES) {
+    throw lifecycleError("worktree_lease_untrusted", "the Treehouse lease evidence is unusable", "denied");
+  }
+  let entries;
+  try {
+    entries = JSON.parse(raw);
+  } catch {
+    throw lifecycleError("worktree_lease_untrusted", "the Treehouse lease evidence is malformed", "denied");
+  }
+  if (!Array.isArray(entries) || entries.length > 256) {
+    throw lifecycleError("worktree_lease_untrusted", "the Treehouse lease evidence is malformed", "denied");
+  }
+  const matches = entries.filter((entry) => {
+    if (!isPlainObject(entry) || typeof entry.path !== "string" || !entry.path.startsWith("/")) return false;
+    try {
+      return realpathSync(entry.path) === targetReal;
+    } catch {
+      return false;
+    }
+  });
+  if (matches.length !== 1) {
+    throw lifecycleError("worktree_lease_untrusted", "the worktree target is not a managed pool worktree", "denied");
+  }
+  const entry = matches[0];
+  if (entry.status !== "leased") {
+    throw lifecycleError("worktree_lease_untrusted", "the worktree target is not actively leased", "denied");
+  }
+  if (typeof entry.lease_id !== "string" || !LEASE_ID_REGEXP.test(entry.lease_id)) {
+    throw lifecycleError("worktree_lease_untrusted", "the worktree lease identity is not trustworthy", "denied");
+  }
+  const holder = typeof entry.lease_holder === "string" && entry.lease_holder.length <= 128
+    ? entry.lease_holder
+    : null;
+  return Object.freeze({ leaseId: entry.lease_id.toLowerCase(), holder });
+}
+
+function resolveWorktreeIdentity(canonicalRoot, worktreePath, options) {
+  const targetReal = assertCanonicalWorktreePath(worktreePath);
+  const admin = worktreeAdministrativeIdentity(targetReal, canonicalRoot);
+  const lease = observedLeaseIdentity(targetReal, options);
+  return Object.freeze({
+    worktreePath: targetReal,
+    leaseId: lease.leaseId,
+    leaseHolder: lease.holder,
+    repositoryPath: admin.repositoryPath,
+    commonDir: admin.commonDir,
+    adminDir: admin.adminDir,
+    dotGit: admin.dotGit,
+    identity: Object.freeze({
+      target: admin.targetIdentity,
+      repository: admin.repositoryIdentity,
+      common: admin.commonIdentity,
+      admin: admin.adminIdentity,
+      dotGit: admin.dotGitIdentity,
+    }),
+  });
+}
+
+export function resolveWorktreeSpawnTarget(canonicalRoot, worktreePath, options = {}) {
+  return resolveWorktreeIdentity(canonicalRoot, worktreePath, options);
+}
+
+export function worktreeTargetUnchanged(left, right) {
+  if (!left || !right) return false;
+  if (left.worktreePath !== right.worktreePath || left.leaseId !== right.leaseId) return false;
+  if (left.repositoryPath !== right.repositoryPath
+      || left.commonDir !== right.commonDir
+      || left.adminDir !== right.adminDir
+      || left.dotGit !== right.dotGit) {
+    return false;
+  }
+  for (const key of ["target", "repository", "common", "admin", "dotGit"]) {
+    if (left.identity?.[key] !== right.identity?.[key]) return false;
+  }
+  return true;
+}
+
+function revalidateWorktreeTarget(canonicalRoot, request, bound, options) {
+  if (!request.worktreePath) return null;
+  let observed;
+  try {
+    observed = resolveWorktreeIdentity(canonicalRoot, request.worktreePath, options);
+  } catch (error) {
+    throw lifecycleError(
+      "worktree_target_changed",
+      `the confirmed worktree target is no longer valid: ${error?.message || "revalidation failed"}`,
+      "blocked",
+    );
+  }
+  if (!worktreeTargetUnchanged(observed, bound)) {
+    throw lifecycleError(
+      "worktree_target_changed",
+      "the worktree physical identity, Git administrative association, or lease identity changed during the spawn",
+      "blocked",
+    );
+  }
+  return observed;
+}
+
+// Registry membership is authority for the whole spawn, not only for the
+// pre-mutation resolve. Every boundary that already re-observes the bound
+// target and lease also re-resolves the CURRENT registry, so a membership
+// revocation during an asynchronous observation fails closed at that boundary
+// instead of at a later one (or after a success report). This composes the
+// existing resolvers; it is not a second validation owner.
+function revalidateSpawnAuthority(coordinatorCwd, requestedName, canonicalRoot, request, bound, options, boundary) {
+  const currentRoot = resolveTrustedSpawnRepository(coordinatorCwd, requestedName);
+  if (currentRoot !== canonicalRoot) {
+    throw lifecycleError("repository_mismatch", `the trusted repository changed ${boundary}`);
+  }
+  if (request.worktreePath) revalidateWorktreeTarget(currentRoot, request, bound, options);
+  return currentRoot;
 }
 
 // --- Installed Pi model roll (read-only; no allowlist constant) -------------
@@ -732,6 +1120,13 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
     // Resolve BEFORE any mutation: registry + realpath + Git root.
     let canonicalRoot = resolveTrustedSpawnRepository(context?.cwd, repository);
     const modelArgv = resolveInstalledModel(model, options);
+    // An optional worktree target is validated read-only here (canonical path,
+    // real Git repository identity, active Treehouse lease) and its observed
+    // lease identity is bound for the rest of the operation.
+    let worktreeTarget = request.worktreePath
+      ? resolveWorktreeSpawnTarget(canonicalRoot, request.worktreePath, options)
+      : null;
+    let spawnCwd = worktreeTarget ? worktreeTarget.worktreePath : canonicalRoot;
 
     // The calling pane must be a Herdr session pane; `pane current --current`
     // resolves the coordinator pane identity for the final move step.
@@ -761,6 +1156,12 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
           : `Placement: ${placement} (Herdr split: ${HERDR_DIRECTIONS[placement]})`,
         `Model: ${modelArgv[1]} (argv: ${modelArgv.join(" ")})`,
         `Repository: ${canonicalRoot}`,
+        ...(worktreeTarget
+          ? [
+            `Worktree target: ${worktreeTarget.worktreePath}`,
+            `Treehouse lease: ${worktreeTarget.leaseId}${worktreeTarget.leaseHolder ? ` (holder: ${worktreeTarget.leaseHolder})` : ""}`,
+          ]
+          : []),
         "No rollback is automatic; a failed step leaves the created state for human cleanup.",
       ].join("\n"),
     );
@@ -769,18 +1170,23 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
     }
 
     // Revalidation point after confirmation, before the first mutation.
-    const reconfirmedRoot = resolveTrustedSpawnRepository(context?.cwd, repository);
-    if (reconfirmedRoot !== canonicalRoot) {
-      throw lifecycleError("repository_mismatch", "the trusted repository changed after confirmation");
-    }
-    canonicalRoot = reconfirmedRoot;
+    canonicalRoot = revalidateSpawnAuthority(
+      context?.cwd, repository, canonicalRoot, request, worktreeTarget, options, "after confirmation",
+    );
+    if (request.worktreePath) spawnCwd = worktreeTarget.worktreePath;
 
     // Herdr owns new-shell readiness. Follow its documented topology:
     // split directly for pane placement, or create a tab for tab placement.
     let coordinator = null;
     if (placement !== "tab") {
-      const currentRaw = await invokeHerdr(currentPaneArgv(), canonicalRoot, options, signal);
+      const currentRaw = await invokeHerdr(currentPaneArgv(), spawnCwd, options, signal);
       coordinator = parseCurrentPane(currentRaw);
+      // The coordinator observation is asynchronous; a registry, lease, or
+      // association change during it must fail closed before the split.
+      canonicalRoot = revalidateSpawnAuthority(
+        context?.cwd, repository, canonicalRoot, request, worktreeTarget, options,
+        "during the coordinator pane observation",
+      );
     }
 
     const layoutPartial = placement === "tab" ? "tab_created" : "pane_created";
@@ -789,12 +1195,12 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
     let tabId;
     try {
       if (placement === "tab") {
-        layoutRaw = await invokeHerdr(tabCreateArgv(canonicalRoot, role), canonicalRoot, options, signal);
+        layoutRaw = await invokeHerdr(tabCreateArgv(spawnCwd, role), spawnCwd, options, signal);
         ({ rootPaneId, tabId } = parseTabCreate(layoutRaw));
       } else {
         layoutRaw = await invokeHerdr(
-          splitArgv(coordinator.paneId, canonicalRoot, placement),
-          canonicalRoot, options, signal,
+          splitArgv(coordinator.paneId, spawnCwd, placement),
+          spawnCwd, options, signal,
         );
         const split = parsePaneSplit(layoutRaw, coordinator.tabId);
         rootPaneId = split.paneId;
@@ -809,17 +1215,16 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
 
     let agentStartSucceeded = false;
     try {
-      // Re-check the registry between the mutations.
-      const betweenRoot = resolveTrustedSpawnRepository(context?.cwd, repository);
-      if (betweenRoot !== canonicalRoot) {
-        throw lifecycleError("repository_mismatch", "the trusted repository changed between mutations");
-      }
+      // Re-check registry authorization and the bound target between mutations.
+      canonicalRoot = revalidateSpawnAuthority(
+        context?.cwd, repository, canonicalRoot, request, worktreeTarget, options, "between mutations",
+      );
 
       // Start exactly once in the shell pane returned by the layout command.
       const startCall = startArgv(role, rootPaneId, modelArgv);
       let startRaw;
       try {
-        startRaw = await invokeHerdr(startCall, canonicalRoot, options, signal);
+        startRaw = await invokeHerdr(startCall, spawnCwd, options, signal);
         agentStartSucceeded = true;
       } catch (error) {
         throw lifecycleError("start_failed", error?.message || "Herdr agent start failed");
@@ -827,23 +1232,28 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
 
       // Agent start is a mutation, so authorization must be resolved again
       // before accepting any start/read-back facts.
-      const postStartRoot = resolveTrustedSpawnRepository(context?.cwd, repository);
-      if (postStartRoot !== canonicalRoot) {
-        throw lifecycleError("repository_mismatch", "the trusted repository changed after agent start");
-      }
-      canonicalRoot = postStartRoot;
+      canonicalRoot = revalidateSpawnAuthority(
+        context?.cwd, repository, canonicalRoot, request, worktreeTarget, options, "after agent start",
+      );
 
-      const startedPaneId = readBackStart(startRaw, role, canonicalRoot, [...modelArgv]);
+      const startedPaneId = readBackStart(startRaw, role, spawnCwd, [...modelArgv]);
       if (startedPaneId !== rootPaneId) {
         throw lifecycleError("pane_mismatch", "agent start returned a different pane identity");
       }
-      const agentRaw = await invokeHerdr(["agent", "get", role], canonicalRoot, options, signal);
-      const agentReadBack = readBackAgent(agentRaw, role, canonicalRoot, [...modelArgv]);
+      const agentRaw = await invokeHerdr(["agent", "get", role], spawnCwd, options, signal);
+      const agentReadBack = readBackAgent(agentRaw, role, spawnCwd, [...modelArgv]);
       if (agentReadBack.paneId !== rootPaneId) {
         throw lifecycleError("pane_mismatch", "agent get returned a different pane identity");
       }
-      const paneRaw = await invokeHerdr(["pane", "get", rootPaneId], canonicalRoot, options, signal);
-      readBackPane(paneRaw, rootPaneId, canonicalRoot);
+      const paneRaw = await invokeHerdr(["pane", "get", rootPaneId], spawnCwd, options, signal);
+      readBackPane(paneRaw, rootPaneId, spawnCwd);
+      // Last check: the read-backs are asynchronous too. A registry, lease, or
+      // association change during them must not be reported as a successful
+      // spawn.
+      revalidateSpawnAuthority(
+        context?.cwd, repository, canonicalRoot, request, worktreeTarget, options,
+        "during the final read-backs",
+      );
 
       return {
         schema: HERDR_LIFECYCLE_SCHEMA,
@@ -858,6 +1268,9 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
         tabId,
         modelArgv: [...modelArgv],
         repository: canonicalRoot,
+        ...(worktreeTarget
+          ? { worktreePath: worktreeTarget.worktreePath, leaseId: worktreeTarget.leaseId }
+          : {}),
         hashes: Object.freeze({
           request: sha256(JSON.stringify(request)),
           layoutCreateResponse: sha256(layoutRaw),
@@ -937,7 +1350,12 @@ function attendedElectronParams(params) {
 function resolveAttendedElectronPrerequisites(request, context, options) {
   const canonicalRoot = resolveTrustedSpawnRepository(context.cwd, request.repository);
   const modelArgv = resolveInstalledModel(request.model, options);
-  return { canonicalRoot, modelArgv };
+  // The optional worktree target follows exactly the same rules on this
+  // boundary: canonical path, real Git repository identity, active lease.
+  const worktreeTarget = request.worktreePath
+    ? resolveWorktreeSpawnTarget(canonicalRoot, request.worktreePath, options)
+    : null;
+  return { canonicalRoot, modelArgv, worktreeTarget };
 }
 
 function assertHerdrExecutableAvailable(options) {
@@ -975,8 +1393,8 @@ export async function preflightAttendedElectronSpawn(params, context, options = 
     attendedElectronContextError(context);
     const request = attendedElectronParams(params);
     assertHerdrExecutableAvailable(options);
-    const { canonicalRoot, modelArgv } = resolveAttendedElectronPrerequisites(request, context, options);
-    await observeDuplicateRole(canonicalRoot, request.role, options, null);
+    const { canonicalRoot, modelArgv, worktreeTarget } = resolveAttendedElectronPrerequisites(request, context, options);
+    await observeDuplicateRole(worktreeTarget ? worktreeTarget.worktreePath : canonicalRoot, request.role, options, null);
     return {
       schema: HERDR_LIFECYCLE_SCHEMA,
       ok: true,
@@ -985,6 +1403,9 @@ export async function preflightAttendedElectronSpawn(params, context, options = 
       placement: "tab",
       role: request.role,
       repository: canonicalRoot,
+      ...(worktreeTarget
+        ? { worktreePath: worktreeTarget.worktreePath, leaseId: worktreeTarget.leaseId }
+        : {}),
       modelArgv: [...modelArgv],
       nonAuthorizing: true,
       authorityCreated: false,
@@ -994,13 +1415,19 @@ export async function preflightAttendedElectronSpawn(params, context, options = 
   }
 }
 
-function attendedElectronConfirmBody(role, modelArgv, canonicalRoot) {
+function attendedElectronConfirmBody(role, modelArgv, canonicalRoot, worktreeTarget = null) {
   return [
     "One guarded attended-Electron composite spawn: create one tab, then start and verify one Pi agent.",
     `Role: ${role}`,
     "Placement: individual tab (the Electron host has no Herdr session pane)",
     `Model: ${modelArgv[1]} (argv: ${modelArgv.join(" ")})`,
     `Repository: ${canonicalRoot}`,
+    ...(worktreeTarget
+      ? [
+        `Worktree target: ${worktreeTarget.worktreePath}`,
+        `Treehouse lease: ${worktreeTarget.leaseId}${worktreeTarget.leaseHolder ? ` (holder: ${worktreeTarget.leaseHolder})` : ""}`,
+      ]
+      : []),
     "No rollback is automatic; a failed step leaves the created state for human cleanup.",
   ].join("\n");
 }
@@ -1016,7 +1443,11 @@ export async function executeHerdrSpawnWorkerAttendedElectron(params, context, o
     // installed model roll. Duplicate live names are denied at spawn.
     let canonicalRoot = resolveTrustedSpawnRepository(context.cwd, repository);
     const modelArgv = resolveInstalledModel(model, options);
-    await observeDuplicateRole(canonicalRoot, role, options, signal);
+    let worktreeTarget = request.worktreePath
+      ? resolveWorktreeSpawnTarget(canonicalRoot, request.worktreePath, options)
+      : null;
+    let spawnCwd = worktreeTarget ? worktreeTarget.worktreePath : canonicalRoot;
+    await observeDuplicateRole(spawnCwd, role, options, signal);
 
     // ONE native owner confirmation from the attended host. A denial is a
     // stop; a throw is a structured refusal. Never re-asked, never retried.
@@ -1024,7 +1455,7 @@ export async function executeHerdrSpawnWorkerAttendedElectron(params, context, o
     try {
       confirmed = await context.ui.confirm(
         "Spawn Herdr worker (attended Electron)",
-        attendedElectronConfirmBody(role, modelArgv, canonicalRoot),
+        attendedElectronConfirmBody(role, modelArgv, canonicalRoot, worktreeTarget),
       );
     } catch (error) {
       throw lifecycleError(
@@ -1040,11 +1471,10 @@ export async function executeHerdrSpawnWorkerAttendedElectron(params, context, o
     // Revalidation point after confirmation, before the first mutation. A
     // change here is a post-confirmation race: the caller reports it as a
     // refusal; nothing has been mutated yet.
-    const reconfirmedRoot = resolveTrustedSpawnRepository(context.cwd, repository);
-    if (reconfirmedRoot !== canonicalRoot) {
-      throw lifecycleError("repository_mismatch", "the trusted repository changed after confirmation");
-    }
-    canonicalRoot = reconfirmedRoot;
+    canonicalRoot = revalidateSpawnAuthority(
+      context.cwd, repository, canonicalRoot, request, worktreeTarget, options, "after confirmation",
+    );
+    if (request.worktreePath) spawnCwd = worktreeTarget.worktreePath;
 
     // Tab topology only: no coordinator pane identity is resolved, used, or
     // manufactured anywhere on this path.
@@ -1052,7 +1482,7 @@ export async function executeHerdrSpawnWorkerAttendedElectron(params, context, o
     let rootPaneId;
     let layoutRaw;
     try {
-      layoutRaw = await invokeHerdr(tabCreateArgv(canonicalRoot, role), canonicalRoot, options, signal);
+      layoutRaw = await invokeHerdr(tabCreateArgv(spawnCwd, role), spawnCwd, options, signal);
       ({ rootPaneId, tabId } = parseTabCreate(layoutRaw));
     } catch (error) {
       return partialResult(error, {
@@ -1063,39 +1493,40 @@ export async function executeHerdrSpawnWorkerAttendedElectron(params, context, o
 
     let agentStartSucceeded = false;
     try {
-      // Re-check the registry between the mutations.
-      const betweenRoot = resolveTrustedSpawnRepository(context.cwd, repository);
-      if (betweenRoot !== canonicalRoot) {
-        throw lifecycleError("repository_mismatch", "the trusted repository changed between mutations");
-      }
+      // Re-check registry authorization and the bound target between mutations.
+      canonicalRoot = revalidateSpawnAuthority(
+        context.cwd, repository, canonicalRoot, request, worktreeTarget, options, "between mutations",
+      );
 
       // Start exactly once in the tab's root pane.
       const startCall = startArgv(role, rootPaneId, modelArgv);
       let startRaw;
       try {
-        startRaw = await invokeHerdr(startCall, canonicalRoot, options, signal);
+        startRaw = await invokeHerdr(startCall, spawnCwd, options, signal);
         agentStartSucceeded = true;
       } catch (error) {
         throw lifecycleError("start_failed", error?.message || "Herdr agent start failed");
       }
 
-      const postStartRoot = resolveTrustedSpawnRepository(context.cwd, repository);
-      if (postStartRoot !== canonicalRoot) {
-        throw lifecycleError("repository_mismatch", "the trusted repository changed after agent start");
-      }
-      canonicalRoot = postStartRoot;
+      canonicalRoot = revalidateSpawnAuthority(
+        context.cwd, repository, canonicalRoot, request, worktreeTarget, options, "after agent start",
+      );
 
-      const startedPaneId = readBackStart(startRaw, role, canonicalRoot, [...modelArgv]);
+      const startedPaneId = readBackStart(startRaw, role, spawnCwd, [...modelArgv]);
       if (startedPaneId !== rootPaneId) {
         throw lifecycleError("pane_mismatch", "agent start returned a different pane identity");
       }
-      const agentRaw = await invokeHerdr(["agent", "get", role], canonicalRoot, options, signal);
-      const agentReadBack = readBackAgent(agentRaw, role, canonicalRoot, [...modelArgv]);
+      const agentRaw = await invokeHerdr(["agent", "get", role], spawnCwd, options, signal);
+      const agentReadBack = readBackAgent(agentRaw, role, spawnCwd, [...modelArgv]);
       if (agentReadBack.paneId !== rootPaneId) {
         throw lifecycleError("pane_mismatch", "agent get returned a different pane identity");
       }
-      const paneRaw = await invokeHerdr(["pane", "get", rootPaneId], canonicalRoot, options, signal);
-      readBackPane(paneRaw, rootPaneId, canonicalRoot);
+      const paneRaw = await invokeHerdr(["pane", "get", rootPaneId], spawnCwd, options, signal);
+      readBackPane(paneRaw, rootPaneId, spawnCwd);
+      revalidateSpawnAuthority(
+        context.cwd, repository, canonicalRoot, request, worktreeTarget, options,
+        "during the final read-backs",
+      );
 
       return {
         schema: HERDR_LIFECYCLE_SCHEMA,
@@ -1111,6 +1542,9 @@ export async function executeHerdrSpawnWorkerAttendedElectron(params, context, o
         tabId,
         modelArgv: [...modelArgv],
         repository: canonicalRoot,
+        ...(worktreeTarget
+          ? { worktreePath: worktreeTarget.worktreePath, leaseId: worktreeTarget.leaseId }
+          : {}),
         hashes: Object.freeze({
           request: sha256(JSON.stringify(request)),
           layoutCreateResponse: sha256(layoutRaw),

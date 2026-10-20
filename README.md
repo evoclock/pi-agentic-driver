@@ -337,7 +337,12 @@ extension:
 - creates the split pane or labelled tab;
 - starts exactly one Pi agent in it;
 - verifies the role, model arguments, pane identity, and canonical repository;
-- requires native confirmation before changing layout or starting a process;
+- optionally accepts one explicit worktree target: it must be the canonical Git
+  worktree root of that same registered repository and carry an active
+  Treehouse lease observed read-only, and it is revalidated after confirmation
+  and between mutations;
+- requires native confirmation before changing layout or starting a process,
+  and shows the exact worktree target and lease identity when one is used;
 - uses fixed argv with `shell: false` and no arbitrary Herdr or shell surface;
 - returns explicit `pane_created`, `tab_created`, or `agent_started` partial
   states when only part of the operation succeeds; and
