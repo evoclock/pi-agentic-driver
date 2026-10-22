@@ -1,4 +1,8 @@
 node_modules/
+scratch/
+/scan-terms.local.json
+/.ci-buildkite/
+/.briefs/
 *.tgz
 .DS_Store
 
@@ -8,5 +12,14 @@ node_modules/
 # asgrep code-search index
 .asgrep/
 
-# Do not track the obsolete local push hook.
+# Private Stage 3 audit and local crash-test evidence
+scratch/durable-outward-effects/
+scratch/treehouse-recycle-*/
+deprecated/durable-outward-effects-crash-tests/
+
+# Obsolete local push gate; do not re-add it to the private repository.
 .githooks/pre-push
+__pycache__/
+skills/public-pr-wording/pr_wording_config.local.json
+config/model-route-policy.v1.local.json
+config/public-sync-terms.local.json

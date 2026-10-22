@@ -15,9 +15,35 @@
 // - No bypasses, no model-supplied authority, no silent escalation. The
 //   model cannot mark a call safe; classification is structural only.
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { isNativeTuiContext } from "./native_tui_context.js";
+import {
+  detectMerge, evaluateMerge, gatherMergeEvidence, loadMergePolicy,
+  reviewRecord, reviewRecordPath, sessionIdOf, MERGE_POLICY_SCHEMA,
+} from "./merge_policy.js";
 
 export const GUARD_SCHEMA = "pi-agentic-driver.attended-authority.v1";
+
+// This records a decision's stated provenance, not the identity of its author.
+// Pi's user-message type alone cannot distinguish typed owner input from a
+// pi.sendUserMessage relay. Never use this record to bypass tool-call guards.
+export function recordDecisionEvidence(input) {
+  const kind = input?.kind;
+  const quote = typeof input?.quote === "string" ? input.quote : "";
+  const where = typeof input?.where === "string" ? input.where.trim() : "";
+  const when = typeof input?.when === "string" ? input.when.trim() : "";
+  const relayer = typeof input?.relayer === "string" ? input.relayer.trim() : "";
+  const ledgerId = typeof input?.ledgerId === "string" ? input.ledgerId.trim() : "";
+  const sourced = quote.trim() && where && when && (kind === "direct" || (kind === "relay" && relayer));
+  return {
+    recordable: Boolean(sourced),
+    kind: kind === "direct" || kind === "relay" ? kind : "unknown",
+    quote, where, when, relayer: kind === "relay" ? relayer : "", ledgerId,
+    identityVerified: false,
+    irreversibleAuthority: false,
+  };
+}
 
 // Tool names that can mutate the workspace.
 const MUTATING_TOOLS = new Set(["bash", "write", "edit"]);
@@ -168,6 +194,16 @@ export function confirmationBody(toolName, input, kind) {
   ].join("\n");
 }
 
+// Structured so a coordinator relaying a headless bot result can pass it up
+// as an owner decision rather than a silent refusal.
+export function needsOwner(tier, missing, repo) {
+  return { status: "needs-owner", tier, missing, relayablePhrase: `Approve ${missing.join(", ")} for ${repo}`, nextStep: "Relay the owner's scoped words with their source and record the approval." };
+}
+
+export function mergeBlockReason(policy, source, why) {
+  return `${MERGE_POLICY_SCHEMA}: needs-owner-approval: pull-request merge refused (policy ${policy}, ${source}): ${why}`;
+}
+
 export function denialReason(toolName, kind, context) {
   if (!isNativeTuiContext(context)) {
     return `${GUARD_SCHEMA}: destructive ${toolName} operation (${kind}) refused fail-closed: no native confirmation surface in this headless context`;
@@ -185,6 +221,31 @@ export async function guardToolCall(event, ctx, options = {}) {
   const toolName = String(event?.toolName ?? "").toLowerCase();
   if (!MUTATING_TOOLS.has(toolName)) return undefined;
   const input = event?.input && typeof event.input === "object" ? event.input : {};
+  const approvalPath = /(?:^|[\s"'\\/])approvals[\\/]/;
+  if ((toolName === "write" || toolName === "edit") && approvalPath.test(String(input.path ?? input.file_path ?? ""))) {
+    return { block: true, reason: "Approval ledger writes are reserved for the trusted relay CLI.", ...needsOwner(3, ["ledger edit"], "profile") };
+  }
+  if (toolName === "bash" && (approvalPath.test(String(input.command ?? "")) || /\brecord_approval\.mjs\b/.test(String(input.command ?? "")))) {
+    return { block: true, reason: "Direct approval-ledger access through the agent shell is blocked; use agentic_relay_check_request for read-only checks.", ...needsOwner(3, ["direct ledger access"], "profile") };
+  }
+
+  // Pull-request merges follow the owner's merge policy, never a prompt. The
+  // same answer applies in a headless bot session and in direct Pi use.
+  if (toolName === "bash") {
+    const detection = detectMerge(input.command);
+    if (detection.merge) {
+      const { policy, source } = (options.loadMergePolicy ?? loadMergePolicy)();
+      const gathered = policy === "agents-after-checks-and-review" && detection.ref
+        ? (options.gatherMergeEvidence ?? gatherMergeEvidence)(detection.ref)
+        : undefined;
+      const evidence = gathered && !gathered.error
+        ? { ...gathered, mergerSession: sessionIdOf(options.context ?? ctx) }
+        : gathered;
+      const decision = evaluateMerge(policy, detection, evidence);
+      if (decision.allow) return undefined;
+      return { block: true, reason: mergeBlockReason(policy, source, decision.reason) };
+    }
+  }
 
   const bash = toolName === "bash"
     ? classifyBashCommand(input.command)
@@ -217,6 +278,58 @@ export function registerAttendedAuthorityGuard(pi, options = {}) {
   if (!pi || REGISTERED.has(pi)) return undefined;
   REGISTERED.add(pi);
   pi.on?.("tool_call", (event, ctx) => guardToolCall(event, ctx, options));
+  pi.registerTool?.({
+    name: "agentic_decision_evidence",
+    label: "Decision evidence",
+    description: "Record the stated source of a decision for a private assignment. This does not verify identity or authorize actions.",
+    parameters: {
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: ["direct", "relay"] },
+        quote: { type: "string" },
+        where: { type: "string" },
+        when: { type: "string" },
+        relayer: { type: "string" },
+        ledgerId: { type: "string" },
+      },
+      required: ["kind", "quote", "where", "when"],
+      additionalProperties: false,
+    },
+    async execute(_toolCallId, params) {
+      const record = recordDecisionEvidence(params);
+      return {
+        content: [{ type: "text", text: record.recordable
+          ? "Decision source recorded as unverified evidence; no authority created."
+          : "Decision source incomplete; quote, where, when and (for relays) relayer are required." }],
+        details: { ...record, authorityCreated: false },
+      };
+    },
+  });
+  pi.registerTool?.({
+    name: "agentic_merge_review_record",
+    label: "Merge review record",
+    description: "Record independent Standards and Spec verdicts for an exact PR head. Only read when the owner has set the merge policy to agents-after-checks-and-review.",
+    parameters: {
+      type: "object",
+      properties: {
+        headSha: { type: "string" },
+        standards: { type: "string", enum: ["PASS", "FAIL"] },
+        spec: { type: "string", enum: ["PASS", "FAIL"] },
+        standardsReviewer: { type: "string", description: "Identity or session id of the Standards reviewer." },
+        specReviewer: { type: "string", description: "Identity or session id of the Spec reviewer." },
+      },
+      required: ["headSha", "standards", "spec", "standardsReviewer", "specReviewer"],
+      additionalProperties: false,
+    },
+    async execute(_toolCallId, params, _signal, _update, context) {
+      // The recording session comes from the host, never from the model.
+      const result = reviewRecord({ ...params, recordedBySession: sessionIdOf(context) });
+      if (!result.ok) return { content: [{ type: "text", text: result.reason }], details: { recorded: false } };
+      const path = reviewRecordPath(result.record.headSha);
+      (options.writeReviewRecord ?? ((file, text) => { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, text); }))(path, `${JSON.stringify(result.record, null, 2)}\n`);
+      return { content: [{ type: "text", text: "Review verdicts recorded for this head. They do not merge anything." }], details: { recorded: true, ...result.record } };
+    },
+  });
   return { registered: true, schema: GUARD_SCHEMA };
 }
 

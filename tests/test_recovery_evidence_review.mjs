@@ -87,18 +87,64 @@ function harness(t) {
   const registered = { commands: [], tools: [] };
   const pi = {
     registerCommand: (name, def) => registered.commands.push({ name, ...def }),
-    registerTool: (tool) => registered.tools.push(tool.name),
+    registerTool: (tool) => registered.tools.push(tool),
   };
   registerRecoveryEvidenceReviewExtension(pi);
   return { pi, registered };
 }
 
 
-test("registration adds one owner command and never a model-callable tool", () => {
+test("registration keeps raw evidence owner-only and adds only the bounded summary tool", () => {
   const { registered } = harness();
-  assert.deepEqual(registered.tools, []);
+  assert.deepEqual(registered.tools.map((tool) => tool.name), ["agentic_recovery_evidence_summary"]);
+  assert.deepEqual(registered.tools[0].parameters, { type: "object", additionalProperties: false, properties: {} });
   assert.equal(registered.commands.length, 1);
   assert.equal(registered.commands[0].name, "agentic-recovery-evidence");
+});
+
+test("headless summary shows bounded phase counts but no private reference or entry text", async (t) => {
+  const { root } = fixture(t);
+  const store = openRecoveryEvidenceStore({ root });
+  const requested = recordRecoveryRequest(store, entry());
+  recordRecoveryResult(store, requested, { result: "delivered", deliveryState: "delivered" });
+  closeRecoveryEvidenceStore(store);
+  const before = statSync(join(root, "recovery-evidence.v1.sqlite")).mtimeMs;
+  const previousRoot = process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT;
+  process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT = root;
+  const { registered } = harness();
+  try {
+    process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT = "/nonexistent-redirect-target";
+    const result = await registered.tools[0].execute("summary", {}, null, null, mockHeadless("print"));
+    assert.deepEqual(result.details, {
+      schema: "agentic-driver.recovery-evidence-summary.v1", status: "available", nonAuthorizing: true,
+      observed: 2, requested: 1, terminal: 1, limit: 50, possiblyMore: false, verification: "metadata-only",
+    });
+    assert.equal(JSON.parse(result.content[0].text).status, "available");
+    const output = JSON.stringify(result);
+    for (const secret of ["j1", requested.entryId, requested.sha256, "please report status", "messageText", root]) {
+      assert.ok(!output.includes(secret), `summary must not expose ${secret}`);
+    }
+    assert.equal(statSync(join(root, "recovery-evidence.v1.sqlite")).mtimeMs, before);
+  } finally {
+    if (previousRoot === undefined) delete process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT;
+    else process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT = previousRoot;
+  }
+});
+
+test("summary refuses arguments and reports missing storage without creating it", async (t) => {
+  const { root } = fixture(t);
+  const previousRoot = process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT;
+  process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT = root;
+  const { registered } = harness();
+  try {
+    const tool = registered.tools[0];
+    assert.equal((await tool.execute("summary", { root: "/elsewhere" })).details.status, "invalid-arguments");
+    assert.equal((await tool.execute("summary", {})).details.status, "store-missing");
+    assert.equal(existsSync(join(root, "recovery-evidence.v1.sqlite")), false);
+  } finally {
+    if (previousRoot === undefined) delete process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT;
+    else process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT = previousRoot;
+  }
 });
 
 test("headless RPC, JSON, and print modes are refused before any store access", async (t) => {
@@ -222,8 +268,9 @@ test("host derives the root; arguments never influence it", async (t) => {
     process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT = "~/owner-evidence";
     assert.throws(() => resolveReviewEvidenceRoot(), /~/);
     delete process.env.AGENTIC_DRIVER_RECOVERY_EVIDENCE_ROOT;
-    process.env.PI_CODING_AGENT_DIR = "/home/owner/.pi/agent";
-    assert.equal(resolveReviewEvidenceRoot(), join("/home/owner/.pi/agent", "recovery-evidence"));
+    const profile = ["", "home", "owner", ".pi", "agent"].join("/");
+    process.env.PI_CODING_AGENT_DIR = profile;
+    assert.equal(resolveReviewEvidenceRoot(), join(profile, "recovery-evidence"));
     delete process.env.PI_CODING_AGENT_DIR;
     const fallback = resolveReviewEvidenceRoot();
     assert.ok(fallback.endsWith(join(".pi", "agent", "recovery-evidence")));

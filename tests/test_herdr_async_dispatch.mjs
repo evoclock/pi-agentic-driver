@@ -653,6 +653,22 @@ test("review_requested: a report carrying the review marker terminates the journ
   assert.match(journey.report, /status: review_requested/);
 });
 
+test("journeys lists repository records across roles and filters by journey ID", async () => {
+  const tools = [];
+  registerWorkerDispatchInterface({ registerTool: (tool) => tools.push(tool) }, {
+    journeyStore: { listJourneys: async () => [
+      { journeyId: "first", iteration: "1", role: "worker", repository: root, state: "verified", taskId: "one" },
+      { journeyId: "second", iteration: "1", role: "reviewer", repository: root, state: "blocked", taskId: "two" },
+      { journeyId: "foreign", iteration: "1", role: "worker", repository: "/elsewhere", state: "verified", taskId: "three" },
+    ] },
+  });
+  const tool = tools.find((entry) => entry.name === "agentic_worker_dispatch");
+  const all = await tool.execute("fixture", { action: "journeys" }, undefined, undefined, tuiContext());
+  assert.deepEqual(all.details.journeys.map((entry) => entry.journeyId), ["first", "second"]);
+  const filtered = await tool.execute("fixture", { action: "journeys", journeyId: "second" }, undefined, undefined, tuiContext());
+  assert.deepEqual(filtered.details.journeys.map((entry) => entry.journeyId), ["second"]);
+});
+
 test("progress snapshot: each completed step carries a compact observation, not authority", async () => {
   const fixture = herdrFixture();
   const journey = await runWorkerJourney(

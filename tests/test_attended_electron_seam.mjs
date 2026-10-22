@@ -13,7 +13,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -21,6 +21,7 @@ import {
   ATTENDED_ELECTRON_BOUNDARY,
   executeHerdrSpawnWorkerAttendedElectron,
   preflightAttendedElectronSpawn,
+  resolveTrustedSpawnRepository,
 } from "../scripts/enforcement/herdr_lifecycle_pi.js";
 import { pulseWorkerSpawnSeam } from "../scripts/enforcement/pulse_scheduler_pi.js";
 import {
@@ -115,6 +116,10 @@ function fixture(options = {}) {
     testExecutablePath: fake,
     listModels: MODEL_ROLL,
     modelsPath: join(root, "absent-models.json"),
+    routePolicy: { schema: "agentic-driver.model-route-policy.v1", routes: [{
+      provider: MODEL.split("/")[0], model: MODEL.split("/")[1], family: "fixture-family",
+      subscription: false, gateway: true, aliases: [],
+    }], bannedPairs: [], budgets: { [MODEL.split("/")[0]]: { [MODEL.split("/")[1]]: 1 } } },
   };
   if (options.missingExecutable) {
     // An injected path that does not exist: exercises the executable
@@ -136,6 +141,23 @@ function fixture(options = {}) {
   };
   return { root, coordinator, workerRoot, log, herdrOptions, context, params };
 }
+
+test("spawn target requires a registered lowercase standalone Git root, not a worktree or symlink", () => {
+  const f = fixture({ registryNames: [WORKER_REPO, "other-work", "linked-work", "alias-work"] });
+  try {
+    assert.equal(resolveTrustedSpawnRepository(f.coordinator, WORKER_REPO), realpathSync(f.workerRoot));
+    gitRepo(join(f.root, "other-work"));
+    execFileSync("git", ["-C", f.workerRoot, "worktree", "add", "-q", "--detach", join(f.root, "linked-work")]);
+    assert.throws(() => resolveTrustedSpawnRepository(f.coordinator, "linked-work"), (error) => error.code === "repository_not_git_root");
+    assert.throws(() => resolveTrustedSpawnRepository(f.coordinator, "Upper-work"), (error) => error.code === "repository_untrusted");
+    assert.throws(() => resolveTrustedSpawnRepository(f.coordinator, "unlisted"), (error) => error.code === "repository_untrusted");
+    // A registered lexical sibling cannot become a symlink to a different root.
+    symlinkSync(join(f.root, "other-work"), join(f.root, "alias-work"));
+    assert.throws(() => resolveTrustedSpawnRepository(f.coordinator, "alias-work"), (error) => error.code === "repository_untrusted");
+  } finally {
+    cleanup(f.root);
+  }
+});
 
 function readLog(log) {
   if (!existsSync(log)) return [];

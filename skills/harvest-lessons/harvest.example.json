@@ -1,0 +1,8 @@
+{
+  "repo": "OWNER/REPOSITORY",
+  "since": "2026-01-01",
+  "until": "2026-01-01",
+  "gitDir": ".",
+  "sessionGlobs": ["PATH/TO/APPROVED/SESSIONS/*.jsonl"],
+  "ledger": "docs/lessons-ledger.json"
+}

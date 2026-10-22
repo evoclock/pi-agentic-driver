@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// Thin extension wrapper for the owner-only recovery-evidence review command.
-// Deliberately registers no model-callable tool: the full evidence surface is
-// the interactive native TUI overlay only. The registration is async (the
+// Thin extension wrapper for owner-only full-evidence review and a bounded,
+// metadata-only summary tool. Full evidence remains in the native TUI overlay;
+// the model never receives entries, identifiers or retrieval references. The registration is async (the
 // trusted root is resolved and snapshotted); Pi awaits an asynchronous
 // default factory before startup continues (extensions.md), so no return
 // value or extra await is needed here.

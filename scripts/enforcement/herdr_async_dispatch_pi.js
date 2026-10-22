@@ -12,6 +12,7 @@
 import {
   executeHerdrCommunication,
   executeHerdrPromptExchange,
+  inspectHerdrJourneyMarker,
   HERDR_REPORT_MARKERS,
   HERDR_COMMUNICATION_SCHEMA,
   HERDR_COMMUNICATION_ACTIONS,
@@ -21,6 +22,7 @@ import { prepareEnvelopeForExecution, validateEnvelopeForExecution, consumeEnvel
 import { sha256Hex } from "./task_board_core_pi.js";
 import { sessionTaskDisplayId, PROVENANCE_CAPTURE_STATUSES } from "./session_tasks_core_pi.js";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 
 export const WORKER_DISPATCH_TOOL = "agentic_worker_dispatch";
 export const WORKER_DISPATCH_SCHEMA = "agentic-driver.worker-dispatch.v1";
@@ -43,19 +45,20 @@ export const REVIEW_REQUEST_MARKER = "[REVIEW_REQUESTED]";
 // other terminal state is an observed outcome, and no state is retried.
 export const WORKER_DISPATCH_TERMINAL_STATES = Object.freeze([
   "completed", "exhausted", "role-blocked", "cancelled", "failed", "waiting-approval", "worker-unresponsive",
-  "review_requested",
+  "review_requested", "blocked",
 ]);
 
 export const WORKER_DISPATCH_PARAMETERS = Object.freeze({
   type: "object",
   additionalProperties: false,
   properties: {
-    action: { type: "string", enum: ["dispatch", "pulse"] },
+    action: { type: "string", enum: ["dispatch", "pulse", "journeys"] },
     role: { type: "string", pattern: "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", maxLength: 64 },
     mode: { type: "string", enum: WORKER_DISPATCH_MODES },
     autonomy: { type: "string", enum: WORKER_DISPATCH_AUTONOMY_MODES },
     maxSteps: { type: "integer", minimum: 1, maximum: MAX_JOURNEY_STEPS },
     stepPrompt: { type: "string", minLength: 1, maxLength: 8192 },
+    journeyId: { type: "string", pattern: "^[a-zA-Z0-9_-]{1,100}$", maxLength: 100 },
     model: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,63}(?:\\/[a-z0-9][a-z0-9._-]{0,127})*$", maxLength: 192 },
     cast: {
       type: "object",
@@ -70,11 +73,15 @@ export const WORKER_DISPATCH_PARAMETERS = Object.freeze({
       additionalProperties: false,
     },
   },
-  required: ["action", "role"],
+  required: ["action"],
   allOf: [
     {
+      if: { properties: { action: { const: "pulse" } }, required: ["action"] },
+      then: { required: ["role"] },
+    },
+    {
       if: { properties: { action: { const: "dispatch" } }, required: ["action"] },
-      then: { required: ["stepPrompt"] },
+      then: { required: ["role", "stepPrompt"] },
     },
   ],
 });
@@ -296,7 +303,12 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   const taskStore = typeof options.taskStoreFactory === "function"
     ? options.taskStoreFactory(context) : options.taskStore;
   const spawnReplacement = typeof options.spawnReplacement === "function" ? options.spawnReplacement : null;
-  const journey = { mode, autonomy, role, steps: [], status: "failed", code: null, handoff: null };
+  const journeyId = params.journeyId ?? randomUUID();
+  if (!/^[a-zA-Z0-9_-]{1,100}$/.test(journeyId)) {
+    return failure("dispatch", dispatchError("journey-id-invalid", "invalid journey ID", "denied"));
+  }
+  const persistence = options.journeyStore;
+  const journey = { journeyId, mode, autonomy, role, steps: [], status: "failed", code: null, handoff: null };
   // Snapshot once at journey start; observational evidence never gates or
   // authorizes existing dispatch, replacement, or board execution.
   // Full immutable capture stays local for drift revalidation. The tool
@@ -340,7 +352,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   const finish = async (requestedStatus) => {
     let status = requestedStatus;
     if (board && boardAttemptStarted && !envelopeConsumed) {
-      const reason = ["completed", "exhausted", "cancelled", "failed", "waiting-approval", "role-blocked", "worker-unresponsive", "review_requested"].includes(status)
+      const reason = ["completed", "exhausted", "cancelled", "failed", "blocked", "waiting-approval", "role-blocked", "worker-unresponsive", "review_requested"].includes(status)
         ? status
         : status.startsWith("worker-unresponsive") ? "worker-unresponsive" : "failed";
       let consumed;
@@ -363,6 +375,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       schema: WORKER_DISPATCH_SCHEMA,
       ok: status === "completed" || status === "exhausted" || status === "waiting-approval" || status === "review_requested",
       action: "dispatch",
+      journeyId,
       mode,
       autonomy,
       ...(journey.cast ? { cast: journey.cast } : {}),
@@ -376,7 +389,7 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       handoff: journey.handoff,
       taskProvenance: projectedTaskProvenance,
       nonAuthorizing: true,
-      persisted: false,
+      persisted: Boolean(persistence),
     };
   };
 
@@ -522,10 +535,23 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   for (let stepIndex = 1; stepIndex <= maxSteps; stepIndex += 1) {
     if (signal?.aborted) { journey.status = "cancelled"; return finish("cancelled"); }
 
+    // Only in-flight and later checkpoints may skip dispatch checks: their
+    // send is uncertain or already recorded. Admitted has never sent, so
+    // restart must check liveness and obtain native confirmation again.
+    let recovering = false;
+    try {
+      recovering = Boolean(persistence && params.journeyId &&
+        (await persistence.listJourneys()).some((entry) => entry.journeyId === journeyId &&
+          entry.iteration === String(stepIndex) && entry.role === role && entry.state !== "admitted"));
+    } catch (error) {
+      journey.code = "journey-store-conflict";
+      journey.steps.push({ step: stepIndex, taskDisplayId: null, status: "blocked", error: String(error?.message || error).slice(0, 256) });
+      return finish("blocked");
+    }
     // Pulse: liveness and dispatch eligibility, no authority.
     let pulse;
     try {
-      pulse = await workerPulse(role, context, communicationOptions, signal);
+      if (!recovering) pulse = await workerPulse(role, context, communicationOptions, signal);
     } catch (error) {
       journey.status = error?.code === "role_blocked" ? "role-blocked" : "failed";
       journey.code = error?.code || "pulse-failed";
@@ -534,17 +560,17 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
     }
     // The pre-task pulse has not selected a task. Confirmed replacement here
     // cannot be tied to a task identity, so it must not offer a spawn.
-    if (autonomy !== "autonomous" && (!pulse.alive || (!pulse.dispatchEligible && pulse.status !== "blocked"))) {
+    if (!recovering && autonomy !== "autonomous" && (!pulse.alive || (!pulse.dispatchEligible && pulse.status !== "blocked"))) {
       journey.status = "worker-unresponsive";
       journey.code = "worker-unresponsive";
       journey.steps.push({ step: stepIndex, taskDisplayId: null, status: "worker-unresponsive", error: "worker unavailable before task selection" });
       journey.handoff = { attempted: false, reason: "no task selected for confirmed replacement" };
       return finish("worker-unresponsive");
     }
-    if (!pulse.alive) {
+    if (!recovering && !pulse.alive) {
       return handoffToReplacement("worker role is not alive");
     }
-    if (!pulse.dispatchEligible) {
+    if (!recovering && !pulse.dispatchEligible) {
       if (pulse.status === "blocked") {
         journey.status = "role-blocked";
         journey.code = "role_blocked";
@@ -581,9 +607,9 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       return finish("waiting-approval");
     }
 
-    // Consequential dispatch requires native confirmation, once per step,
-    // unless the initial dispatch explicitly authorized autonomous progression.
-    if (autonomy !== "autonomous") {
+    // Consequential dispatch requires native confirmation before each send;
+    // only a previously committed in-flight or later task is observe-only.
+    if (!recovering && autonomy !== "autonomous") {
       if (!isNativeTuiContext(context) || typeof context?.ui?.confirm !== "function") {
         journey.status = "failed";
         journey.steps.push({ step: stepIndex, taskDisplayId: displayTaskId, status: "failed", error: "native TUI confirmation unavailable" });
@@ -622,17 +648,43 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
       }
     }
 
+    // Commit the effect intent before invoking Herdr. An interrupted intent is
+    // ambiguous: do not replay it just because this process did not see an ack.
+    const requestId = `${journeyId}:${stepIndex}`;
+    const recordId = `jrn-${sha256Hex(requestId).slice(0, 32)}`;
+    const digest = sha256Hex(JSON.stringify({ requestId, role, taskId: task.id, stepPrompt }));
     // One prompt exchange. Any failure is terminal for the journey; there is
     // no invisible retry or resend. The legacy blocking exchange is used
     // deliberately: a journey step is a single prompt→report round-trip, and
     // the tool-facing prompt action is now async delivery-only.
-    const exchange = await executeHerdrPromptExchange(
-      { action: "prompt", role, prompt: `${stepPrompt}\nTask: ${task.id}${task.subject ? ` — ${task.subject}` : ""}`, timeoutMs: 120000 },
-      context,
-      communicationOptions,
-      signal,
+    const send = (stepSignal) => executeHerdrPromptExchange(
+      { action: "prompt", role, prompt: `${stepPrompt}\nTask: ${task.id}${task.subject ? ` — ${task.subject}` : ""}\n[journey:${requestId}]`, timeoutMs: 120000 },
+      context, communicationOptions, stepSignal,
     );
+    let exchange;
+    try {
+      if (persistence) {
+        const step = await persistence.runJourneyStep({ id: recordId, digest, role, repository: context.cwd,
+          createdAt: Date.now(), journeyId, iteration: String(stepIndex), taskId: String(task.id),
+          ...(board?.envelope?.cardId ? { cardId: board.envelope.cardId } : {}) }, {
+          send,
+          observe: (stepSignal) => inspectHerdrJourneyMarker(role, requestId, context, communicationOptions, stepSignal),
+          boundary: (name) => options.journeyBoundary?.(name, { journeyId, requestId }),
+        });
+        exchange = step.state === "verified" ? { ok: true, report: step.report, agentStatus: null }
+          : { ok: false, code: "journey-effect-uncertain" };
+      } else exchange = await send(signal);
+    } catch (error) {
+      journey.code = "journey-store-conflict";
+      journey.steps.push({ step: stepIndex, taskDisplayId: displayTaskId, status: "blocked", error: String(error?.message || error).slice(0, 256) });
+      return finish("blocked");
+    }
     if (exchange.ok !== true) {
+      if (persistence) {
+        journey.code = exchange.code || "journey-effect-uncertain";
+        journey.steps.push({ step: stepIndex, taskDisplayId: displayTaskId, status: "blocked", error: "reconcile exchange before another send" });
+        return finish("blocked");
+      }
       const unresponsive = exchange.code === "prompt_stalled" || exchange.code === "prompt_delivery_unknown" || exchange.code === "process_timeout";
       if (unresponsive) {
         if (autonomy === "autonomous" && castCheck?.authorized) {
@@ -740,7 +792,21 @@ export function registerWorkerDispatchInterface(pi, options = {}) {
           value = failure("pulse", error);
         }
       } else {
-        value = await runWorkerJourney(params ?? {}, context, options, signal);
+        try {
+          const journeyStore = options.getJourneyStore ? await options.getJourneyStore(context) : options.journeyStore;
+          if (params?.action === "journeys") {
+            if (!journeyStore) throw new Error("journey store unavailable");
+            const records = await journeyStore.listJourneys();
+            value = { schema: WORKER_DISPATCH_SCHEMA, ok: true, action: "journeys", nonAuthorizing: true,
+              journeys: records.filter((record) => (!params.role || record.role === params.role) &&
+                (!params.journeyId || record.journeyId === params.journeyId) && record.repository === context.cwd)
+                .map(({ journeyId, iteration, state, taskId, cardId }) => ({ journeyId, iteration, state, taskId, cardId })) };
+          } else {
+            value = await runWorkerJourney(params ?? {}, context, { ...options, journeyStore }, signal);
+          }
+        } catch (error) {
+          value = failure("dispatch", dispatchError("journey-store-unavailable", String(error?.message || error)));
+        }
       }
       return {
         content: [{ type: "text", text: JSON.stringify(value, null, 2) }],

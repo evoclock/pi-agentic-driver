@@ -1,3 +1,9 @@
+---
+name: tasks
+description: Use the session task list to track work and promote owner-authorized tasks to the durable board.
+license: AGPL-3.0-only
+---
+
 # tasks — unified session task list + board promotion (v1)
 
 Owner-facing skill for the pi-agentic-driver session task list and
@@ -10,7 +16,7 @@ reimplement the documented behavior of
 [`@ladbabynpm/picc-tasks`](https://www.npmjs.com/package/@ladbabynpm/picc-tasks)
 v0.2.0 (MIT, Copyright (c) 2026 Ladbaby) as prior art: the same tool names,
 the same storage model (session JSONL snapshot entries plus a disk mirror at
-`~/.pi/tasks/{taskListId}/tasks.json`), and the same result text. No code is
+the per-profile task-list mirror), and the same result text. No code is
 copied; this is a clean AGPL-3.0-only reimplementation to the same behavior
 spec. picc-tasks is an independent project by its author, used as reference;
 it is not affiliated with, nor does it endorse, pi-agentic-driver.
@@ -125,4 +131,4 @@ mutates state, writes the board, or promotes.
 ## Out of scope in v1
 
 No Obsidian work. No automatic worker proposal store. No session-end prompt.
-No completed-task promotion. No Vogelkop writer-authority changes.
+No completed-task promotion. No external board writer-authority changes.

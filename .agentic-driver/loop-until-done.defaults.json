@@ -1,0 +1,5 @@
+{
+  "maxSteps": 200,
+  "maxDurationMs": 1800000,
+  "wake": { "mode": "until-done" }
+}

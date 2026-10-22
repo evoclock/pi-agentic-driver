@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// Board-claim bridge for Vogelkop (vogelkop phase #47, step 3).
+// Board-claim bridge for external board clients.
 //
-// Vogelkop reads its TASKS.md, selects the next eligible governed card, and
-// emits a versioned claim request (vogelkop.board-claim-request.v1). This
+// A client reads its TASKS.md, selects the next eligible governed card, and
+// emits a versioned claim request. This
 // module services that request by DELEGATING to the existing board authority
 // implementation — claimCard in task_board_core_pi.js — which already owns
 // the writer-lock CAS, the claims-file HMAC, expiry/single-attempt, and
@@ -41,8 +41,8 @@ import {
 import { readFileSync, existsSync } from "node:fs";
 
 export const BOARD_CLAIM_BRIDGE_SCHEMA = "agentic-driver.board-claim-bridge.v1";
-export const BOARD_CLAIM_RECEIPT_SCHEMA = "vogelkop.board-claim-receipt.v1";
-export const REQUEST_SCHEMA = "vogelkop.board-claim-request.v1";
+export const BOARD_CLAIM_RECEIPT_SCHEMA = "agentic-driver.board-claim-receipt.v2";
+export const REQUEST_SCHEMA = "agentic-driver.board-claim-request.v2";
 
 const ROLE_NAME_RE = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
 const ROUTE_SOURCE_KINDS = new Set(["explicit-board-route", "jev-fallback"]);
@@ -98,16 +98,16 @@ export function verifyRequestedCard({ boardPath, request }) {
  */
 export function bridgeRouteFor({ request, repository }) {
   return {
-    seatId: `vogelkop-${request.route.seatAlias}`,
+    seatId: `board-${request.route.seatAlias}`,
     accountId: null,
-    provider: "vogelkop-router",
+    provider: "board-router",
     model: request.route.seatAlias,
     role: request.route.seat,
     effort: "default",
     containmentTier: "testudo",
     phase: "implement",
     routeDecisionDigest: sha256Hex(canonicalJsonString({
-      schema: "vogelkop.board-claim-route.v1",
+      schema: "agentic-driver.board-claim-route.v2",
       cardId: request.cardId,
       seatAlias: request.route.seatAlias,
       seat: request.route.seat,
@@ -125,9 +125,9 @@ export function bridgeRouteFor({ request, repository }) {
  * observation carrying the card binding, the claim/envelope identity, the
  * route source and model, the moat result, and the branch/base/scope.
  */
-export function claimFromVogelkopRequest({ boardPath, request, policy = null, now = null, backendBaseUrlFor = null, moatPolicy = null }) {
+export function claimFromBoardRequest({ boardPath, request, policy = null, now = null, backendBaseUrlFor = null, moatPolicy = null }) {
   if (request?.schema !== REQUEST_SCHEMA) {
-    return fail("request-schema-invalid", `unknown request schema "${String(request?.schema)}"`);
+    return fail("request-schema-invalid", `unsupported request schema "${String(request?.schema)}"; expected ${REQUEST_SCHEMA}`);
   }
   if (request.boardPathBasename !== "TASKS.md") {
     return fail("request-board-invalid", "the request must name the canonical TASKS.md board");

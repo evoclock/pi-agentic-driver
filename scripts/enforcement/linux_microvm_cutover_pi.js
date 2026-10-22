@@ -27,7 +27,7 @@ const REMOTE_FIXTURE = join(SCRIPT_DIR, "linux_microvm_remote_fixture.sh");
 const TARGET_EXAMPLE = join(SCRIPT_DIR, "..", "..", "config", "microvm-target.v1.example.json");
 const TARGET_PACKAGE_CONFIG = join(SCRIPT_DIR, "..", "..", "config", "microvm-target.v1.json");
 // The saved target config lives in the Pi coding-agent config directory
-// (PI_CODING_AGENT_DIR when set, otherwise ~/.pi/agent), matching how Pi
+// (PI_CODING_AGENT_DIR when set, otherwise the installed agent profile), matching how Pi
 // resolves its own config.
 function resolveTargetUserConfigPath(env = process.env) {
   const agentDir = env.PI_CODING_AGENT_DIR?.trim()
@@ -105,7 +105,7 @@ function fixtureDomainForId(fixtureId) {
 // user-supplied: arch, libvirt URI, and kernel are auto-discovered from the
 // target at probe time (informational, not configured). The model cannot
 // choose or change the target. Read order: the user's own config
-// (~/.pi/pi/config/microvm-target.v1.json) first, then the package-local
+// (the installed Pi configuration directory) first, then the package-local
 // config/microvm-target.v1.json (shipped as a REPLACE-WITH template).
 const TARGET_FIELDS = new Set(["schema", "sshTarget", "local", "vcpu", "memoryMiB", "jobPayload", "_comment"]);
 // Elastic resource allocation bounds (design section 6.1). User-configured
@@ -197,7 +197,7 @@ export function targetArgumentError(value) {
 
 function targetNotConfigured() {
   return denied("blocked", reason("policy", "target-not-configured",
-    "No trusted microVM target is configured. Copy config/microvm-target.v1.example.json to ~/.pi/pi/config/microvm-target.v1.json and set either sshTarget (user@host or ip of the machine that runs the microVM) or local:true (this session runs on a Linux machine). The model cannot choose the target."));
+    "No trusted microVM target is configured. Copy config/microvm-target.v1.example.json to the installed Pi config directory as microvm-target.v1.json and set either sshTarget (user@host or ip of the machine that runs the microVM) or local:true (this session runs on a Linux machine). The model cannot choose the target."));
 }
 
 function parseFacts(stdout, fixtureId, target) {

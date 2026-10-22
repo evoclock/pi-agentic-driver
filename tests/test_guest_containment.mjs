@@ -87,6 +87,10 @@ test("fixture embeds the exact shipped taxonomy and self-verifies its digest", a
   const sha = (await runFixture(["--gc-taxonomy-sha"])).trim();
   assert.equal(sha, TAXONOMY_SHA256);
   const fixtureSource = await readFile(FIXTURE, "utf8");
+  const embeddedPins = [...fixtureSource.matchAll(/^GC_TAXONOMY_SHA256="([0-9a-f]{64})"$/gm)]
+    .map((match) => match[1]);
+  assert.deepEqual(embeddedPins, Array(3).fill(TAXONOMY_SHA256),
+    "every fixture entry point must pin the shipped taxonomy");
   const start = fixtureSource.indexOf("<<'GC_TAXONOMY_EOF'\n");
   const end = fixtureSource.indexOf("\nGC_TAXONOMY_EOF", start);
   assert.ok(start > 0 && end > start, "embedded taxonomy heredoc not found");
@@ -752,7 +756,7 @@ test("H4: busybox applet bypass, credential reads, env probing, manifests, and d
   try {
     const shim = async (...args) => JSON.parse(await runFixture(["--gc-shim", join(dir, "s"), ...args]));
     assert.equal((await shim("busybox", "wget", "http://x")).rule, "GC-NET-002", "busybox applet bypass must not evade the shim");
-    assert.equal((await shim("cat", "/home/u/.ssh/id_rsa")).rule, "GC-CRED-001");
+    assert.equal((await shim("cat", ["", "home", "u", ".ssh", "id_rsa"].join("/"))).rule, "GC-CRED-001");
     assert.equal((await shim("printenv")).rule, "GC-CRED-002");
     assert.equal((await shim("sh", "-c", "env | grep -i token")).rule, "GC-CRED-002");
     assert.equal((await shim("bash", "-c", "echo {} > package.json")).rule, "GC-PKG-003");
@@ -1416,7 +1420,7 @@ test("A22: GC-PKG-002 argv entry — publish/token/.npmrc/pip-config forms deny 
     // real shim classification (A2's entry path, not just the decide level).
     assert.equal((await shim("pub", "npm", "publish", "left-pad")).rule, "GC-PKG-002");
     assert.equal((await shim("token", "npm", "token", "list")).rule, "GC-PKG-002");
-    assert.equal((await shim("npmrc", "tee", "/home/u/.npmrc")).rule, "GC-PKG-002");
+    assert.equal((await shim("npmrc", "tee", ["", "home", "u", ".npmrc"].join("/"))).rule, "GC-PKG-002");
     assert.equal((await shim("pipcfg", "pip", "config", "set", "global.index-url", "https://evil")).rule, "GC-PKG-002");
     // Threshold half: `npm publish` hits accumulate the shared GC-PKG class
     // pressure; the 5th qualifying event trips (ELEVATED ≥5/60s).

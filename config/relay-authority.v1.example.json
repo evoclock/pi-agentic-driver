@@ -1,0 +1,7 @@
+{
+  "schema": "relay-authority.v1",
+  "githubOwner": null,
+  "relayers": [],
+  "revokedIds": [],
+  "denyRepositories": ["external-board-*", "self-healing-swarm"]
+}

@@ -1,0 +1,7 @@
+{
+  "schema": "agentic-driver.pstack-model-roles.v1",
+  "roles": {
+    "development": null,
+    "independent-review": null
+  }
+}

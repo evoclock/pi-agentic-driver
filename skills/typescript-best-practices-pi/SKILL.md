@@ -1,0 +1,21 @@
+---
+name: typescript-best-practices-pi
+description: Review an approved TypeScript file or change for precise domain types, parsed outside data, exhaustive variants, real tests and useful diagnostics. Use explicitly for .ts or .tsx work.
+disable-model-invocation: true
+license: MIT; see ../how/LICENSE
+---
+
+# TypeScript best practices for Pi
+
+Adapted from Lauren Tan's unchanged `typescript-best-practices` and its `references/patterns.md` at `cursor/plugins@99743e9c151c8537cbbf1f98bb38f34ef3368453` (MIT). Read `../how/WORKFLOW_BOUNDARIES.md`. Apply the **actual loaded** `principle-type-system-discipline-pi` first if available; its drafted directory or a source citation is not proof it loaded. The source's Cursor `paths` trigger does not automatically register this Pi skill for every `.ts` or `.tsx` file. This is a method for approved scope, not an automatic repository-wide rewrite, package install or runtime validation guarantee.
+
+**Model legal states.** Prefer literal-discriminated variants such as `{ kind: 'loading' } | { kind: 'ready'; value: T }` over a boolean plus optional-field bag. Brand distinct semantic primitives only when mixing them is a real risk, using the repo's existing readonly brand convention; parse at creation before downstream trust. Construct non-empty tuples, pairs or start-plus-duration ranges only when they remove a **proved** impossible state. Keep ordinary `T[]` if all its operations are total; strengthen to `NonEmpty<T>` only when a loose type forces `!`, a cast or a “never happens” throw. Require exhaustive variant handling through a discriminant switch and an inline `never` assignment, so a new case fails compilation; a silent default loses the signal.
+
+**Parse at the real boundary.** Outside RPC/IPC, JSON, files, config, environment and database data is `unknown`, not `any` or a cast. Look for the repository's existing runtime schema and infer its type before hand-writing a property-by-property guard; do not add a new dependency for one guard. Narrow with a discriminant, then `in`, `typeof`/`instanceof`, an honest `isX`/`hasX` guard, and only a justified `as` **after validation**. A lying guard is worse than a visible cast. Use `satisfies` for checked literals when it preserves their narrow types. Parse once at the outside entry into a named domain value; retain runtime guards until every external caller is proved to pass that entry. For forward-compatible wire formats ignore unknown fields **only when the actual protocol contract permits it**; persisted blobs need version-aware parsing and explicit failure handling. A type, Treehouse lease or compiler pass is not security containment.
+
+**Derive and verify.** When an authoritative proto, OpenAPI, GraphQL or migration type owns a shape, derive with `Pick`, `Omit`, `Parameters`, `ReturnType`, `Awaited` or `typeof` before inventing a parallel interface. Prefer object args for interchangeable positional values, but skip extra allocation on measured hot paths. Use real test primitives and disposable/leak checks when practical; mock only unavailable boundaries and verify the UI in a running approved build when the task requires user proof. Record enough structured logger context to debug by ID rather than adding shipped `console.log`. Check source examples against this repo's actual libraries before borrowing their syntax: a sample `z.infer` does **not** authorize installing a schema package. Capture a bad input/type mismatch and a good case at the permitted boundary; no compiled example is a real app proof.
+
+- **Positive BDD:** Given an approved typed change with outside input, existing schema/test seam and a finite variant model, when Pi narrows valid and invalid input at entry, derives the owning shape and compiles an exhaustive decision, then bad semantics fail type or runtime checks while the approved user path works.
+- **Refusal BDD:** Given an unknown outside caller, missing schema/library, ungranted package/app effect or unverified guard removal, when an unsafe cast or broad typed rewrite is proposed, then keep the boundary, mark the needed check `blocked`/`unrun` and do not claim compiler success proves runtime safety.
+
+This skill's discovery is not a typed migration, real browser test or Pi loading.
