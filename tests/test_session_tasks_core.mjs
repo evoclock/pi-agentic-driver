@@ -87,7 +87,7 @@ test("taskListId resolution follows the documented env chain", () => {
   if (saved.cc === undefined) delete process.env.CLAUDE_CODE_TASK_LIST_ID; else process.env.CLAUDE_CODE_TASK_LIST_ID = saved.cc;
 });
 
-test("mirror path is directory-keyed by taskListId under ~/.pi/tasks", () => {
+test("mirror path is directory-keyed by taskListId under the profile tasks directory", () => {
   const path = tasksMirrorPath("sess-42", { tasksRoot: "/tmp/x" });
   assert.equal(path, "/tmp/x/sess-42/tasks.json");
   assert.equal(tasksMirrorPath(""), null);

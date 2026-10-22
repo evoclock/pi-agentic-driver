@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createTaskStore, sessionTasks, captureSessionTaskProvenance, revalidateSessionTaskProvenance, projectSessionTaskProvenance } from "../extensions/task-store-adapter.ts";
+import { createTaskStore, sessionTasks, captureSessionTaskProvenance, revalidateSessionTaskProvenance, projectSessionTaskProvenance } from "../lib/task-store-adapter.ts";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
@@ -77,7 +77,7 @@ test("higher disk watermark wins; equal watermark preserves branch precedence", 
     writeFileSync(join(mirror, "tasks.json"), JSON.stringify({ highWaterMark: 4, tasks: [
       { id: "4", subject: "disk", description: "disk content", status: "pending", blocks: [], blockedBy: [] },
     ] }));
-    const script = `import { captureSessionTaskProvenance, sessionTasks } from './extensions/task-store-adapter.ts';
+    const script = `import { captureSessionTaskProvenance, sessionTasks } from './lib/task-store-adapter.ts';
       const ctx = { sessionManager: { getSessionId: () => 'disk-fixture', getBranch: () => [{
         type: 'custom', customType: 'picc-tasks-state', data: { highWaterMark: 3, tasks: [
           { id: '1', subject: 'branch', description: '', status: 'pending', blocks: [], blockedBy: [] }

@@ -11,7 +11,7 @@
 // hashes; presentation is excluded from the hash; every disagreement between
 // surfaces fails closed.
 
-import { createHash, createHmac, randomBytes } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, openSync, closeSync, unlinkSync, chmodSync, statSync as fsStatSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -20,6 +20,14 @@ import { dirname, join } from "node:path";
 // are the pure router libraries; the board writer never mutates them.
 import { isDeadRoute } from "./router_replacement_pi.js";
 import { getRouteDecisionIdByDigest } from "./router_store_pi.js";
+import {
+  nfc, canonicalJson, canonicalJsonString, sha256Hex, sanitizeFreeText,
+  encodeFieldText, decodeFieldText, hashPayload, computeCardHash, computeSpecHash,
+} from "./task_board_hash_pi.js";
+export {
+  canonicalJson, canonicalJsonString, sha256Hex, sanitizeFreeText,
+  encodeFieldText, decodeFieldText, hashPayload, computeCardHash, computeSpecHash,
+};
 
 // ---------------------------------------------------------------------------
 // Closed vocabularies (§1)
@@ -68,103 +76,8 @@ const HTML_ID_MARKER_RE = /<!--\s*id:\s*([^>]*?)\s*-->/g;
 const EMOJI_RE = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{2194}-\u{21AA}]/gu;
 const EMOJI_DATE_RE = /📅\s*(\d{4}-\d{2}-\d{2})/u;
 
-function nfc(value) {
-  return typeof value === "string" ? value.normalize("NFC") : value;
-}
-
-// ---------------------------------------------------------------------------
-// Hash canonicalization (§1): SHA-256 over canonical JSON of the
-// authority-bearing fields only. Keys recursively sorted; absent optional
-// fields omitted (never null); strings NFC-normalized; presentation excluded.
-// ---------------------------------------------------------------------------
-
-export function canonicalJson(value) {
-  if (value === null || value === undefined) return undefined;
-  if (typeof value === "string") return nfc(value);
-  if (typeof value === "number" || typeof value === "boolean") return value;
-  if (Array.isArray(value)) return value.map((entry) => canonicalJson(entry));
-  if (typeof value === "object") {
-    const out = {};
-    for (const key of Object.keys(value).sort()) {
-      const normalized = canonicalJson(value[key]);
-      if (normalized !== undefined) out[key] = normalized;
-    }
-    return out;
-  }
-  return undefined;
-}
-
-export function canonicalJsonString(value) {
-  return JSON.stringify(canonicalJson(value));
-}
-
-export function sha256Hex(text) {
-  return createHash("sha256").update(text, "utf8").digest("hex");
-}
-
-// Free-text (titles, quoted instructions) is sanitized before it is ever
-// serialized into a card line: [key:: value] field syntax, stray "]", and
-// HTML-comment syntax are stripped so a hostile string cannot alter parsing
-// (§6 gate 3). Sanitization is lossy by design — it fails closed.
-export function sanitizeFreeText(text) {
-  return String(text ?? "").normalize("NFC")
-    .replace(/<!--[\s\S]*?-->/g, " ")
-    .replace(/<!--|-->/g, " ")
-    .replace(/\[[A-Za-z][A-Za-z0-9_-]*::[^\]]*\]?/g, " ")
-    .replace(/\]/g, ")")
-    .replace(/\s+/g, " ").trim();
-}
-
-// Spec/DoD text travels base64url-encoded inside a [key:: value] field: the
-// encoding round-trips byte-for-byte (so the dispatch gate can recompute the
-// hash) and cannot inject field or HTML-comment syntax.
-export function encodeFieldText(text) {
-  return Buffer.from(String(text ?? ""), "utf8").toString("base64url");
-}
-
-// F2: only the canonical base64url encoding is accepted. The decoded bytes
-// are re-encoded and compared to the original string exactly, so a permissive
-// decoder cannot smuggle non-canonical input ('***' and friends decode to
-// nothing usable and are rejected).
-export function decodeFieldText(encoded) {
-  if (typeof encoded !== "string" || encoded === "") return null;
-  try {
-    const decoded = Buffer.from(encoded, "base64url").toString("utf8");
-    if (Buffer.from(decoded, "utf8").toString("base64url") !== encoded) return null;
-    return decoded;
-  } catch {
-    return null;
-  }
-}
-
-// The authority-bearing field set. The authority-source reference is NOT
-// hash-bearing: it is recorded alongside the card, outside this payload.
-// §1 scope = paths + capability classes + explicitly unchanged paths +
-// repository identity (for user-level cards) — all hash-bearing.
-const AUTHORITY_FIELDS = Object.freeze([
-  "cardId", "lane", "flags", "priority", "dependencies", "base",
-  "specHash", "dodHash", "stoppingPoint", "scope", "unchangedPaths",
-  "capabilities", "repositories",
-]);
-
-export function hashPayload(card) {
-  const payload = {};
-  for (const field of AUTHORITY_FIELDS) {
-    const value = card[field];
-    if (value === undefined || value === null) continue;
-    if (Array.isArray(value) && value.length === 0) continue;
-    payload[field] = value;
-  }
-  return payload;
-}
-
-export function computeCardHash(card) {
-  return sha256Hex(canonicalJsonString(hashPayload(card)));
-}
-
-export function computeSpecHash(specText) {
-  return sha256Hex(nfc(String(specText)));
-}
+// Hash/text primitives live in task_board_hash_pi.js; the public board-core
+// exports above preserve every caller's existing API.
 
 // ---------------------------------------------------------------------------
 // Title stripping / normalization (§2): fields, emoji, and the ID marker are
@@ -182,7 +95,7 @@ export function stripTitle(rawTitle) {
 
 // ---------------------------------------------------------------------------
 // Parsers (§2). One tokenizer handles both surface shapes: Obsidian Kanban
-// Markdown ([id:: ...] Dataview marker) and vogelkop TASKS.md
+// Markdown ([id:: ...] Dataview marker) and external TASKS.md
 // (<!-- id: ... --> HTML-comment marker). Unknown ## headings are rejected;
 // [-] cancelled checkboxes map to #cancelled; indented continuation lines are
 // description text.
@@ -379,7 +292,7 @@ function safeJsonParse(text) {
   }
 }
 
-const CAPABILITY_REGISTRY_PATH = ".vogelkop/capabilities.json";
+const CAPABILITY_REGISTRY_PATH = ".agentic-driver/capabilities.json";
 
 function capabilityRegistryError(registryPath, reason) {
   return Object.assign(new Error(`capability registry is invalid at ${registryPath}: ${reason}`), {

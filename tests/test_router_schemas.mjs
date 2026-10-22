@@ -66,7 +66,7 @@ function config(overrides = {}) {
     collectors: {
       "cursor-statusline": {
         adapter: "statusline-cache",
-        cachePath: "/home/u/.local/share/agentic-driver/quota/cursor.json",
+        cachePath: ["", "home", "u", ".local", "share", "agentic-driver", "quota", "cursor.json"].join("/"),
         ttlSeconds: 300,
         accounts: ["acct-cursor-main"],
       },

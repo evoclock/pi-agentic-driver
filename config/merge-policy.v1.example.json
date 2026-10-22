@@ -1,0 +1,4 @@
+{
+  "schema": "pi-agentic-driver.merge-policy.v1",
+  "policy": "human-merges-only"
+}

@@ -1,0 +1,22 @@
+{
+  "_comment": "Copy to a personal config and fill in your own values. Never commit your personal copy. See SKILL.md, Setup.",
+  "owner_names": [
+    "Your Name",
+    "Yourname"
+  ],
+  "handles": [
+    "your-handle"
+  ],
+  "bot_names": [
+    "your-bot-name"
+  ],
+  "model_names": [
+    "your-model-family"
+  ],
+  "banned": [
+    {
+      "reason": "internal project name",
+      "pattern": "\\bproject-codename\\b"
+    }
+  ]
+}

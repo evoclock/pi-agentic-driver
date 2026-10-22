@@ -10,8 +10,8 @@
 //
 // Provider architecture (authoritative owner decision): direct TypeSafe
 // (`@typesafe-ai/sdk`, official SDK) is the SOLE provider. The Vercel AI
-// Gateway and the merge gateway are DROPPED — they are not valid config and
-// there is no fallback transport. When TypeSafe Direct is unconfigured the
+// No alternative gateway is valid config and there is no fallback transport.
+// When the configured direct provider is unconfigured the
 // service fails closed (model_unauthorized), with no silent degradation.
 
 import { existsSync, readFileSync } from "node:fs";

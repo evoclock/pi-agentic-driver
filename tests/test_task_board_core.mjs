@@ -1046,7 +1046,7 @@ test("comprehension gate fixture: a real rich Obsidian-style board parses cleanl
   assert.equal(isDispatchable(t5parsed, index).dispatchable, false);
 });
 
-test("comprehension gate fixture: simple vogelkop-style board parses cleanly", () => {
+test("comprehension gate fixture: simple board-client-style board parses cleanly", () => {
   const md = serializeBoard([
     fixtureCard({ cardId: "T-0004", title: "Fix login race", priority: "P0", dependencies: ["T-0001"] }),
     fixtureCard({ cardId: "T-0005", title: "Propose follow-up", priority: "P2", flags: ["proposed"] }),

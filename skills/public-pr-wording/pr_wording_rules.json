@@ -1,0 +1,60 @@
+{
+  "title_max_chars": 72,
+  "title_min_chars": 10,
+  "body_max_words": 300,
+  "body_max_lines": 40,
+  "sentence_max_words": 28,
+  "code_block_max_lines": 8,
+  "notes_max_bullets": 5,
+  "notes_bullet_max_words": 30,
+  "sections": [
+    "What changed",
+    "Why",
+    "How verified",
+    "Notes for agents"
+  ],
+  "allowed_names": [],
+  "banned": [
+    {
+      "reason": "third-person reference to the owner; write as I",
+      "pattern": "\\bthe\\s+(?:owner|user|maintainer|repo\\s+owner)\\b"
+    },
+    {
+      "reason": "battle story or debugging saga",
+      "pattern": "\\b(?:finally|frustrat\\w*|battle|saga|rabbit hole|nightmare|painful|struggl\\w*|overnight|after hours|we tried|took (?:me|us) \\w+|round \\d+|attempt #?\\d+|second attempt|third attempt|turns out|long story)\\b"
+    },
+    {
+      "reason": "chatbot phrase",
+      "pattern": "\\b(?:i hope this helps|let me know if|certainly!|great question|you're absolutely right|smoking gun)"
+    },
+    {
+      "reason": "AI vocabulary (unslop rule 7)",
+      "pattern": "\\b(?:delve|crucial|pivotal|tapestry|testament|underscore[sd]?|showcas\\w+|foster\\w*|seamless\\w*|robust)\\b"
+    },
+    {
+      "reason": "local path leaks a user or machine",
+      "pattern": "(?:/[U]sers/|/[h]ome/)[\\w.-]+"
+    },
+    {
+      "reason": "em or en dash (unslop rule 13)",
+      "pattern": "[\\u2013\\u2014]"
+    },
+    {
+      "reason": "emoji (unslop rule 18)",
+      "pattern": "[\\U0001F000-\\U0001FAFF\\u2600-\\u27BF]"
+    }
+  ],
+  "clutter": [
+    "in order to",
+    "due to the fact that",
+    "at this point in time",
+    "it is important to note that",
+    "in the event that",
+    "with regard to",
+    "subsequent to",
+    "a number of",
+    "utilize",
+    "facilitate",
+    "aforementioned"
+  ]
+}

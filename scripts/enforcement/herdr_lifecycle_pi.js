@@ -8,16 +8,18 @@
 // allowlist constant. Pane placement uses pane split directly; tab placement
 // uses tab create. Both capture the returned pane identity and start once.
 import { createHash } from "node:crypto";
-import { accessSync, constants as fsConstants, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { accessSync, constants as fsConstants, readFileSync, realpathSync, statSync, lstatSync, writeFileSync, copyFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
+import { basename, join, resolve } from "node:path";
+import { spawn, spawnSync } from "node:child_process";
 import {
   HERDR_ROLE_PATTERN,
   HERDR_ROLE_POLICY,
   resolveTrustedHerdrExecutable,
 } from "./herdr_communication_pi.js";
 import { isAttendedElectronContext, isNativeTuiContext } from "./native_tui_context.js";
+import { reserveApprovalUse, recordApprovalUse, authorizeApproval, checkRelayRequests } from "./approval_ledger_pi.js";
+import { needsOwner } from "./attended_authority_guard.js";
 
 export const HERDR_SPAWN_WORKER_TOOL = "agentic_herdr_spawn_worker";
 export const HERDR_LIFECYCLE_SCHEMA = "agentic-driver.herdr-lifecycle.v1";
@@ -40,7 +42,7 @@ const AGENT_READY_TIMEOUT_MS = 120_000;
 // The active Pi profile's model roll is user configuration, read read-only.
 // It resolves from PI_CODING_AGENT_DIR (the active profile directory); only
 // when that env var is unset does it fall back to the default per-user path
-// ~/.pi/agent/models.json (recorded in docs/package-0.1.3-design-record.md).
+// the installed agent model catalog (recorded in the package design record).
 function resolvePiModelsPath() {
   const profileDir = process.env.PI_CODING_AGENT_DIR;
   if (typeof profileDir === "string" && profileDir.trim()) {
@@ -51,7 +53,7 @@ function resolvePiModelsPath() {
 // A model selection is either a unique local model id or a provider followed
 // by one or more bounded model-id segments. Pi model IDs may use colons, but
 // provider names may not. validateSpawnParams separately bounds total length.
-const MODEL_ID_REGEXP = /^[a-z0-9][a-z0-9._:-]{0,127}$|^[a-z0-9][a-z0-9._-]{0,63}(?:\/[a-z0-9][a-z0-9._:-]{0,127})+$/;
+const MODEL_ID_REGEXP = /^(?:[A-Za-z0-9][A-Za-z0-9._:-]{0,127}|[a-z0-9][a-z0-9._-]{0,63}(?:\/[a-z0-9][a-z0-9._:-]{0,127})+|[A-Za-z0-9]+(?: [A-Za-z0-9]+){1,8})$/;
 // Closed response keys. Shapes beyond `.result.move_result.pane.pane_id` are
 // provisional from tagged-source evidence (Tranche 07) and fail closed on
 // anything extra.
@@ -77,6 +79,7 @@ export const HERDR_SPAWN_WORKER_PARAMETERS = Object.freeze({
     // must resolve to the canonical Git worktree root of the registered
     // repository and carry an active Treehouse lease observed read-only.
     worktreePath: { type: "string", minLength: 1, maxLength: 1024 },
+    authority: { type: "object", additionalProperties: false, properties: { ledgerId: { type: "string" } }, required: ["ledgerId"] },
   },
   required: ["placement", "role", "model", "repository"],
 });
@@ -171,11 +174,13 @@ export function validateSpawnParams(params) {
     throw lifecycleError("invalid_parameters", "spawn parameters must be an object", "denied");
   }
   const requiredKeys = ["placement", "role", "model", "repository"];
+  const optionalKeys = ["worktreePath", "authority"];
   const keys = Object.keys(params);
-  if (keys.length < requiredKeys.length || keys.length > requiredKeys.length + 1
+  if (keys.length < requiredKeys.length || keys.length > requiredKeys.length + optionalKeys.length
       || requiredKeys.some((k) => !keys.includes(k))
-      || keys.some((k) => !requiredKeys.includes(k) && k !== "worktreePath")) {
-    throw lifecycleError("closed_parameters", "spawn_worker accepts exactly placement, role, model, repository, and optional worktreePath", "denied");
+      || keys.some((k) => !requiredKeys.includes(k) && !optionalKeys.includes(k))
+      || (params.authority !== undefined && (!isPlainObject(params.authority) || Object.keys(params.authority).length !== 1 || typeof params.authority.ledgerId !== "string"))) {
+    throw lifecycleError("closed_parameters", "spawn_worker accepts placement, role, model, repository, and optional worktreePath or authority ledgerId", "denied");
   }
   const { placement, role, model, repository, worktreePath } = params;
   if (worktreePath !== undefined) {
@@ -202,9 +207,11 @@ export function validateSpawnParams(params) {
   if (typeof model !== "string" || model.length > 192 || !MODEL_ID_REGEXP.test(model)) {
     throw lifecycleError("model_denied", "the model must be an installed Pi provider/id or unique model id", "denied");
   }
-  return worktreePath === undefined
-    ? { placement, role, model, repository }
-    : { placement, role, model, repository, worktreePath };
+  return {
+    placement, role, model, repository,
+    ...(worktreePath === undefined ? {} : { worktreePath }),
+    ...(params.authority ? { authority: params.authority } : {}),
+  };
 }
 
 function parseJsonEnvelope(raw, label, { requireResult = false } = {}) {
@@ -469,7 +476,7 @@ function gitRoot(path) {
 // Registry lookup order (coordinator decision): the session repository's
 // own config/herdr-worker-repositories.v1.json first; when missing (ENOENT
 // only) the active Pi profile's shared config under
-// {PI_CODING_AGENT_DIR}/config/ (fallback ~/.pi/agent/config/). A malformed
+// {PI_CODING_AGENT_DIR}/config/ (fallback to the installed agent config directory). A malformed
 // registry at either level is a stop, never a silent fallthrough; only a
 // missing one falls back.
 function resolveProfileConfigPath(relative) {
@@ -532,9 +539,26 @@ export function resolveTrustedSpawnRepository(coordinatorCwd, requestedName) {
   if (candidateReal !== resolve(coordinatorReal, "..", requestedName)) {
     throw lifecycleError("repository_untrusted", "the requested repository entry is not a canonical sibling", "denied");
   }
+  let standaloneRoot = false;
+  try {
+    standaloneRoot = statSync(candidateReal).isDirectory()
+      && !lstatSync(candidate).isSymbolicLink()
+      && lstatSync(resolve(candidateReal, ".git")).isDirectory();
+  } catch { /* missing or non-directory .git is not a standalone repository */ }
+  if (basename(candidate) !== basename(candidate).toLowerCase() || !standaloneRoot) {
+    throw lifecycleError("repository_not_git_root", "the requested repository must be a lowercase, canonical Git repository root (not a worktree or symlink)", "denied");
+  }
   const root = gitRoot(candidateReal);
   if (root !== candidateReal) {
     throw lifecycleError("repository_not_git_root", "the requested repository resolved outside its Git root", "denied");
+  }
+  try {
+    const dotGit = join(candidateReal, ".git");
+    const common = gitProbe(candidateReal, ["rev-parse", "--git-common-dir"]);
+    if (!statSync(dotGit).isDirectory() || realpathSync(dotGit) !== dotGit
+        || resolve(candidateReal, common) !== dotGit) throw new Error("non-primary Git directory");
+  } catch {
+    throw lifecycleError("repository_not_git_root", "the requested repository is not a primary clone", "denied");
   }
   return candidateReal;
 }
@@ -967,18 +991,99 @@ export function resolveInstalledModel(requested, options = {}) {
     ? options.modelsPath
     : resolvePiModelsPath();
   for (const pair of readCustomModelPairs(modelsPath)) pairs.add(pair);
-  const slash = requested.indexOf("/");
-  const matches = slash < 0
-    ? [...pairs].filter((pair) => pair.slice(pair.indexOf("/") + 1) === requested)
-    : (pairs.has(requested) ? [requested] : []);
-  if (matches.length === 0) {
-    throw lifecycleError("model_unknown", "the requested model is not in the installed Pi model roll", "denied");
+  if (typeof requested !== "string" || !MODEL_ID_REGEXP.test(requested)) {
+    throw lifecycleError("model_denied", "the requested model is invalid", "denied");
   }
-  if (matches.length > 1) {
-    throw lifecycleError("model_ambiguous", "the requested model id matches more than one installed provider model", "denied");
+  // The local policy owns names, provider classes, forbidden pairs and budgets.
+  // A missing or malformed policy never authorizes an inferred gateway route.
+  let policy = options.routePolicy;
+  if (policy === undefined) {
+    const path = options.policyPath ?? resolveProfileConfigPath("config/model-route-policy.v1.local.json").path;
+    try {
+      const info = lstatSync(path);
+      // A symlink at the file or ANY parent of the path fails closed.
+      if (info.isSymbolicLink() || realpathSync(path) !== path) {
+        throw lifecycleError("model_policy_symlink", `model routing policy path is a symlink: ${path}`, "denied");
+      }
+      if (!info.isFile() || info.size > 16_384) {
+        throw lifecycleError("model_policy_invalid", `model routing policy file is invalid: ${path}`, "denied");
+      }
+      policy = JSON.parse(readFileSync(path, "utf8"));
+    } catch (error) {
+      if (error?.name === "HerdrLifecycleError") throw error;
+      if (error?.code === "ENOENT") {
+        throw lifecycleError("model_policy_missing", `model routing policy is unavailable: ${path}; fill it in locally before spawning`, "denied");
+      }
+      throw lifecycleError("model_policy_invalid", `model routing policy could not be read: ${path}`, "denied");
+    }
   }
-  // Documented Pi selection flag; no thinking suffix, no extra arguments.
-  return Object.freeze(["--model", matches[0]]);
+  if (policy?.schema !== "agentic-driver.model-route-policy.v1" || !Array.isArray(policy.routes)
+      || !Array.isArray(policy.bannedPairs) || !isPlainObject(policy.budgets)
+      || policy.routes.length > 128 || policy.bannedPairs.length > 128
+      || policy.routes.some((route) => !isPlainObject(route) || typeof route.provider !== "string"
+        || typeof route.model !== "string" || !PROVIDER_TOKEN_REGEXP.test(route.provider)
+        || !MODEL_TOKEN_REGEXP.test(route.model) || typeof route.family !== "string"
+        || !/^[a-z0-9-]{1,64}$/.test(route.family) || typeof route.subscription !== "boolean"
+        || typeof route.gateway !== "boolean" || route.subscription === route.gateway
+        || !Array.isArray(route.aliases) || route.aliases.length > 16
+        || route.aliases.some((alias) => typeof alias !== "string" || !/^[a-zA-Z0-9 ._-]{1,128}$/.test(alias)))
+      || policy.bannedPairs.some((pair) => !isPlainObject(pair)
+        || typeof pair.family !== "string" || typeof pair.provider !== "string")
+      || new Set(policy.routes.map((route) => `${route.provider}/${route.model}`)).size !== policy.routes.length) {
+    throw lifecycleError("model_policy_invalid", "the local model routing policy is invalid", "denied");
+  }
+  const normalize = (value) => value.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const explicit = requested.includes("/");
+  const matching = policy.routes.filter((route) => {
+    const pair = `${route.provider}/${route.model}`;
+    return pairs.has(pair) && (explicit ? pair === requested
+      : [route.model, ...route.aliases].some((alias) => normalize(alias) === normalize(requested)));
+  });
+  if (!matching.length) throw lifecycleError("model_unknown", "requested model has no installed policy route", "denied");
+  const family = matching[0].family;
+  if (matching.some((route) => route.family !== family)) {
+    throw lifecycleError("model_ambiguous", "the name matches multiple model families; specify a provider", "denied");
+  }
+  const routes = policy.routes.filter((route) => route.family === family && pairs.has(`${route.provider}/${route.model}`));
+  const subscriptions = routes.filter((route) => route.subscription);
+  // Production currently treats Pi roll membership as availability. The probe
+  // seam is test-only until a live non-credential availability signal is wired.
+  const available = subscriptions.filter((route) => options.isRouteAvailable?.(`${route.provider}/${route.model}`) !== false);
+  const suggestion = subscriptions.length
+    ? subscriptions.map((route) => `${route.provider}/${route.model}`).join(", ")
+    : "no installed subscription route";
+  const banned = (route) => policy.bannedPairs.some((pair) => pair.family === route.family && pair.provider === route.provider);
+  if (explicit && banned(matching[0])) {
+    throw lifecycleError("model_gateway_denied", `route forbidden; use subscription route ${suggestion}`, "denied");
+  }
+  if (!explicit && available.length > 1) {
+    throw lifecycleError("model_ambiguous", `multiple subscription routes match; specify one: ${suggestion}`, "denied");
+  }
+  if (!explicit && available.length === 1) {
+    if (banned(available[0])) {
+      throw lifecycleError("model_gateway_denied", `route forbidden; use another subscription route (available: ${suggestion})`, "denied");
+    }
+    return Object.freeze(["--model", `${available[0].provider}/${available[0].model}`]);
+  }
+  if (explicit && matching[0].subscription) {
+    // An exact request cannot silently switch to a gateway; only a loose name
+    // can use a separately budgeted fallback when its subscription is unavailable.
+    if (!available.includes(matching[0])) throw lifecycleError("model_unavailable", `subscription route ${requested} is unavailable`, "denied");
+    return Object.freeze(["--model", requested]);
+  }
+  if (explicit && available.length) {
+    throw lifecycleError("model_subscription_preferred", `use subscription route ${suggestion}; explicit provider will not be silently switched`, "denied");
+  }
+  const eligible = (explicit ? matching : routes).filter((route) => route.gateway && !banned(route));
+  if (eligible.length !== 1) {
+    throw lifecycleError("model_ambiguous", `requested model has ${eligible.length} eligible gateway routes; specify a provider (subscription: ${suggestion})`, "denied");
+  }
+  const chosen = eligible[0];
+  const budget = policy.budgets[chosen.provider]?.[chosen.model];
+  if (budget !== "no-limit" && !(typeof budget === "number" && Number.isFinite(budget) && budget > 0)) {
+    throw lifecycleError("model_budget_required", `gateway route ${chosen.provider}/${chosen.model} needs an explicit per-provider, per-model budget or no-limit; subscription route: ${suggestion}`, "denied");
+  }
+  return Object.freeze(["--model", `${chosen.provider}/${chosen.model}`]);
 }
 
 // --- Fixed argv builders ----------------------------------------------------
@@ -1048,7 +1153,8 @@ async function invokeHerdr(argv, canonicalRoot, options, signal) {
     // Production path: the shared bounded spawner in the communication adapter
     // is process-level; spawn here is reserved to the fixed argv builders via
     // the same trusted executable pin, so the native spawn seam stays closed.
-    const { spawn } = await import("node:child_process");
+    // Import statically: dispatch must not yield after the caller's final
+    // authority observation and before the actual subprocess is created.
     raw = await new Promise((resolveResult) => {
       const child = spawn(executable, spec.argv, {
         ...spec.spawnOptions,
@@ -1137,7 +1243,7 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
 
     // Native confirmation is required before any mutation; the cheap local
     // gate comes before any Herdr observation call.
-    if (!isNativeTuiContext(context)) {
+    if (!request.authority && !isNativeTuiContext(context)) {
       throw lifecycleError("native_confirmation_required", "spawn_worker requires the interactive Pi TUI", "blocked");
     }
 
@@ -1146,7 +1252,20 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
     if (duplicateRoleExists(listed, role)) {
       throw lifecycleError("duplicate_worker_name", "a live agent already holds this name", "denied");
     }
-    const confirmed = await context.ui.confirm(
+    let confirmed;
+    if (request.authority) {
+      try {
+        // A ledger grant is bound to the exact target when a worktree is
+        // requested: a repository-only grant never covers an unrecorded path.
+        await reserveApprovalUse(resolveProfileConfigPath(".").base, request.authority.ledgerId, {
+          tier: 1, repository, action: "spawn", model, role,
+          ...(worktreeTarget ? { path: worktreeTarget.worktreePath } : {}),
+        });
+        confirmed = true;
+      } catch (error) {
+        return errorResult(lifecycleError("approval_missing", error.message, "needs-owner"), needsOwner(1, ["spawn approval covering repository, model and role"], repository));
+      }
+    } else confirmed = await context.ui.confirm(
       "Spawn Herdr worker",
       [
         "One guarded composite spawn: create the requested layout, then start and verify one Pi agent.",
@@ -1247,13 +1366,22 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
       }
       const paneRaw = await invokeHerdr(["pane", "get", rootPaneId], spawnCwd, options, signal);
       readBackPane(paneRaw, rootPaneId, spawnCwd);
-      // Last check: the read-backs are asynchronous too. A registry, lease, or
+      // The read-backs are asynchronous too. A registry, lease, or
       // association change during them must not be reported as a successful
       // spawn.
       revalidateSpawnAuthority(
         context?.cwd, repository, canonicalRoot, request, worktreeTarget, options,
         "during the final read-backs",
       );
+      if (request.authority) {
+        await recordApprovalUse(resolveProfileConfigPath(".").base, request.authority.ledgerId, "spawn", repository, "spawned");
+        // The audit write can await its writer lock. Recheck authority after
+        // that wait, before reporting success for the already-started agent.
+        revalidateSpawnAuthority(
+          context?.cwd, repository, canonicalRoot, request, worktreeTarget, options,
+          "during the final approval-use audit write",
+        );
+      }
 
       return {
         schema: HERDR_LIFECYCLE_SCHEMA,
@@ -1395,6 +1523,10 @@ export async function preflightAttendedElectronSpawn(params, context, options = 
     assertHerdrExecutableAvailable(options);
     const { canonicalRoot, modelArgv, worktreeTarget } = resolveAttendedElectronPrerequisites(request, context, options);
     await observeDuplicateRole(worktreeTarget ? worktreeTarget.worktreePath : canonicalRoot, request.role, options, null);
+    revalidateSpawnAuthority(
+      context.cwd, request.repository, canonicalRoot, request, worktreeTarget, options,
+      "during the preflight agent-list observation",
+    );
     return {
       schema: HERDR_LIFECYCLE_SCHEMA,
       ok: true,
@@ -1566,9 +1698,92 @@ export async function executeHerdrSpawnWorkerAttendedElectron(params, context, o
   }
 }
 
+export async function executeHerdrRegisterRepository({ name, ledgerId }, context, options = {}) {
+  const refusal = (reason, tier = 2) => ({ schema: HERDR_LIFECYCLE_SCHEMA, ok: false, code: "registration_refused", reason, ...needsOwner(tier, [reason], name), nonAuthorizing: true });
+  if (typeof name !== "string" || !SAFE_NAME_REGEXP.test(name) || name.length > 64 || !ledgerId || typeof ledgerId !== "string") return refusal("valid repository name and ledger id");
+  const profile = resolveProfileConfigPath(".").base;
+  let config;
+  try { config = JSON.parse(readFileSync(resolve(profile, "config/relay-authority.v1.json"), "utf8")); }
+  catch { return refusal("trusted relayer configuration"); }
+  const owner = config.githubOwner;
+  if (typeof owner !== "string" || !/^[a-z][a-z0-9-]{0,38}$/.test(owner)) return refusal("configured GitHub owner");
+  if (config.denyRepositories?.some((pattern) => pattern === name || (pattern.endsWith("*") && name.startsWith(pattern.slice(0, -1))))) return refusal("repository excluded by policy", 3);
+  let root;
+  let registryWritten = false;
+  try {
+    const coordinator = realpathSync(context.cwd);
+    root = resolve(coordinator, "..", name);
+    if (lstatSync(root).isSymbolicLink() || !lstatSync(root).isDirectory() || realpathSync(root) !== root || gitRoot(root) !== root) return refusal("canonical sibling Git clone");
+    const dotGit = join(root, ".git");
+    if (!lstatSync(dotGit).isDirectory() || realpathSync(dotGit) !== dotGit) return refusal("verified origin and non-worktree clone");
+    const primaryIdentity = statIdentity(root, "registration_refused", "registration clone");
+    const gitIdentity = statIdentity(dotGit, "registration_refused", "registration Git directory");
+    let common;
+    let origin;
+    try {
+      common = gitProbe(root, ["rev-parse", "--git-common-dir"]);
+      origin = gitProbe(root, ["remote", "get-url", "origin"]);
+    } catch { return refusal("verified origin and non-worktree clone"); }
+    if (common !== ".git" || ![`git@github.com:${owner}/${name}`, `https://github.com/${owner}/${name}`].includes(origin.replace(/\.git$/, ""))) return refusal("verified origin and non-worktree clone");
+    const gh = (options.runGh ?? spawnSync)("gh", ["repo", "view", `${owner}/${name}`, "--json", "nameWithOwner,visibility"], { encoding: "utf8", timeout: 15000 });
+    const repo = JSON.parse(gh.stdout);
+    if (gh.status !== 0 || repo.nameWithOwner !== `${owner}/${name}` || repo.visibility !== "PRIVATE") return refusal("verified private repository", 3);
+    const registryPath = resolve(profile, WORKER_REPOSITORY_REGISTRY);
+    const repositories = validateRegistry(registryPath);
+    authorizeApproval(profile, ledgerId, { tier: 2, repository: name, action: "register" });
+    if (repositories.includes(name)) return { schema: HERDR_LIFECYCLE_SCHEMA, ok: true, status: "already-registered", name };
+    if (repositories.length >= 32) return refusal("registry capacity");
+    const result = await reserveApprovalUse(profile, ledgerId, { tier: 2, repository: name, action: "register" }, () => {
+      const current = validateRegistry(registryPath);
+      if (current.includes(name)) return { schema: HERDR_LIFECYCLE_SCHEMA, ok: true, status: "already-registered", name };
+      if (current.length >= 32) throw lifecycleError("registry_capacity", "registry capacity reached");
+      // Reservation can wait on the ledger lock. Reobserve the same physical
+      // primary clone and current trust here, with no await before the write.
+      const currentConfig = JSON.parse(readFileSync(resolve(profile, "config/relay-authority.v1.json"), "utf8"));
+      if (currentConfig.githubOwner !== owner) return refusal("configured GitHub owner changed");
+      if (currentConfig.denyRepositories?.some((pattern) => pattern === name || (pattern.endsWith("*") && name.startsWith(pattern.slice(0, -1))))) return refusal("repository excluded by policy", 3);
+      const currentGh = (options.runGh ?? spawnSync)("gh", ["repo", "view", `${owner}/${name}`, "--json", "nameWithOwner,visibility"], { encoding: "utf8", timeout: 15000 });
+      const currentRepo = JSON.parse(currentGh.stdout);
+      if (currentGh.status !== 0 || currentRepo.nameWithOwner !== `${owner}/${name}` || currentRepo.visibility !== "PRIVATE") return refusal("verified private repository", 3);
+      if (lstatSync(root).isSymbolicLink() || realpathSync(root) !== root
+          || statIdentity(root, "registration_refused", "registration clone") !== primaryIdentity
+          || !lstatSync(dotGit).isDirectory() || realpathSync(dotGit) !== dotGit
+          || statIdentity(dotGit, "registration_refused", "registration Git directory") !== gitIdentity
+          || gitRoot(root) !== root) return refusal("canonical sibling Git clone changed");
+      if (gitProbe(root, ["rev-parse", "--git-common-dir"]) !== common
+          || gitProbe(root, ["remote", "get-url", "origin"]) !== origin) return refusal("verified origin and non-worktree clone changed");
+      copyFileSync(registryPath, `${registryPath}.${new Date().toISOString().replaceAll(":", "-")}.bak`, fsConstants.COPYFILE_EXCL);
+      writeFileSync(registryPath, JSON.stringify({ schema: WORKER_REPOSITORY_SCHEMA, repositories: [...current, name] }, null, 2) + "\n");
+      registryWritten = true;
+      return { schema: HERDR_LIFECYCLE_SCHEMA, ok: true, status: "registered", name };
+    });
+    if (result.status === "registered") await recordApprovalUse(profile, ledgerId, "register", name, "registered");
+    return result;
+  } catch (error) { return registryWritten ? { schema: HERDR_LIFECYCLE_SCHEMA, ok: false, status: "partial", reason: error.message, name } : refusal(error.message); }
+}
+
 export function registerHerdrLifecycleInterface(pi, options = {}) {
   if (typeof pi?.registerTool !== "function" || REGISTRATIONS.has(pi)) return;
   REGISTRATIONS.add(pi);
+  pi.registerTool({
+    name: "agentic_relay_check_request",
+    label: "Check relayed request",
+    description: "Read-only verification of a relay header against recorded per-action scope. Text alone grants no authority.",
+    parameters: { type: "object", additionalProperties: false, properties: {
+      header: { type: "string", maxLength: 2048 },
+      requests: { type: "array", minItems: 1, maxItems: 8, items: { type: "object", additionalProperties: false, properties: {
+        tier: { type: "integer", minimum: 1, maximum: 3 }, repository: { type: "string" }, action: { type: "string" }, model: { type: "string" }, role: { type: "string" },
+      }, required: ["tier", "repository", "action"] } },
+    }, required: ["header", "requests"] },
+    async execute(_id, params) { return toolResult({ schema: HERDR_LIFECYCLE_SCHEMA, results: checkRelayRequests(resolveProfileConfigPath(".").base, params.header, params.requests) }); },
+  });
+  pi.registerTool({
+    name: "agentic_herdr_register_repository",
+    label: "Herdr Register Repository",
+    description: "Register a verified private sibling clone with a covering Tier 2 approval.",
+    parameters: { type: "object", additionalProperties: false, properties: { name: { type: "string" }, ledgerId: { type: "string" } }, required: ["name", "ledgerId"] },
+    async execute(_id, params, _signal, _update, context) { return toolResult(await executeHerdrRegisterRepository(params, context, options)); },
+  });
   pi.registerTool({
     name: HERDR_SPAWN_WORKER_TOOL,
     label: "Herdr Spawn Worker",

@@ -1,9 +1,7 @@
 # janus — Jev evaluation wrapper service
 
 janus is the local wrapper service for the Jev decision layer. It wraps the
-official `@typesafe-ai/sdk` (TypeSafe Direct — the sole
-provider; the Vercel AI Gateway and merge gateway were dropped by owner
-decision) and exposes one evaluation endpoint plus health/readiness/version
+official `@typesafe-ai/sdk` (the sole configured direct provider) and exposes one evaluation endpoint plus health/readiness/version
 probes on loopback.
 
 ## What janus does
@@ -63,7 +61,7 @@ Dev (from `janus/`):
 npx tsx janus/server.ts          # listens on 127.0.0.1:8787
 ```
 
-Config is read from `~/.config/typesafe-ai/jev/janus-config.json`
+Config is read from the application config directory
 (override with `JANUS_CONFIG_PATH`). Defaults work with no file:
 
 ```json

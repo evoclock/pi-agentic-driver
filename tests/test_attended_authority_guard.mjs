@@ -6,6 +6,7 @@ import {
   guardToolCall,
   registerAttendedAuthorityGuard,
   GUARD_SCHEMA,
+  recordDecisionEvidence,
 } from "../scripts/enforcement/attended_authority_guard.js";
 import { isNativeTuiContext } from "../scripts/enforcement/native_tui_context.js";
 
@@ -157,6 +158,44 @@ test("safe tool calls never reach confirmation", async () => {
   assert.equal(asked, 0);
 });
 
+test("coordinator relay cannot bypass native confirmation for irreversible operations", async () => {
+  let confirmations = 0;
+  const context = { mode: "tui", hasUI: true, ui: { confirm: async () => { confirmations += 1; return false; } } };
+  const relay = { relayer: "coordinator", quote: "Build the change", where: "fixture.invalid/message/1", when: "fixture-time" };
+  for (const command of ["git push origin main", "git push --force origin main", "rm -rf scratch/generated"]) {
+    const result = await guardToolCall({ toolName: "bash", input: { command, approval: relay } }, context);
+    assert.equal(result.block, true, command);
+  }
+  assert.equal(confirmations, 3);
+  assert.equal(await guardToolCall({ toolName: "bash", input: { command: "git diff", approval: relay } }, context), undefined);
+  assert.equal(confirmations, 3, "ordinary read must not introduce approval churn");
+  const headless = await guardToolCall({ toolName: "bash", input: { command: "git push origin main", approval: relay } }, { mode: "rpc" });
+  assert.equal(headless.block, true);
+  assert.match(headless.reason, /fail-closed/);
+  assert.equal(confirmations, 3, "headless relay must not invoke native confirmation");
+  const protectedWrite = await guardToolCall({ toolName: "write", input: { path: ".env", approval: relay } }, { mode: "rpc" });
+  assert.equal(protectedWrite.block, true, "relay metadata must not bypass a protected write");
+  assert.match(protectedWrite.reason, /fail-closed/);
+});
+
+test("decision evidence records a sourced relay without asserting identity or irreversible authority", async () => {
+  const quote = "Please draft and build the assigned change";
+  const evidence = recordDecisionEvidence({ kind: "relay", quote, relayer: "coordinator", where: "session record", when: "2026-10-17T10:00:00Z" });
+  assert.equal(evidence.recordable, true);
+  assert.equal(evidence.quote, quote);
+  assert.equal(evidence.identityVerified, false);
+  assert.equal(evidence.irreversibleAuthority, false);
+  for (const missing of ["quote", "relayer", "where", "when"]) {
+    const input = { kind: "relay", quote, relayer: "coordinator", where: "session record", when: "2026-10-17T10:00:00Z" };
+    delete input[missing];
+    assert.equal(recordDecisionEvidence(input).recordable, false, missing);
+  }
+  assert.equal(recordDecisionEvidence({ kind: "peer", quote, where: "session", when: "now" }).recordable, false);
+  const withoutEvidence = await guardToolCall({ toolName: "bash", input: { command: "git push origin main" } }, { mode: "rpc" });
+  const withEvidence = await guardToolCall({ toolName: "bash", input: { command: "git push origin main", decisionEvidence: evidence } }, { mode: "rpc" });
+  assert.deepEqual(withEvidence, withoutEvidence, "model-supplied evidence must not affect the push guard");
+});
+
 test("model-supplied authority fields cannot grant passage", async () => {
   const event = {
     toolName: "bash",
@@ -166,13 +205,21 @@ test("model-supplied authority fields cannot grant passage", async () => {
   assert.equal(result.block, true);
 });
 
-test("registration is idempotent and wires tool_call", () => {
+test("registration wires a non-authorizing decision evidence tool exactly once", async () => {
   const handlers = [];
-  const pi = { on: (name, fn) => handlers.push([name, fn]) };
+  const tools = [];
+  const pi = { on: (name, fn) => handlers.push([name, fn]), registerTool: (tool) => tools.push(tool) };
   assert.deepEqual(registerAttendedAuthorityGuard(pi), { registered: true, schema: GUARD_SCHEMA });
   assert.deepEqual(registerAttendedAuthorityGuard(pi), undefined);
-  assert.equal(handlers.length, 1);
-  assert.equal(handlers[0][0], "tool_call");
+  assert.deepEqual(handlers.map(([name]) => name), ["tool_call"]);
+  assert.deepEqual(tools.map(({ name }) => name), ["agentic_decision_evidence", "agentic_merge_review_record"]);
+  const params = { kind: "relay", quote: "Build this", relayer: "coordinator", where: "session", when: "2026-10-17T10:00:00Z" };
+  const valid = await tools[0].execute("id", params);
+  assert.equal(valid.details.recordable, true);
+  assert.equal(valid.details.authorityCreated, false);
+  assert.equal(valid.details.identityVerified, false);
+  const missingSource = await tools[0].execute("id", { ...params, where: "" });
+  assert.equal(missingSource.details.recordable, false);
 });
 
 test("native TUI predicate stays shared and fail-closed", () => {

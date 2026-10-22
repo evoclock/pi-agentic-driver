@@ -1,0 +1,415 @@
+// SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-only
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, existsSync, appendFileSync, writeFileSync, readdirSync, realpathSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
+import { setTimeout as sleep } from "node:timers/promises";
+import { openDurableAssignmentFixture as open, openDurableSeamStore } from "../scripts/enforcement/durable_assignment_pi.js";
+import { submitAsyncDispatch, observeAsyncDispatch } from "../scripts/enforcement/herdr_async_seam_pi.js";
+import { runWorkerJourney } from "../scripts/enforcement/herdr_async_dispatch_pi.js";
+
+const fixtureRoot = fileURLToPath(new URL("./fixtures/durable-assignment/", import.meta.url));
+const directory = () => mkdtempSync(join(realpathSync(tmpdir()), "durable-assignment-"));
+const assignment = (changes = {}) => ({ requestId: "request-1", assignmentId: "assignment-1", envelopeRef: "fixture-envelope", artifact: "fixture-head", role: "worker", brief: "offline test", scope: ["fixture"], ...changes });
+function fake() {
+  return {
+    schema: "fixture.fake-transport.v1", sends: [], report: undefined,
+    async send(input) { this.sends.push(input); return { deliveryId: `delivery-${this.sends.length}` }; },
+    async observe() { return this.report; },
+  };
+}
+async function until(fixture, receipt, predicate) {
+  for (let i = 0; i < 200; i++) {
+    const record = await fixture.status(receipt);
+    if (predicate(record)) return record;
+    await sleep(10);
+  }
+  assert.fail(`fixture did not settle: ${JSON.stringify(await fixture.status(receipt))}`);
+}
+async function using(t, options = {}) {
+  const transport = options.transport ?? fake();
+  const dir = options.directory ?? directory();
+  const fixture = await open({ directory: dir, transport, ...options });
+  t.after(() => fixture.close());
+  return { fixture, transport, dir };
+}
+
+test("admission returns without send; same identity survives reopen and conflicting reuse refuses", async (t) => {
+  const { fixture, transport, dir } = await using(t);
+  const receipt = await fixture.admit(assignment());
+  assert.equal(transport.sends.length, 0);
+  assert.equal((await fixture.status(receipt)).disposition, "admitted");
+  await assert.rejects(fixture.admit(assignment({ brief: "changed" })), /identity conflict/);
+  await fixture.close();
+  const reopened = await open({ directory: dir, transport });
+  t.after(() => reopened.close());
+  assert.deepEqual(await reopened.admit(assignment()), receipt);
+  assert.equal((await reopened.status(receipt)).disposition, "admitted");
+});
+
+test("single owner, missing storage, missing task definition and non-fake transport refuse", async (t) => {
+  const { dir, transport } = await using(t);
+  await assert.rejects(open({ directory: dir, transport }), /EEXIST/);
+  await assert.rejects(open({ directory: join(dir, "absent"), transport }), /ENOENT/);
+  await assert.rejects(open({ directory: dir, transport, registerTask: false }), /definition required/);
+  await assert.rejects(open({ directory: dir, transport: {} }), /fake fixture transport required/);
+  assert.equal(transport.sends.length, 0);
+});
+
+test("role idle and stale, foreign, out-of-order or oversized reports cannot settle this assignment", async (t) => {
+  const { fixture, transport, dir } = await using(t);
+  const receipt = await fixture.admit(assignment());
+  fixture.resume();
+  await until(fixture, receipt, (r) => r.disposition === "acknowledged");
+  const exact = { deliveryId: "delivery-1", assignmentId: "assignment-1", artifact: "fixture-head", role: "worker", text: "reviewable artifact" };
+  for (const report of [{ roleState: "idle" }, { ...exact, deliveryId: "old" }, { ...exact, assignmentId: "other" }, { ...exact, artifact: "old-head" }, { ...exact, role: "foreign" }, { ...exact, text: "x".repeat(16385) }]) {
+    transport.report = report;
+    await sleep(65);
+    assert.equal((await fixture.status(receipt)).disposition, "acknowledged");
+  }
+  transport.report = exact;
+  const record = await until(fixture, receipt, (r) => r.disposition === "reported");
+  assert.deepEqual(record.report, exact);
+  assert.equal(transport.sends.length, 1);
+  // No owner completion or canonical board state exists in this adapter.
+  assert.equal(receipt.nonAuthorizing, true);
+  await fixture.close();
+  const reopened = await open({ directory: dir, transport });
+  t.after(() => reopened.close());
+  assert.deepEqual((await reopened.status(receipt)).report, exact);
+  reopened.resume(); await sleep(65);
+  assert.equal(transport.sends.length, 1);
+});
+
+test("targeted cancel/hold survive restart without sending or affecting newer work", async (t) => {
+  const { fixture, transport, dir } = await using(t);
+  const old = await fixture.admit(assignment());
+  const held = await fixture.admit(assignment({ requestId: "held", assignmentId: "held" }));
+  const newer = await fixture.admit(assignment({ requestId: "new", assignmentId: "new" }));
+  await fixture.control(old, "cancel");
+  await fixture.control(held, "hold");
+  await assert.rejects(fixture.control({ ...old, digest: "forged" }, "cancel"), /unknown fixture receipt/);
+  await fixture.close();
+  const reopened = await open({ directory: dir, transport });
+  t.after(() => reopened.close());
+  reopened.resume();
+  await until(reopened, newer, (r) => r.disposition === "acknowledged");
+  assert.equal((await reopened.status(old)).disposition, "cancelled");
+  assert.equal((await reopened.status(held)).disposition, "held");
+  assert.deepEqual(transport.sends.map((a) => a.assignmentId), ["new"]);
+});
+
+test("cancel during dispatch boundary prevents the not-yet-started send", async (t) => {
+  const transport = fake();
+  let fixture, receipt;
+  ({ fixture } = await using(t, { transport, boundary: async (name) => { if (name === "after-intent") await fixture.control(receipt, "cancel"); } }));
+  receipt = await fixture.admit(assignment());
+  fixture.resume();
+  await until(fixture, receipt, (r) => r.disposition === "cancelled");
+  await sleep(65);
+  assert.equal(transport.sends.length, 0);
+});
+
+test("cancellation during in-flight send preserves ack but never attributes a later report", async (t) => {
+  const transport = fake();
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  transport.send = async function(input) { this.sends.push(input); await gate; return { deliveryId: "in-flight" }; };
+  const { fixture } = await using(t, { transport });
+  const receipt = await fixture.admit(assignment());
+  fixture.resume();
+  await until(fixture, receipt, () => transport.sends.length === 1);
+  await fixture.control(receipt, "cancel");
+  release();
+  const record = await until(fixture, receipt, (r) => r.deliveryId === "in-flight");
+  assert.equal(record.disposition, "cancelled");
+  assert.equal(record.report, undefined);
+});
+
+test("send/observation failures hold instead of retrying effects", async (t) => {
+  const transport = fake();
+  transport.send = async function(input) { this.sends.push(input); throw new Error("ambiguous ack"); };
+  const { fixture } = await using(t, { transport });
+  const receipt = await fixture.admit(assignment());
+  fixture.resume();
+  assert.equal((await until(fixture, receipt, (r) => r.disposition === "held")).reason, "delivery-unknown");
+  fixture.resume(); await sleep(65);
+  assert.equal(transport.sends.length, 1);
+  const other = fake(); other.observe = async () => { throw new Error("read failure"); };
+  const { fixture: observer } = await using(t, { transport: other });
+  const r = await observer.admit(assignment()); observer.resume();
+  assert.equal((await until(observer, r, (record) => record.disposition === "held")).reason, "observation-failed");
+});
+
+for (const [crashAt, sends, expected] of [["after-admit", 0, "acknowledged"], ["after-intent", 0, "held"], ["after-send", 1, "held"], ["after-ack", 1, "acknowledged"]]) {
+  test(`real process exit at ${crashAt}: retained checkpoint and no ambiguous replay`, async (t) => {
+    const dir = directory();
+    const child = spawnSync(process.execPath, [join(fixtureRoot, "crash-runner.mjs"), dir, crashAt], { encoding: "utf8", timeout: 10000 });
+    assert.equal(child.status, 73, child.stderr);
+    const receipt = JSON.parse(readFileSync(join(dir, "receipt.json"), "utf8"));
+    const sent = existsSync(join(dir, "sent.log")) ? readFileSync(join(dir, "sent.log"), "utf8").trim().split("\n").length : 0;
+    assert.equal(sent, sends);
+    const transport = fake();
+    // Restart refuses a stale lock. The parent owns this exact fixture and has
+    // observed child exit; it deliberately retains/quarantines only that lock.
+    await assert.rejects(open({ directory: dir, transport }), /EEXIST/);
+    renameSync(join(dir, "owner.lock"), join(dir, "exited-owner.lock"));
+    const reopened = await open({ directory: dir, transport });
+    t.after(() => reopened.close());
+    reopened.resume();
+    const record = await until(reopened, receipt, (r) => r.disposition === expected);
+    assert.equal(transport.sends.length, crashAt === "after-admit" ? 1 : 0);
+    if (expected === "held") assert.equal(record.reason, "delivery-unknown");
+    if (crashAt === "after-ack") assert.equal(record.deliveryId, "delivery-1");
+    assert.deepEqual(await reopened.admit(assignment()), receipt);
+  });
+}
+
+for (const [crashAt, sends] of [["after-submission-intent", 0], ["after-delivery-intent", 0], ["after-delivery-send", 1], ["after-delivery-ack", 1], ["after-submission-ack", 1]]) {
+  test(`real seam process exit at ${crashAt}: identities survive; no replay or guessed attribution`, async (t) => {
+    const dir = directory();
+    const child = spawnSync(process.execPath, [join(fixtureRoot, "crash-runner.mjs"), dir, crashAt], { encoding: "utf8", timeout: 10000 });
+    assert.equal(child.status, 73, child.stderr);
+    const receipt = JSON.parse(readFileSync(join(dir, "receipt.json"), "utf8"));
+    const sent = existsSync(join(dir, "sent.log")) ? readFileSync(join(dir, "sent.log"), "utf8").trim().split("\n").length : 0;
+    assert.equal(sent, sends);
+    const store = await openDurableSeamStore({ directory: dir });
+    t.after(() => store.close());
+    const calls = [];
+    const options = { offlinePersistence: store, async runProcess(input) { calls.push(input); throw new Error("restart must not access transport"); } };
+    const observation = await observeAsyncDispatch({ submissionId: receipt.submissionId }, { cwd: process.cwd() }, options);
+    assert.equal(observation.held, true);
+    assert.equal(observation.terminal, false);
+    assert.equal(observation.deliveryId, receipt.deliveryId);
+    const repeated = await submitAsyncDispatch({ role: "worker", prompt: "offline crash seam" }, { cwd: process.cwd() }, options);
+    assert.equal(repeated.submissionId, receipt.submissionId);
+    assert.equal(repeated.promptSent === true, false);
+    assert.deepEqual(calls, []);
+  });
+}
+
+test("production extension isolates sessions and retries a rejected store open", () => {
+  const home = directory();
+  const child = spawnSync(process.execPath, [join(fixtureRoot, "crash-runner.mjs"), home, "extension-sessions"],
+    { encoding: "utf8", timeout: 20000 });
+  assert.equal(child.status, 0, child.stderr || child.stdout);
+  const ids = JSON.parse(child.stdout);
+  assert.deepEqual(readdirSync(join(home, ".pi", "agentic-driver-dispatch", "sessions")).sort(), ids.sort());
+});
+
+test("admitted recovery checks liveness and requests native confirmation before a first send", async (t) => {
+  const dir = directory();
+  const child = spawnSync(process.execPath, [join(fixtureRoot, "crash-runner.mjs"), dir, "journey-before-send"],
+    { encoding: "utf8", timeout: 10000 });
+  assert.equal(child.status, 73, child.stderr);
+  const store = await openDurableSeamStore({ directory: dir });
+  t.after(() => store.close());
+  let checks = 0, confirmations = 0;
+  const result = await runWorkerJourney({ action: "dispatch", role: "worker", stepPrompt: "fixture", journeyId: "fixture-run", maxSteps: 1 },
+    { cwd: process.cwd(), mode: "tui", hasUI: true, ui: { confirm: async () => { confirmations += 1; return false; } } },
+    { journeyStore: store, taskStore: { list: () => [{ id: "fixture-task", status: "pending" }] },
+      runProcess: async ({ argv }) => {
+        if (argv[1] !== "get") throw new Error("admitted iteration must not send before confirmation");
+        checks += 1;
+        return { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: "worker", agent: "pi", status: "idle", repository: process.cwd() } }) };
+      } });
+  assert.equal(result.status, "cancelled");
+  assert.ok(checks > 0);
+  assert.equal(confirmations, 1);
+  assert.equal((await store.listJourneys())[0].state, "admitted");
+  assert.equal(existsSync(join(dir, "sent.log")), false);
+});
+
+test("orphaned durable journey tasks settle blocked without continuing wakeups", async (t) => {
+  const dir = directory();
+  const child = spawnSync(process.execPath, [join(fixtureRoot, "crash-runner.mjs"), dir, "journey-before-send"],
+    { encoding: "utf8", timeout: 10000 });
+  assert.equal(child.status, 73, child.stderr);
+  const store = await openDurableSeamStore({ directory: dir, orphanWaitMs: 25 });
+  t.after(() => store.close());
+  const other = await store.runJourneyStep({ id: "jrn-other", digest: "a".repeat(64), role: "worker",
+    repository: process.cwd(), createdAt: Date.now(), journeyId: "other", iteration: "1", taskId: "other" },
+  { send: async () => ({ ok: true, promptSent: true, report: "attributed" }), observe: async () => ({ present: true, report: "attributed" }) });
+  assert.equal(other.state, "verified");
+  await sleep(100);
+  const orphan = (await store.listJourneys()).find((entry) => entry.journeyId === "fixture-run");
+  assert.equal(orphan.state, "blocked");
+});
+
+for (const [boundary, sends, resultState] of [
+  ["before-send", 0, "verified"], ["after-send", 1, "verified"], ["after-result", 1, "verified"],
+]) {
+  test(`actual dispatch process exit ${boundary}: restart does not replay effects`, async (t) => {
+    const dir = directory();
+    const child = spawnSync(process.execPath, [join(fixtureRoot, "crash-runner.mjs"), dir, `journey-${boundary}`],
+      { encoding: "utf8", timeout: 10000 });
+    assert.equal(child.status, 73, child.stderr);
+    const count = () => existsSync(join(dir, "sent.log")) ? readFileSync(join(dir, "sent.log"), "utf8").trim().split("\n").length : 0;
+    assert.equal(count(), sends);
+    const store = await openDurableSeamStore({ directory: dir });
+    t.after(() => store.close());
+    let history = boundary === "after-send" ? readFileSync(join(dir, "pane-history.txt"), "utf8") : "fixture history";
+    let confirmations = 0;
+    let livenessChecks = 0;
+    const runProcess = async ({ argv }) => {
+      const [action, role] = [argv[1], argv[2]];
+      if (action === "get") {
+        livenessChecks += 1;
+        return { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: role, agent: "pi", status: boundary === "after-send" ? "working" : "idle", repository: process.cwd() } }) };
+      }
+      if (action === "prompt") {
+        appendFileSync(join(dir, "sent.log"), "sent\n");
+        history += `\n${argv[3]}\n[WORKER_REPORT_BEGIN]\nresult\n[WORKER_REPORT_END]`;
+        return { code: 0, stdout: JSON.stringify({ type: "agent_prompted", agent: { name: role, agent: "pi", status: "done", repository: process.cwd() } }) };
+      }
+      if (action === "read") return { code: 0, stdout: history };
+      throw new Error("unexpected fixture action");
+    };
+    const result = await runWorkerJourney({ action: "dispatch", role: "worker", stepPrompt: "fixture", journeyId: "fixture-run", maxSteps: 1 },
+      { cwd: process.cwd(), mode: "tui", hasUI: true, ui: { confirm: async () => { confirmations += 1; return true; } } },
+      { journeyStore: store, runProcess, taskStore: { list: () => [{ id: "fixture-task", status: "pending" }] } });
+    assert.equal(confirmations, boundary === "before-send" ? 1 : 0);
+    assert.equal(livenessChecks > 0, boundary !== "after-result");
+    assert.equal(count(), boundary === "before-send" ? 1 : sends);
+    assert.equal(result.journeyId, "fixture-run");
+    const record = (await store.listJourneys())[0];
+    assert.equal(record.state, resultState);
+    if (boundary === "after-send") assert.match(result.steps[0].report, /result/);
+    if (boundary === "after-result") {
+      const changed = await runWorkerJourney({ action: "dispatch", role: "worker", stepPrompt: "changed fixture",
+        journeyId: "fixture-run", maxSteps: 1 },
+      { cwd: process.cwd(), mode: "tui", hasUI: true, ui: { confirm: async () => true } },
+      { journeyStore: store, runProcess, taskStore: { list: () => [{ id: "fixture-task", status: "pending" }] } });
+      assert.equal(changed.status, "blocked");
+      assert.equal(changed.code, "journey-store-conflict");
+      assert.equal(count(), sends);
+    }
+  });
+}
+
+for (const [paneCase, expected] of [["found", "assignment-sent"], ["late-report", "assignment-sent"], ["missing", "blocked"], ["too-short", "blocked"], ["wrapped", "blocked"]]) {
+  test(`in-flight pane history ${paneCase}: restart never resends`, async (t) => {
+    const dir = directory();
+    const child = spawnSync(process.execPath, [join(fixtureRoot, "crash-runner.mjs"), dir, "journey-after-exchange"],
+      { encoding: "utf8", timeout: 10000 });
+    assert.equal(child.status, 73, child.stderr);
+    const store = await openDurableSeamStore({ directory: dir });
+    t.after(() => store.close());
+    const history = ["found", "late-report"].includes(paneCase) ? readFileSync(join(dir, "pane-history.txt"), "utf8")
+      : paneCase === "wrapped" ? readFileSync(join(dir, "pane-history.txt"), "utf8").replace("[journey:fixture-run:1]", "[journey:fixture-run:\n1]")
+        : paneCase === "too-short" ? "recent history only" : "fixture history";
+    const calls = [];
+    let reads = 0;
+    const runProcess = async ({ argv }) => {
+      calls.push(argv[1]);
+      if (argv[1] === "get") return { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: "worker", agent: "pi", status: "idle", repository: process.cwd() } }) };
+      if (argv[1] === "read") return { code: 0, stdout: paneCase === "late-report" && ++reads === 1
+        ? history.slice(0, history.indexOf("[WORKER_REPORT_BEGIN]")) : history };
+      throw new Error("unexpected resend");
+    };
+    const result = await runWorkerJourney({ action: "dispatch", role: "worker", stepPrompt: "fixture", journeyId: "fixture-run", maxSteps: 1 },
+      { cwd: process.cwd(), mode: "tui", hasUI: true, ui: { confirm: async () => true } },
+      { journeyStore: store, runProcess, taskStore: { list: () => [{ id: "fixture-task", status: "pending" }] } });
+    assert.equal(result.status, ["found", "late-report"].includes(paneCase) ? "completed" : "blocked");
+    assert.equal((await store.listJourneys())[0].state, ["found", "late-report"].includes(paneCase) ? "verified" : expected);
+    assert.equal(calls.includes("prompt"), false);
+    assert.equal(readFileSync(join(dir, "sent.log"), "utf8"), "sent\n");
+  });
+}
+
+test("stale lock requires verified same-host owner; missing metadata and live PID refuse", async (t) => {
+  const unknown = directory();
+  mkdirSync(join(unknown, "owner.lock"), { mode: 0o700 });
+  await assert.rejects(openDurableSeamStore({ directory: unknown }), /owner unknown/);
+  const foreign = directory();
+  mkdirSync(join(foreign, "owner.lock"), { mode: 0o700 });
+  writeFileSync(join(foreign, "owner.lock", "owner.json"), JSON.stringify({ pid: process.pid, hostname: "another-host", start: "old" }));
+  await assert.rejects(openDurableSeamStore({ directory: foreign }), /owner unverified/);
+  const live = directory();
+  const active = await openDurableSeamStore({ directory: live });
+  t.after(() => active.close());
+  await assert.rejects(openDurableSeamStore({ directory: live }), /owner is still active/);
+  const reused = directory();
+  mkdirSync(join(reused, "owner.lock"), { mode: 0o700 });
+  writeFileSync(join(reused, "owner.lock", "owner.json"), JSON.stringify({ pid: process.pid, hostname: hostname(), start: "different process start" }));
+  const reclaimed = await openDurableSeamStore({ directory: reused });
+  t.after(() => reclaimed.close());
+  assert.equal(existsSync(join(reused, "owner.lock", "owner.json")), true);
+  assert.equal(readdirSync(reused).some((name) => name.startsWith("owner-stale-")), false);
+  await reclaimed.close();
+  assert.equal(existsSync(join(reused, "owner.lock")), false);
+  const reclaiming = directory();
+  mkdirSync(join(reclaiming, "owner-reclaim.lock"), { mode: 0o700 });
+  await assert.rejects(openDurableSeamStore({ directory: reclaiming }), /reclamation unknown/);
+});
+
+const seamRecord = (changes = {}) => ({ id: "sub-offline-1", digest: "a".repeat(64), role: "worker", repository: fixtureRoot, createdAt: 1, phase: "pending", ...changes });
+
+test("seam store commits one stable receipt across concurrent reservation and reopen", async (t) => {
+  const dir = directory();
+  const store = await openDurableSeamStore({ directory: dir });
+  t.after(() => store.close());
+  const results = await Promise.all([store.reserve("submission", seamRecord()), store.reserve("submission", seamRecord({ createdAt: 2 }))]);
+  assert.equal(results.filter((r) => r.created).length, 1);
+  assert.deepEqual(results[0].record, results[1].record);
+  await store.update("submission", "sub-offline-1", "a".repeat(64), { phase: "accepted", deliveryId: "dlv-offline-1" });
+  await store.close();
+  const reopened = await openDurableSeamStore({ directory: dir });
+  t.after(() => reopened.close());
+  assert.equal((await reopened.get("submission", "sub-offline-1")).deliveryId, "dlv-offline-1");
+  assert.equal((await reopened.reserve("submission", seamRecord())).created, false);
+  await assert.rejects(reopened.reserve("submission", seamRecord({ digest: "b".repeat(64) })), /identity conflict/);
+  await assert.rejects(reopened.update("submission", "sub-offline-1", "b".repeat(64), { phase: "accepted" }), /unknown seam identity/);
+});
+
+test("seam store refuses raw snapshots, prompts, unproved reports and mutable identities", async (t) => {
+  const store = await openDurableSeamStore({ directory: directory() });
+  t.after(() => store.close());
+  for (const field of ["pre", "post", "sentPrompt", "prompt", "snapshot", "reportMarkers"]) {
+    await assert.rejects(store.reserve("submission", seamRecord({ [field]: "must not persist" })), /unsupported seam field/);
+  }
+  await store.reserve("submission", seamRecord());
+  await assert.rejects(store.update("submission", "sub-offline-1", "a".repeat(64), { role: "other" }), /immutable seam identity/);
+  const delivery = seamRecord({ id: "dlv-offline-1", phase: undefined, state: "delivered" });
+  delete delivery.phase;
+  await store.reserve("delivery", delivery);
+  await assert.rejects(store.update("delivery", delivery.id, delivery.digest, { report: "unproved" }), /proof required/);
+  await store.update("delivery", delivery.id, delivery.digest, { state: "answered", report: "proven report", proof: "snapshot-backed-v1" });
+  await assert.rejects(store.update("delivery", delivery.id, delivery.digest, { state: "answered", report: "replacement", proof: "snapshot-backed-v1" }), /immutable/);
+  assert.equal((await store.get("delivery", delivery.id)).report, "proven report");
+});
+
+test("seam store retains racing ack metadata without clearing holds or attributing a held report", async (t) => {
+  const store = await openDurableSeamStore({ directory: directory() });
+  t.after(() => store.close());
+  const sub = seamRecord();
+  await store.reserve("submission", sub);
+  await store.update("submission", sub.id, sub.digest, { phase: "held" });
+  const ack = await store.update("submission", sub.id, sub.digest, { phase: "accepted", acceptedAt: "2026-10-05T00:00:00.000Z" });
+  assert.equal(ack.phase, "held");
+  assert.equal(typeof ack.acceptedAt, "string");
+  const delivery = { ...sub, id: "dlv-held-1", state: "queued" };
+  delete delivery.phase;
+  await store.reserve("delivery", delivery);
+  await store.update("delivery", delivery.id, delivery.digest, { state: "held" });
+  const observed = await store.update("delivery", delivery.id, delivery.digest, { state: "delivered", acceptedAt: ack.acceptedAt });
+  assert.equal(observed.state, "held");
+  assert.equal(observed.acceptedAt, ack.acceptedAt);
+  await assert.rejects(store.update("delivery", delivery.id, delivery.digest, { state: "answered", report: "held report", proof: "snapshot-backed-v1" }), /proof required/);
+});
+
+test("seam store refuses competing owners and preserves tombstones when full", async (t) => {
+  const dir = directory();
+  const store = await openDurableSeamStore({ directory: dir });
+  t.after(() => store.close());
+  await assert.rejects(openDurableSeamStore({ directory: dir }), /owner is still active/);
+  for (let i = 0; i < 64; i++) await store.reserve("submission", seamRecord({ id: `sub-${i}` }));
+  await assert.rejects(store.reserve("submission", seamRecord({ id: "sub-overflow" })), /capacity reached/);
+  assert.equal((await store.get("submission", "sub-0")).phase, "pending");
+  await store.close();
+  await assert.rejects(store.get("submission", "sub-0"), /closed/);
+});

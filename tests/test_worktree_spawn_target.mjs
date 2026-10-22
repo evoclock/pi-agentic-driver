@@ -17,18 +17,28 @@ import {
 import { statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import childProcess, { execFileSync } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import {
   executeHerdrSpawnWorker,
   executeHerdrSpawnWorkerAttendedElectron,
   preflightAttendedElectronSpawn,
+  resolveTrustedSpawnRepository,
   resolveWorktreeSpawnTarget as resolveWorktreeSpawnTargetPublic,
   validateSpawnParams,
 } from "../scripts/enforcement/herdr_lifecycle_pi.js";
 
 const WORKER_REPO = "agents-work";
-const MODEL = "glm53flash/glm-5.3-flash";
-const MODEL_ROLL = "provider model\nzai glm-5.3\nglm53flash glm-5.3-flash\n";
+const MODEL = "fixture/model-x";
+const MODEL_ROLL = "provider model\nfixture model-x\n";
+// Synthetic fixture policy only: the private resolver requires a route policy
+// through the existing internal seam. Never a personal policy file.
+const ROUTE_POLICY = Object.freeze({
+  schema: "agentic-driver.model-route-policy.v1",
+  routes: [{ provider: "fixture", model: "model-x", family: "family-x", subscription: true, gateway: false, aliases: ["Model X"] }],
+  bannedPairs: [],
+  budgets: {},
+});
 // Synthetic fixture identity only: never a real session lease id or timestamp.
 const LEASE_ID = "0123456789abcdef0123456789abcdef";
 const LEASE_TIMESTAMP = "2020-01-01T00:00:00.000000+00:00";
@@ -125,7 +135,7 @@ function makeWorktree(repo, path, branch = "lease-slot") {
 }
 
 function fixture(options = {}) {
-  const root = mkdtempSync(join(tmpdir(), "worktree-spawn-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "worktree-spawn-")));
   const coordinator = gitRepo(join(root, "coordinator"));
   const workerRoot = gitRepo(join(root, WORKER_REPO));
   const registryDir = join(coordinator, "config");
@@ -171,6 +181,7 @@ function fixture(options = {}) {
     testExecutablePath: fake,
     listModels: MODEL_ROLL,
     modelsPath: join(root, "absent-models.json"),
+    routePolicy: ROUTE_POLICY,
     treehouseStatus: () => readFileSync(statePath, "utf8"),
   };
   if (options.noTreehouseSeam) delete herdrOptions.treehouseStatus;
@@ -244,6 +255,53 @@ test("authorized repo + active exact lease + confirmation spawns once at the exa
     cleanup(f.root);
   }
 });
+
+// Observe the actual native dispatch, not a child's later log write. A queued
+// revocation may run after spawn but before the child executes its fake body.
+for (const boundary of ["tui", "attended"]) {
+  for (const mutation of ["layout", "start"]) {
+    test(`${boundary}: ${mutation} dispatch has no owned await after the authority fence`, async () => {
+      const f = fixture({ boundary });
+      const originalSpawn = childProcess.spawn;
+      const dispatches = [];
+      let observations = 0;
+      let revoked = false;
+      try {
+        process.env.HERDR_PANE_ID = "w1:p1";
+        f.herdrOptions.treehouseStatus = () => {
+          const snapshot = readFileSync(f.statePath, "utf8");
+          if (++observations === (mutation === "layout" ? 2 : 3)) {
+            queueMicrotask(() => { writeFileSync(f.statePath, "[]"); revoked = true; });
+          }
+          return snapshot;
+        };
+        childProcess.spawn = (executable, argv, options) => {
+          assert.equal(executable, f.herdrOptions.testExecutablePath);
+          dispatches.push({ command: argv.slice(0, 2), revoked, leases: JSON.parse(readFileSync(f.statePath, "utf8")).length });
+          return originalSpawn(executable, argv, options);
+        };
+        syncBuiltinESMExports();
+        const execute = boundary === "tui" ? executeHerdrSpawnWorker : executeHerdrSpawnWorkerAttendedElectron;
+        const result = await execute(f.params, f.context, f.herdrOptions);
+        assert.equal(revoked, true);
+        const commands = [["agent", "list"], ["tab", "create"], ...(mutation === "start" ? [["agent", "start"]] : [])];
+        console.log("dispatch timing", JSON.stringify({ boundary, mutation, dispatches, result }));
+        assert.deepEqual(dispatches.map((entry) => entry.command), commands);
+        assert.ok(dispatches.every((entry) => !entry.revoked && entry.leases === 1), "every actual dispatch precedes revocation, without an owned yield");
+        assert.deepEqual(readLog(f.log).map((entry) => entry.argv.slice(0, 2)), commands, "one actual effect per dispatch, no retry");
+        assert.equal(result.ok, false);
+        assert.equal(result.code, "worktree_target_changed");
+        assert.equal(result.partial, mutation === "layout" ? "tab_created" : "agent_started", "revocation AFTER dispatch must preserve the real partial effect");
+        assert.equal(result.paneId, "w7:p10");
+        assert.equal(result.tabId, "w7:t3");
+      } finally {
+        childProcess.spawn = originalSpawn;
+        syncBuiltinESMExports();
+        cleanup(f.root);
+      }
+    });
+  }
+}
 
 test("a target denial mutates nothing and never spawns", async () => {
   const f = fixture({ confirm: async () => false });
@@ -532,6 +590,73 @@ test("WT-03/STD-03/SPEC-001: a lease change during agent-get or pane-get is refu
         cleanup(f.root);
       }
     }
+  }
+});
+
+for (const revokedAuthority of ["lease", "registry"]) {
+  test(`SPEC-02: preflight refuses ${revokedAuthority} revocation during agent-list`, async () => {
+    const f = fixture({ boundary: "attended" });
+    f.context.ui.confirm = () => { throw new Error("preflight must not request confirmation"); };
+    const revoke = revokedAuthority === "lease" ? revokeDuring : revokeRegistryDuring;
+    revoke(f, "agent", "list");
+    try {
+      const result = await preflightAttendedElectronSpawn(f.params, f.context, f.herdrOptions);
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.equal(result.code, revokedAuthority === "lease" ? "worktree_target_changed" : "repository_untrusted");
+      assert.equal(result.status, revokedAuthority === "lease" ? "blocked" : "denied");
+      assert.equal(result.leaseId, undefined, "no stale lease is certified");
+      assert.equal(result.partial, undefined, "preflight has not mutated layout or started an agent");
+      assert.deepEqual(readLog(f.log).map((entry) => entry.argv), [["agent", "list"]]);
+    } finally {
+      cleanup(f.root);
+    }
+  });
+}
+
+test("ST-01/SPEC-03: the mandatory primary-clone resolver ignores inherited Git selectors", () => {
+  const f = fixture();
+  const before = process.env.GIT_COMMON_DIR;
+  process.env.GIT_COMMON_DIR = join(f.root, "foreign-common");
+  try {
+    assert.equal(resolveTrustedSpawnRepository(f.coordinator, WORKER_REPO), realpathSync(f.workerRoot));
+  } finally {
+    if (before === undefined) delete process.env.GIT_COMMON_DIR;
+    else process.env.GIT_COMMON_DIR = before;
+    cleanup(f.root);
+  }
+});
+
+test("ST-01/SPEC-03: the mandatory primary-clone common-dir probe is bounded", () => {
+  const f = fixture();
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  const fakeGit = join(f.root, "git");
+  writeFileSync(fakeGit, `#!/usr/bin/env node
+import { spawnSync } from "node:child_process";
+const args = process.argv.slice(2);
+if (args.slice(-2).join(" ") === "rev-parse --git-common-dir") {
+  setTimeout(() => process.stdout.write(".git\\n"), 11000);
+} else {
+  const result = spawnSync(${JSON.stringify(realGit)}, args, { encoding: "utf8", env: process.env });
+  process.stdout.write(result.stdout ?? "");
+  process.stderr.write(result.stderr ?? "");
+  process.exit(result.status ?? 1);
+}
+`);
+  chmodSync(fakeGit, 0o755);
+  const before = process.env.PATH;
+  process.env.PATH = `${f.root}:${before}`;
+  try {
+    const started = Date.now();
+    let failure;
+    try { resolveTrustedSpawnRepository(f.coordinator, WORKER_REPO); }
+    catch (error) { failure = error; }
+    assert.ok(Date.now() - started < 10_750, "the primary-clone probe respects its ten-second bound");
+    assert.equal(failure?.code, "repository_not_git_root", "a timed-out Git observation must refuse");
+    assert.equal(failure?.status, "denied");
+    assert.deepEqual(readLog(f.log), [], "the resolver never invokes Herdr");
+  } finally {
+    process.env.PATH = before;
+    cleanup(f.root);
   }
 });
 

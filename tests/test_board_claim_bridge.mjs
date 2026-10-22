@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// Board-claim bridge tests (vogelkop phase #47): the five required cases —
+// Board-claim bridge tests (board-client phase #47): the five required cases —
 // concurrent claim exclusivity, stale/tampered card refusal, explicit board
 // route versus Jev fallback, model-moat denial, and proof that the bridge
-// path never lets Vogelkop mutate lanes/writer state. The bridge delegates to
+// path never lets Board client mutate lanes/writer state. The bridge delegates to
 // the existing claimCard; these tests exercise the bridge surface only.
 
 import test from "node:test";
@@ -18,14 +18,14 @@ import {
   claimsPath, validateBoard, computeCardHash,
 } from "../scripts/enforcement/task_board_core_pi.js";
 import {
-  claimFromVogelkopRequest as claimFromVogelkopRequestBase, verifyRequestedCard, bridgeRouteFor,
+  claimFromBoardRequest as claimFromBoardRequestBase, verifyRequestedCard, bridgeRouteFor,
   BOARD_CLAIM_BRIDGE_SCHEMA, BOARD_CLAIM_RECEIPT_SCHEMA, REQUEST_SCHEMA,
 } from "../scripts/enforcement/board_claim_bridge_pi.js";
 
 const authority = { source: "instruction", sessionOrReportId: "vk-bridge-test", quotedInstruction: "write the card" };
 const LOOPBACK = "http://127.0.0.1:11434/v1";
-function claimFromVogelkopRequest(input) {
-  return claimFromVogelkopRequestBase({ backendBaseUrlFor: () => LOOPBACK, ...input });
+function claimFromBoardRequest(input) {
+  return claimFromBoardRequestBase({ backendBaseUrlFor: () => LOOPBACK, ...input });
 }
 
 function freshDir() {
@@ -53,7 +53,7 @@ function withPolicy(boardPath, overrides = {}) {
 }
 
 // A card written through the DRIVER's trusted writer (surface "tasks" IS the
-// vogelkop surface: HTML id markers), with an explicit route tag.
+// board-client surface: HTML id markers), with an explicit route tag.
 function fixtureCard(dir, { title = "Bridge work", tags = ["route-router-implementer"] } = {}) {
   const boardPath = join(dir, "TASKS.md");
   const r = writeCard({
@@ -84,12 +84,19 @@ function requestFor({ cardId, card }, overrides = {}) {
   };
 }
 
+test("legacy v1 requests fail closed and identify the v2 contract", () => {
+  const receipt = claimFromBoardRequest({ request: { schema: "vogelkop.board-claim-request.v1" } });
+  assert.equal(receipt.ok, false);
+  assert.equal(receipt.code, "request-schema-invalid");
+  assert.match(receipt.reason, /agentic-driver\.board-claim-request\.v2/);
+});
+
 test("a valid request claims through the existing claim machinery and returns a versioned receipt", () => {
   const dir = freshDir();
   try {
     const fixture = fixtureCard(dir);
     withPolicy(fixture.boardPath);
-    const receipt = claimFromVogelkopRequest({ boardPath: fixture.boardPath, request: requestFor(fixture) });
+    const receipt = claimFromBoardRequest({ boardPath: fixture.boardPath, request: requestFor(fixture) });
     assert.equal(receipt.ok, true, JSON.stringify(receipt));
     assert.equal(receipt.schema, BOARD_CLAIM_RECEIPT_SCHEMA);
     assert.equal(receipt.claimed, true);
@@ -119,8 +126,8 @@ test("concurrent claim exclusivity: two racing requests for the same card, one w
     withPolicy(fixture.boardPath);
     const request = requestFor(fixture);
     const [a, b] = await Promise.all([
-      Promise.resolve().then(() => claimFromVogelkopRequest({ boardPath: fixture.boardPath, request })),
-      Promise.resolve().then(() => claimFromVogelkopRequest({ boardPath: fixture.boardPath, request })),
+      Promise.resolve().then(() => claimFromBoardRequest({ boardPath: fixture.boardPath, request })),
+      Promise.resolve().then(() => claimFromBoardRequest({ boardPath: fixture.boardPath, request })),
     ]);
     const winner = a.ok ? a : b;
     const loser = a.ok ? b : a;
@@ -146,7 +153,7 @@ test("stale request: the card hash moved after the request was minted — refuse
     });
     assert.equal(changed.ok, true, JSON.stringify(changed));
     const request = requestFor(fixture);
-    const receipt = claimFromVogelkopRequest({ boardPath: fixture.boardPath, request });
+    const receipt = claimFromBoardRequest({ boardPath: fixture.boardPath, request });
     assert.equal(receipt.ok, false);
     assert.equal(receipt.code, "card-hash-mismatch");
     assert.ok(receipt.reason.includes("stale or tampered"));
@@ -162,7 +169,7 @@ test("tampered request: a forged cardHash is refused and claims nothing", () => 
     const fixture = fixtureCard(dir);
     withPolicy(fixture.boardPath);
     const request = requestFor(fixture, { cardHash: "b".repeat(64) });
-    const receipt = claimFromVogelkopRequest({ boardPath: fixture.boardPath, request });
+    const receipt = claimFromBoardRequest({ boardPath: fixture.boardPath, request });
     assert.equal(receipt.ok, false);
     assert.equal(receipt.code, "card-hash-mismatch");
     const state = readClaimsState(fixture.boardPath);
@@ -183,7 +190,7 @@ test("explicit board route WINS: the bridge never re-routes an explicit route", 
     const routeAgain = bridgeRouteFor({ request, repository: dir });
     assert.equal(route.routeDecisionDigest, routeAgain.routeDecisionDigest);
     // The envelope carries exactly the request's route identity.
-    const receipt = claimFromVogelkopRequest({ boardPath: fixture.boardPath, request });
+    const receipt = claimFromBoardRequest({ boardPath: fixture.boardPath, request });
     assert.equal(receipt.ok, true);
     assert.equal(receipt.route.seatAlias, "router-implementer");
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -201,7 +208,7 @@ test("Jev fallback route is honored as a fallback and recorded as such", () => {
         seatAlias: "router-reviewer",
       },
     });
-    const receipt = claimFromVogelkopRequest({ boardPath: fixture.boardPath, request });
+    const receipt = claimFromBoardRequest({ boardPath: fixture.boardPath, request });
     assert.equal(receipt.ok, true, JSON.stringify(receipt));
     assert.deepEqual(receipt.route.source, { kind: "jev-fallback", requestId: "2026-09-23T00:00:00.000Z" });
     assert.equal(receipt.route.model, "router-reviewer");
@@ -217,7 +224,7 @@ test("model-moat denial: a request whose moat gate refused is never claimed", ()
     const request = requestFor(fixture, {
       moat: { ok: false, reason: "backend host \"api.example.com\" is not loopback — the model-moat local-only gate denies hosted egress by default (moat-denied)" },
     });
-    const receipt = claimFromVogelkopRequest({ boardPath: fixture.boardPath, request, backendBaseUrlFor: () => "https://api.example.com/v1" });
+    const receipt = claimFromBoardRequest({ boardPath: fixture.boardPath, request, backendBaseUrlFor: () => "https://api.example.com/v1" });
     assert.equal(receipt.ok, false);
     assert.equal(receipt.code, "moat-denied");
     const state = readClaimsState(fixture.boardPath);
@@ -230,7 +237,7 @@ test("a moat-passed request records the moat result on the receipt verbatim", ()
   try {
     const fixture = fixtureCard(dir);
     withPolicy(fixture.boardPath);
-    const receipt = claimFromVogelkopRequest({ boardPath: fixture.boardPath, request: requestFor(fixture) });
+    const receipt = claimFromBoardRequest({ boardPath: fixture.boardPath, request: requestFor(fixture) });
     assert.equal(receipt.ok, true);
     assert.deepEqual(receipt.moat, { ok: true, locality: "local", basis: "trusted-backend-registry" });
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -244,7 +251,7 @@ test("the bridge mutates only the driver-owned claim state: lanes, flags, and wr
     // Snapshot the board bytes and the writer state before the claim.
     const boardBefore = readFileSync(fixture.boardPath, "utf8");
     const stateBefore = readFileSync(writerStatePath(fixture.boardPath), "utf8");
-    const receipt = claimFromVogelkopRequest({ boardPath: fixture.boardPath, request: requestFor(fixture) });
+    const receipt = claimFromBoardRequest({ boardPath: fixture.boardPath, request: requestFor(fixture) });
     assert.equal(receipt.ok, true, JSON.stringify(receipt));
     // The board card line is UNCHANGED: no lane move, no flag, no hash edit,
     // no authorityHmac mutation. (The driver's own claim machinery publishes
@@ -257,13 +264,13 @@ test("the bridge mutates only the driver-owned claim state: lanes, flags, and wr
     assert.ok(!lineAfter.includes("in-progress"));
     // The writer state file was not edited by the bridge (claimCard may
     // advance its own claims anchor — that is the driver's state, not
-    // Vogelkop's; the bridge adds no writes of its own).
+    // Board client's; the bridge adds no writes of its own).
     assert.ok(existsSync(claimsPath(fixture.boardPath)));
     // No second board format: the driver's own Obsidian projection is the
     // pre-existing derived view beside the board (not a second authority);
     // assert no OTHER board file was created by the bridge.
-    assert.equal(existsSync(join(dir, "TASKS.md.vogelkop")), false);
-    assert.equal(existsSync(join(dir, "vogelkop-board.md")), false);
+    assert.equal(existsSync(join(dir, "TASKS.md.agentic-driver")), false);
+    assert.equal(existsSync(join(dir, "board-client-board.md")), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -283,7 +290,7 @@ test("malformed requests fail closed with structured codes and claim nothing", (
       { request: { ...requestFor(fixture), moat: { ok: false, reason: "denied" } }, code: "moat-denied" },
     ];
     for (const { request, code } of cases) {
-      const receipt = claimFromVogelkopRequest({
+      const receipt = claimFromBoardRequest({
         boardPath: fixture.boardPath, request,
         ...(code === "moat-denied" ? { backendBaseUrlFor: () => "https://api.example.com/v1" } : {}),
       });

@@ -1,5 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { openDurableSeamStore } from "../scripts/enforcement/durable_assignment_pi.js";
 import {
   executeHerdrCommunication,
   executeHerdrPromptExchange,
@@ -274,6 +278,77 @@ test("two-read-latency-contract", async () => {
 
 const COMMUNICATION_SCHEMA = "agentic-driver.herdr-communication.v1";
 
+async function offlineStore(t) {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), "delivery-"));
+  const store = await openDurableSeamStore({ directory });
+  t.after(() => store.close());
+  return { store, directory };
+}
+
+test("offline delivery identity survives reopen, lost attribution holds and repeats never resend", async (t) => {
+  const { store, directory } = await offlineStore(t);
+  const f = deliveryFixture();
+  const request = { action: "submit", role: "worker", prompt: "offline stable brief", timeoutMs: 1000 };
+  const options = { runProcess: f.runProcess, offlinePersistence: store };
+  const first = await executeHerdrCommunication(request, { cwd: root }, options);
+  assert.equal(first.ok, true, JSON.stringify(first));
+  const saved = await store.get("delivery", first.deliveryId);
+  assert.equal(saved.state, "delivered");
+  for (const key of ["pre", "post", "prompt", "sentPrompt", "snapshot"]) assert.equal(Object.hasOwn(saved, key), false);
+  await store.close();
+  const reopened = await openDurableSeamStore({ directory });
+  t.after(() => reopened.close());
+  const resumed = { ...options, offlinePersistence: reopened };
+  f.calls.length = 0;
+  const held = await executeHerdrCommunication({ action: "delivery", deliveryId: first.deliveryId }, { cwd: root }, resumed);
+  assert.equal(held.held, true);
+  assert.equal(held.deliveryState, "unknown");
+  const repeated = await executeHerdrCommunication(request, { cwd: root }, resumed);
+  assert.equal(repeated.deliveryId, first.deliveryId);
+  assert.equal(repeated.promptSent, false);
+  assert.equal(repeated.held, true);
+  assert.deepEqual(f.calls, []);
+  assert.equal(f.promptCount, 1);
+});
+
+test("offline proven report survives reopen without fresh terminal reads", async (t) => {
+  const { store, directory } = await offlineStore(t);
+  const f = deliveryFixture();
+  const options = { runProcess: f.runProcess, offlinePersistence: store };
+  const sent = await executeHerdrCommunication({ action: "submit", role: "worker", prompt: "prove offline report", timeoutMs: 1000 }, { cwd: root }, options);
+  f.markAnswered();
+  const query = { action: "delivery", deliveryId: sent.deliveryId };
+  const answered = await executeHerdrCommunication(query, { cwd: root }, options);
+  assert.equal(answered.deliveryState, "answered", JSON.stringify(answered));
+  await store.close();
+  const reopened = await openDurableSeamStore({ directory });
+  t.after(() => reopened.close());
+  f.calls.length = 0;
+  const restored = await executeHerdrCommunication(query, { cwd: root }, { ...options, offlinePersistence: reopened });
+  assert.equal(restored.deliveryState, "answered");
+  assert.equal(restored.report, answered.report);
+  assert.deepEqual(f.calls, []);
+});
+
+test("offline delivery rejects missing fake adapter, failed reservation and conflicting request reuse before send", async (t) => {
+  const { store } = await offlineStore(t);
+  const request = { action: "submit", role: "worker", prompt: "bound brief", timeoutMs: 1000 };
+  const denied = await executeHerdrCommunication(request, { cwd: root }, { offlinePersistence: store });
+  assert.equal(denied.code, "offline_persistence_required");
+  const f = deliveryFixture();
+  const options = { runProcess: f.runProcess, offlinePersistence: store, offlineRequestId: "request-1" };
+  const sent = await executeHerdrCommunication(request, { cwd: root }, options);
+  assert.equal(sent.ok, true);
+  f.calls.length = 0;
+  const conflict = await executeHerdrCommunication({ ...request, prompt: "changed brief" }, { cwd: root }, options);
+  assert.equal(conflict.ok, false);
+  assert.deepEqual(f.calls, []);
+  const broken = { schema: store.schema, get: store.get, update: store.update, async reserve() { throw new Error("offline commit failure"); } };
+  const failed = await executeHerdrCommunication(request, { cwd: root }, { ...options, offlinePersistence: broken });
+  assert.equal(failed.ok, false);
+  assert.deepEqual(f.calls, []);
+});
+
 function deliveryFixture({ status = "idle", report = "fresh worker findings", failPreRead = false, padEcho = false } = {}) {
   // padEcho: false = raw echo; a number = pad framing lines to that width with
   // a trailing box border (exercises MAX_MARKER_HORIZONTAL_WHITESPACE).
@@ -317,6 +392,38 @@ function deliveryFixture({ status = "idle", report = "fresh worker findings", fa
   };
   return { calls, runProcess, markAnswered: () => { answered = true; }, get promptCount() { return promptCount; }, get echoedPrompt() { return echoedPrompt; } };
 }
+
+test("offline communication refuses every role-keyed observation without transport", async (t) => {
+  const { store } = await offlineStore(t);
+  const f = deliveryFixture();
+  for (const action of ["get", "wait", "read", "list"]) {
+    const params = action === "list" ? { action } : { action, role: "worker", ...(action === "wait" ? { timeoutMs: 1000 } : {}) };
+    const refused = await executeHerdrCommunication(params, { cwd: root }, { runProcess: f.runProcess, offlinePersistence: store });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.code, "offline_delivery_required", JSON.stringify(refused));
+    assert.equal(refused.report, undefined);
+  }
+  assert.deepEqual(f.calls, []);
+});
+
+test("direct offline delivery failed ack commit retains intent and never resends", async (t) => {
+  const { store } = await offlineStore(t);
+  const f = deliveryFixture();
+  const port = { schema: store.schema, get: store.get, reserve: store.reserve,
+    async update(kind, id, digest, patch) {
+      if (patch.state === "delivered") throw new Error("simulated direct ack failure");
+      return store.update(kind, id, digest, patch);
+    } };
+  const options = { runProcess: f.runProcess, offlinePersistence: port };
+  const request = { action: "submit", role: "worker", prompt: "direct ack failure", timeoutMs: 1000 };
+  const failed = await executeHerdrCommunication(request, { cwd: root }, options);
+  assert.equal(failed.ok, false);
+  const duplicate = await executeHerdrCommunication(request, { cwd: root }, options);
+  assert.equal(duplicate.promptSent, false);
+  assert.equal(duplicate.held, true);
+  assert.equal((await store.get("delivery", duplicate.deliveryId)).state, "queued");
+  assert.equal(f.promptCount, 1);
+});
 
 test("prompt returns an immediate delivery receipt with no model round-trip", async () => {
   const f = deliveryFixture();

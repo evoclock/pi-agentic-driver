@@ -1,3 +1,9 @@
+---
+name: pulse
+description: Use Board Pulse to check Kanban scheduling capacity or work through ready cards.
+license: AGPL-3.0-only
+---
+
 // SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-only
 

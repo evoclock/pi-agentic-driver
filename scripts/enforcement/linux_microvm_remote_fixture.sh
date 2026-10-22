@@ -2,8 +2,6 @@
 set -euo pipefail
 
 # --- guest containment core (taxonomy, structured log, killswitch decision) ---
-# Design: /Users/julen/pi-dev-env/evidence/GUEST_CONTAINMENT_DESIGN.md sections
-# 2 (taxonomy), 2.0 (severity tiers), 4 (log format), 5 (killswitch semantics).
 # Watchers and shims arrive in a later step; this core is callable and testable
 # through the --gc-decide / --gc-log / --gc-taxonomy-sha hooks below.
 GC_TAXONOMY_VERSION="guest-containment-taxonomy.v1"
@@ -666,8 +664,6 @@ if [ "${1:-}" = "--gc-core-embed" ]; then
   # is "bash" and there is no script file to read back.
   cat >"$1" <<'GC_CORE_EOF'
 # --- guest containment core (taxonomy, structured log, killswitch decision) ---
-# Design: /Users/julen/pi-dev-env/evidence/GUEST_CONTAINMENT_DESIGN.md sections
-# 2 (taxonomy), 2.0 (severity tiers), 4 (log format), 5 (killswitch semantics).
 # Watchers and shims arrive in a later step; this core is callable and testable
 # through the --gc-decide / --gc-log / --gc-taxonomy-sha hooks below.
 GC_TAXONOMY_VERSION="guest-containment-taxonomy.v1"
@@ -1715,8 +1711,6 @@ if ! mkdir -p "$root/gc" "$root/shims" "$root/tmp" "$root/var/cache" "$root/root
 # two can never drift. The initramfsSha256 covers the embedded result.
 if ! cat >"$root/gc/core.sh" <<'GC_CORE_EOF'
 # --- guest containment core (taxonomy, structured log, killswitch decision) ---
-# Design: /Users/julen/pi-dev-env/evidence/GUEST_CONTAINMENT_DESIGN.md sections
-# 2 (taxonomy), 2.0 (severity tiers), 4 (log format), 5 (killswitch semantics).
 # Watchers and shims arrive in a later step; this core is callable and testable
 # through the --gc-decide / --gc-log / --gc-taxonomy-sha hooks below.
 GC_TAXONOMY_VERSION="guest-containment-taxonomy.v1"

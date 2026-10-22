@@ -1,0 +1,1 @@
+Spawn four workers in separate Herdr tabs for the approved private work. The fourth repository requires registry onboarding. Remove tracked files inside the scoped feature branch and prepare a lint-clean draft PR for #14.

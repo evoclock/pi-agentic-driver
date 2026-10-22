@@ -132,9 +132,15 @@ test("Herdr lifecycle validation and resolution preserve exact nested model IDs"
     "glm53fdf glm-5.3-flash-exl3 131k text text",
     "openrouter meta-llama/llama-3.3:free 131k text text",
   ].join("\n");
-  assert.deepEqual(resolveInstalledModel(nested, { listModels, modelsPath: "/does/not/exist" }), ["--model", nested]);
-  assert.deepEqual(resolveInstalledModel(local, { listModels, modelsPath: "/does/not/exist" }), ["--model", local]);
-  assert.deepEqual(resolveInstalledModel(colon, { listModels, modelsPath: "/does/not/exist" }), ["--model", colon]);
+  const routes = [nested, local, colon].map((pair, index) => ({
+    provider: pair.split("/")[0], model: pair.split("/").slice(1).join("/"), family: `fixture-${index}`,
+    subscription: false, gateway: true, aliases: [],
+  }));
+  const routePolicy = { schema: "agentic-driver.model-route-policy.v1", routes, bannedPairs: [],
+    budgets: Object.fromEntries(routes.map((route) => [route.provider, { [route.model]: 5 }])) };
+  for (const model of [nested, local, colon]) {
+    assert.deepEqual(resolveInstalledModel(model, { listModels, modelsPath: "/does/not/exist", routePolicy }), ["--model", model]);
+  }
 });
 
 test("pulse requires enabled boolean and rejects bad mode/interval", () => {

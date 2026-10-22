@@ -6,10 +6,8 @@
 //   1. typesafe-direct    — THE SOLE PROVIDER (owner decision): the official
 //                           @typesafe-ai/sdk (`TypeSafeClient.systemOne`)
 //                           with the owner's direct API key from the macOS
-//                           Keychain (account `typesafe-ai`, service
-//                           `Typesafe AI`). The Vercel AI Gateway and the
-//                           merge gateway are DROPPED — there is no fallback
-//                           transport, and an unconfigured TypeSafe Direct
+//                           Keychain. No alternative gateway or fallback
+//                           transport is configured; an unconfigured direct provider
 //                           fails closed with the existing error taxonomy.
 //
 // Invariants enforced here:

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 // Migration from picc-tasks: the driver skill reads the existing
-// ~/.pi/tasks/{taskListId}/tasks.json (identical shape), backfills
+// the per-profile task-list mirror (identical shape), backfills
 // metadata.origin, and replay behavior is preserved. Rollback is NOT
 // claimed symmetric: the driver writes the same file layout, but custom
 // session entries and UI/reminder behavior are not covered by this module.

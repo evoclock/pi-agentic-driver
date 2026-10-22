@@ -1,0 +1,10 @@
+{
+  "schema": "agentic-driver.model-route-policy.v1",
+  "routes": [
+    { "provider": "vendor-a", "model": "model-x", "family": "family-x", "subscription": true, "gateway": false, "aliases": ["Model X"] },
+    { "provider": "gateway-a", "model": "model-x", "family": "family-x", "subscription": false, "gateway": true, "aliases": ["Model X"] },
+    { "provider": "gateway-a", "model": "model-y", "family": "family-y", "subscription": false, "gateway": true, "aliases": ["Model Y"] }
+  ],
+  "bannedPairs": [ { "family": "family-x", "provider": "gateway-a" } ],
+  "budgets": { "gateway-a": { "model-y": 10 } }
+}

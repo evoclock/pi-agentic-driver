@@ -208,9 +208,9 @@ export async function createEvidenceOverlay({ done, lines, tui }) {
 }
 
 /**
- * Registers ONLY the owner-initiated slash command. No model-callable tool is
- * registered here, and no raw-evidence tool may be added later: the full
- * evidence travels exclusively through the native TUI overlay. The trusted
+ * Registers the owner-initiated full-evidence command and a model-callable
+ * metadata-only summary. No raw-evidence tool is registered: full evidence
+ * travels exclusively through the native TUI overlay. The trusted
  * root is snapshotted once at registration so a later in-process environment
  * mutation cannot redirect review to a different store mid-session; the
  * snapshot still honors the trusted host context that existed at load time.
@@ -219,6 +219,34 @@ export async function registerRecoveryEvidenceReview(pi, _options = {}) {
   if (typeof pi?.registerCommand !== "function" || REGISTRATIONS.has(pi)) return;
   REGISTRATIONS.add(pi);
   const registeredRoot = resolveReviewEvidenceRoot();
+  if (typeof pi.registerTool === "function") pi.registerTool({
+    name: "agentic_recovery_evidence_summary",
+    label: "Recovery Evidence Summary",
+    description: "Read-only counts of up to 50 recent recovery records. No evidence content, identifiers, references, or authorization is returned.",
+    parameters: { type: "object", additionalProperties: false, properties: {} },
+    async execute(_toolCallId, params) {
+      const shape = (value) => ({ schema: "agentic-driver.recovery-evidence-summary.v1", nonAuthorizing: true, ...value });
+      let summary;
+      if (!params || typeof params !== "object" || Array.isArray(params) || Object.keys(params).length !== 0) {
+        summary = shape({ status: "invalid-arguments" });
+      } else {
+        let listing;
+        try { listing = listReviewableReferences({ root: registeredRoot, limit: REVIEW_LIST_LIMIT }); }
+        catch { listing = { ok: false }; }
+        if (!listing.ok || !Array.isArray(listing.references)
+          || listing.references.some((ref) => !["requested", "terminal"].includes(ref.phase))) {
+          summary = shape({ status: listing.code === "evidence-store-missing" ? "store-missing" : "unavailable" });
+        } else {
+          summary = shape({ status: "available", observed: listing.references.length,
+            requested: listing.references.filter((ref) => ref.phase === "requested").length,
+            terminal: listing.references.filter((ref) => ref.phase === "terminal").length,
+            limit: REVIEW_LIST_LIMIT, possiblyMore: listing.references.length === REVIEW_LIST_LIMIT,
+            verification: "metadata-only" });
+        }
+      }
+      return { content: [{ type: "text", text: JSON.stringify(summary) }], details: summary };
+    },
+  });
   const notify = (context, message, type) => {
     if (typeof context?.ui?.notify === "function") context.ui.notify(message, type);
   };

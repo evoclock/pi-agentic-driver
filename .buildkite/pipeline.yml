@@ -1,0 +1,12 @@
+steps:
+  - label: "Public tests and package preview"
+    agents: { queue: mac-mini }
+    timeout_in_minutes: 30
+    command:
+      - "sfw npm ci"
+      - "npm test"
+      - "npm pack --dry-run"
+  - label: "Public content scan"
+    agents: { queue: mac-mini }
+    timeout_in_minutes: 5
+    command: "node .github/tools/public_term_scan.mjs"

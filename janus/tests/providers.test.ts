@@ -4,8 +4,8 @@
 // Adapter mapping tests (review fix #2): the transport contract maps onto the
 // sole provider adapter (typesafe-direct) with mocked clients and NO network,
 // NO live credentials. Question composition (review fix #1), the single-retry
-// policy, and failed-attempt usage accumulation are verified here. The Vercel
-// AI Gateway and the merge gateway are DROPPED — no test references them.
+// policy, and failed-attempt usage accumulation are verified here. No
+// alternative gateway is configured or tested.
 
 import test from "node:test";
 import assert from "node:assert/strict";

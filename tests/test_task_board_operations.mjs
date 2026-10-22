@@ -328,8 +328,8 @@ test("registered writer loads workspace capabilities for write, update, and dele
   const dir = mkdtempSync(join(tmpdir(), "board-cap-registry-"));
   const boardPath = join(dir, "TASKS.md");
   try {
-    mkdirSync(join(dir, ".vogelkop"), { recursive: true });
-    writeFileSync(join(dir, ".vogelkop", "capabilities.json"), JSON.stringify([
+    mkdirSync(join(dir, ".agentic-driver"), { recursive: true });
+    writeFileSync(join(dir, ".agentic-driver", "capabilities.json"), JSON.stringify([
       { name: "fs-write", description: "write workspace files" },
       { name: "run-tests" },
     ]));
@@ -373,8 +373,8 @@ test("registered writer reports malformed workspace capability registries struct
   const dir = mkdtempSync(join(tmpdir(), "board-cap-registry-invalid-"));
   const boardPath = join(dir, "TASKS.md");
   try {
-    mkdirSync(join(dir, ".vogelkop"), { recursive: true });
-    writeFileSync(join(dir, ".vogelkop", "capabilities.json"), "{ not valid json");
+    mkdirSync(join(dir, ".agentic-driver"), { recursive: true });
+    writeFileSync(join(dir, ".agentic-driver", "capabilities.json"), "{ not valid json");
     const registered = [];
     registerKanbanBoardTools({ registerTool: (tool) => registered.push(tool) }, { boardPath });
     const writeTool = registered.find((tool) => tool.name === "agentic_kanban_board_write");
@@ -412,8 +412,8 @@ test("capability-less cards are unaffected by absent or malformed workspace regi
       stoppingPoint: "stop", scopePaths: ["src/"], authority,
     });
     assert.equal(created.details.ok, true, JSON.stringify(created.details));
-    mkdirSync(join(malformedDir, ".vogelkop"), { recursive: true });
-    writeFileSync(join(malformedDir, ".vogelkop", "capabilities.json"), "not json");
+    mkdirSync(join(malformedDir, ".agentic-driver"), { recursive: true });
+    writeFileSync(join(malformedDir, ".agentic-driver", "capabilities.json"), "not json");
     const updated = await malformedUpdate.execute("update", {
       operation: "update", cardId: created.details.cardId, lane: "review", authority,
     });
