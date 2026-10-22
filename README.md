@@ -55,8 +55,8 @@ proofs for agentic workflows.
 | `code_phage` | Reviews a plan against a stated goal before code is written and advises your agent. | shipped |
 | `tasks` | Keeps a priority-ordered session plan, then lets the owner make selected items durable in `TASKS.md`. | shipped |
 | `decision-to-spec` skill | Drafts one reviewable assignment from your explicit decision or a sourced, quoted relay, with observable outcomes and a stop point. | packaged skill |
-| `agentic_decision_evidence` | Records the stated source of a decision (direct or relayed, with quote, where, when and relayer) for a private assignment; it verifies no identity and creates no authority. | merged, unreleased |
-| `agentic_merge_review_record` | Records independent Standards and Spec verdicts for an exact PR head; read only when the merge policy is `agents-after-checks-and-review`, and it merges nothing. | merged, unreleased |
+| `agentic_decision_evidence` | Records the stated source of a decision (direct or relayed, with quote, where, when and relayer) for a private assignment; it verifies no identity and creates no authority. | shipped |
+| `agentic_merge_review_record` | Records independent Standards and Spec verdicts for an exact PR head; read only when the merge policy is `agents-after-checks-and-review`, and it merges nothing. | shipped |
 | `agentic_herdr_communication` | Submits one prompt and observes delivery and marked reports; never grants authority. | shipped |
 | `agentic_herdr_spawn_worker` | Starts one Pi worker in a pane or tab, with native confirmation. | shipped |
 | `agentic_aidr` | A remedy for AI;DR. Reviews writing for clarity, simplicity, brevity, and humanity. | shipped |
@@ -423,7 +423,7 @@ silently, and return results as untrusted evidence.
 </details>
 
 <details>
-<summary><strong>durable dispatch, resume after interruption without resending</strong> <em>(merged, unreleased)</em></summary>
+<summary><strong>durable dispatch, resume after interruption without resending</strong> <em>(shipped)</em></summary>
 
 `agentic_worker_dispatch` keeps each journey on disk, so a crash or restart
 in the middle of a journey neither loses its place nor repeats a prompt.
@@ -746,7 +746,7 @@ continues, and the agent does not retry behind your back. In headless runs
 where no human can confirm, destructive commands are refused rather than
 silently allowed.
 
-**Merge policy** *(merged, unreleased)*. The guard also enforces one merge
+**Merge policy** *(shipped)*. The guard also enforces one merge
 setting, read from `{PI_CODING_AGENT_DIR}/config/merge-policy.v1.json`
 (the installed agent config directory) and never from the working tree.
 
@@ -815,7 +815,7 @@ not seen. Branch protection on GitHub remains the real gate. See
 **Available now:**
 
 <details>
-<summary><strong>outward effects, confirmed Git push and draft PR recovery</strong> <em>(merged, unreleased, native confirmation)</em></summary>
+<summary><strong>outward effects, confirmed Git push and draft PR recovery</strong> <em>(shipped)</em></summary>
 
 The `agentic_journey_outward_effect` tool makes one consequential Git or
 GitHub write for an existing journey: a push, a private draft pull request
