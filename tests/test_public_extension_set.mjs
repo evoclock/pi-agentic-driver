@@ -55,6 +55,10 @@ test("package file list matches the public extension set", () => {
   assert.ok(pkg.pi?.skills?.includes("./skills/decision-to-spec"), "decision-to-spec skill must be declared as a Pi package resource");
   const required = [
     "extensions/linux-microvm.ts",
+    "extensions/loop-until-done.ts",
+    "scripts/enforcement/loop_until_done_pi.js",
+    "scripts/enforcement/loop_until_done_guide.md",
+    ".agentic-driver/loop-until-done.defaults.json",
     "scripts/enforcement/linux_microvm_cutover_pi.js",
     "scripts/enforcement/linux_microvm_remote_fixture.sh",
     "scripts/enforcement/native_tui_context.js",
@@ -70,6 +74,7 @@ test("package file list matches the public extension set", () => {
     "extensions/herdr-dispatch.ts",
     "extensions/herdr-lifecycle.ts",
     "extensions/linux-microvm.ts",
+    "extensions/loop-until-done.ts",
     "extensions/pulse.ts",
     "extensions/recovery-evidence.ts",
     "extensions/task-board.ts",
@@ -183,6 +188,10 @@ test("packed tarball retains the offline Durable module without private scratch"
     assert.ok(files.has("scripts/enforcement/durable_assignment_pi.js"));
     assert.ok(files.has("scripts/enforcement/storage_owner_lock_pi.js"));
     assert.ok(files.has("scripts/enforcement/durable_driver_pi.d.ts"));
+    assert.ok(files.has("extensions/loop-until-done.ts"));
+    assert.ok(files.has("scripts/enforcement/loop_until_done_pi.js"));
+    assert.ok(files.has("scripts/enforcement/loop_until_done_guide.md"));
+    assert.ok(files.has(".agentic-driver/loop-until-done.defaults.json"));
     assert.ok(files.has("scripts/enforcement/task_board_hash_pi.js"), "board core import must ship");
     assert.ok(files.has("skills/decision-to-spec/SKILL.md"));
     const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
