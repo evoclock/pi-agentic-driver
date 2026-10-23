@@ -55,8 +55,14 @@ proofs for agentic workflows.
 | `code_phage` | Reviews a plan against a stated goal before code is written and advises your agent. | shipped |
 | `tasks` | Keeps a priority-ordered session plan, then lets the owner make selected items durable in `TASKS.md`. | shipped |
 | `decision-to-spec` skill | Drafts one reviewable assignment from your explicit decision or a sourced, quoted relay, with observable outcomes and a stop point. | packaged skill |
+<<<<<<< HEAD
 | `agentic_decision_evidence` | Records the stated source of a decision (direct or relayed, with quote, where, when and relayer) for a private assignment; it verifies no identity and creates no authority. | shipped |
 | `agentic_merge_review_record` | Records independent Standards and Spec verdicts for an exact PR head; read only when the merge policy is `agents-after-checks-and-review`, and it merges nothing. | shipped |
+=======
+| `agentic_decision_evidence` | Records the stated source of a decision (direct or relayed, with quote, where, when and relayer) for a private assignment; it verifies no identity and creates no authority. | merged, unreleased |
+| `agentic_relay_check_request` | Checks whether a recorded, scoped relay covers each requested private action; read-only preflight, with authority checked again at the action boundary. | merged, unreleased |
+| `agentic_merge_review_record` | Records independent Standards and Spec verdicts for an exact PR head; read only when the merge policy is `agents-after-checks-and-review`, and it merges nothing. | merged, unreleased |
+>>>>>>> 0f48f38 (Include bounded loops in 2.0.0 package)
 | `agentic_herdr_communication` | Submits one prompt and observes delivery and marked reports; never grants authority. | shipped |
 | `agentic_herdr_spawn_worker` | Starts one Pi worker in a pane or tab, with native confirmation. | shipped |
 | `agentic_aidr` | A remedy for AI;DR. Reviews writing for clarity, simplicity, brevity, and humanity. | shipped |
@@ -68,7 +74,7 @@ proofs for agentic workflows.
 | `agentic_kanban_board_update` | Moves, closes, flags, edits, or removes cards on the board, always recording who authorized the change. | shipped |
 | `agentic_kanban_board_dispatch` | Claims an eligible board card for automated contained work and creates its assignment envelope. | shipped |
 | `agentic_kanban_pulse` | Checks for ready work and available capacity, then starts assignments under the board policy. | shipped |
-| `/agentic-recovery-evidence` | Opens private recovery evidence in the local TUI; it is not a model-callable tool or recovery authorization. | shipped, local review only |
+| `agentic-recovery-evidence` | Opens private recovery evidence in the local TUI; it is not a model-callable tool or recovery authorization. | shipped, local review only |
 | Router | Capacity/policy routing for Board Pulse: seats with scope statements, tunable policy values, and a binding dispatch gate. | shipped |
 | Janus (bundled service) | Local Jev evaluation service on loopback: semantic ranking, the dispatch-gate judgment, redaction before every external call. See `janus/README.md`. | shipped |
 
@@ -143,6 +149,12 @@ decision and is not permission to draft.
   A bare approval claim or an unsourced quote is not decision evidence.
   `agentic_decision_evidence` structures the stated source; it verifies no
   identity.
+- **Relay private approvals.** A configured relayer can record your exact
+  answer, the question it answers, its source, channel, time, and bounded
+  scope. `agentic_relay_check_request` is a read-only preflight; each action
+  checks the record again. A relay attests that the configured relayer recorded
+  your words; it does not prove identity or authorize merges or publication.
+  See `docs/relay-authority.md`.
 - **Settle what matters first.** The skill inspects the inventory, existing
   behavior and the affected driver capabilities, then asks one round of
   decisions that could change acceptance, scope, ownership, review or stop
@@ -364,6 +376,9 @@ extension:
 - creates the split pane or labelled tab;
 - starts exactly one Pi agent in it;
 - verifies the role, model arguments, pane identity, and canonical repository;
+- resolves the model against the installed Pi roster and the active profile's
+  `config/model-route-policy.v1.local.json` before spawning; missing, invalid,
+  ambiguous, forbidden, or unbudgeted routes fail closed;
 - optionally accepts one explicit worktree target: it must be the canonical Git
   worktree root of that same registered repository and carry an active
   Treehouse lease observed read-only, and it is revalidated after confirmation
@@ -423,7 +438,29 @@ silently, and return results as untrusted evidence.
 </details>
 
 <details>
+<<<<<<< HEAD
 <summary><strong>durable dispatch, resume after interruption without resending</strong> <em>(shipped)</em></summary>
+=======
+<summary><strong>loop-until-done, bounded session-task loops</strong> <em>(merged, unreleased)</em></summary>
+
+`/loop-until-done <steps> <approved goal> :: <observable exit check>` gives
+one already-authorized coordinator session task a fixed worker-dispatch budget.
+Configure the limits and wake in `.agentic-driver/loop-until-done.defaults.json`.
+The defaults allow at most 200 attempts or 30 minutes, whichever comes first.
+Each attempt consumes a step before dispatch. After a successful exchange,
+the default wake prompts a check immediately; an interval can delay that prompt.
+Each wake asks the agent to check the original exit condition before another
+dispatch. The per-session allowance cannot be extended or restarted. This
+command does not dispatch board cards; Board Pulse owns those.
+
+The extension, its defaults, and its guide are included in the 2.0.0 npm
+package file list. See `scripts/enforcement/loop_until_done_guide.md`.
+
+</details>
+
+<details>
+<summary><strong>durable dispatch, resume after interruption without resending</strong> <em>(merged, unreleased)</em></summary>
+>>>>>>> 0f48f38 (Include bounded loops in 2.0.0 package)
 
 `agentic_worker_dispatch` keeps each journey on disk, so a crash or restart
 in the middle of a journey neither loses its place nor repeats a prompt.
@@ -514,8 +551,10 @@ Consuming an envelope releases the claim. It does not mark the card done.
 External board clients submit `agentic-driver.board-claim-request.v2` to
 `claimFromBoardRequest`. Receipts use `agentic-driver.board-claim-receipt.v2`,
 route digests use `agentic-driver.board-claim-route.v2`, and asynchronous
-transport receipts use `agentic-driver.async-transport.receipt.v2`. Unsupported
-request schemas fail closed. Workspace capabilities live at
+transport receipts use `agentic-driver.async-transport.receipt.v2`. Clients
+must use these names; prior request, receipt, and route contracts are rejected,
+with no compatibility aliases. Unsupported request schemas fail closed.
+Workspace capabilities live at
 `.agentic-driver/capabilities.json`; route seats and providers use `board-`
 and `board-router` identities.
 
@@ -916,6 +955,8 @@ or change a model route.
   the repository owner's first person, with no bot or model names and no
   local paths. The bundled lint enforces length caps and wording rules; your
   own names go in a personal config that is never committed.
+- **correct-pi.** Turns an owner-selected recurring correction into a
+  structural guard, then requires a check that catches a real past failure.
 - **pstack ports for Pi.** 54 skills adapted from Lauren Tan's pstack, each
   with a `-pi` suffix so it does not collide with an installed upstream
   copy: 30 workflow skills, such as `poteto-mode-pi`, `tdd-pi`,
@@ -924,6 +965,10 @@ or change a model route.
   A skill that delegates to a model role reads the project-local
   `.pi/pstack-model-roles.v1.json` created by `/skill:setup-pstack-pi`, and
   stops if the role is missing; it never picks a model on its own.
+- **Packaged-skill checks.** Public CI verifies skill frontmatter and package
+  registration, then loads the packed artifact in a fresh consumer and checks
+  for Pi skill diagnostics. This is release validation, not an install-time
+  permission or security boundary.
 
 `docs/pstack-pi-ports-comparison.md` compares these ports with the other
 published pstack ports for Pi.
@@ -951,28 +996,42 @@ Released extensions load independently.
 
 For optional structural code search, see the separate [public ast-sgrep fork](https://github.com/evoclock/ast-sgrep). It is not bundled with or installed by Pi Agentic Driver. The Pi BigInt and host TypeBox corrections are on the fork's `main`; a follow-up Pi peer-range correction remains on [upstream PR #36](https://github.com/AdityaVG13/ast-sgrep/pull/36), not yet on the fork's `main`. These source changes have not been published as an npm package. The driver does not select or install a code-search provider.
 
-### Choose which extensions load
+### Choose which package resources load
 
-A normal install loads all packaged extensions by default. You can load only the
-extensions you want with the object form in your Pi settings:
+A normal install loads the package's declared extensions and skills. Use the
+object form in your Pi settings to select only the resources you need. For
+example, load two extensions:
 
 ```json
 {
   "packages": [
     {
       "source": "npm:@evoclock/pi-agentic-driver",
-      "extensions": [
-        "extensions/aidr.ts",
-        "extensions/code-phage.js"
-      ]
+      "extensions": ["extensions/aidr.ts", "extensions/code-phage.js"]
     }
   ]
 }
 ```
 
-The package includes the Herdr communication, lifecycle, and dispatch
-extensions, the board and Tasks extensions, and `linux-microvm.ts`. Use
-`pi config` to enable or disable individual resources from an installed
+To load one skill and no extensions, set `extensions` to an empty list:
+
+```json
+{
+  "packages": [
+    {
+      "source": "npm:@evoclock/pi-agentic-driver",
+      "extensions": [],
+      "skills": ["skills/harvest-lessons"]
+    }
+  ]
+}
+```
+
+The same package can provide skills without extensions; there is no separate
+skills-only package. Select another declared skill or omit `skills` to load all
+of them. The package also includes the Herdr communication, lifecycle, and
+dispatch extensions, the board and Tasks extensions, and `linux-microvm.ts`.
+Use `pi config` to enable or disable individual resources from an installed
 package. You are not required to use every extension.
 
 <details>
