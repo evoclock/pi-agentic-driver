@@ -2,6 +2,7 @@
 // Public-facing content scanner; license and prior-art credit are recorded privately.
 // Scan declared public-facing files; optional private terms stay outside Git.
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { resolve, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -27,13 +28,30 @@ export function scanText(text, terms) {
   return found;
 }
 
+export function conflictLines(text, markdown = false) {
+  let fenced = false;
+  const hits = [];
+  for (const [index, line] of text.split(/\r?\n/).entries()) {
+    if (markdown && /^\s*(`{3,}|~{3,})/.test(line)) { fenced = !fenced; continue; }
+    if (!fenced && (/^<<<<<<< /.test(line) || line === '=======' || /^>>>>>>> /.test(line))) hits.push(index + 1);
+  }
+  return hits;
+}
+
 function main() {
+  const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: root }).toString('utf8').split('\0').filter(Boolean);
+  let failures = 0;
+  for (const name of tracked) {
+    const bytes = readFileSync(resolve(root, name));
+    if (bytes.includes(0)) continue;
+    const hits = conflictLines(bytes.toString('utf8'), /\.md(?:own)?$/i.test(name));
+    if (hits.length) { console.error(`${name}: conflict markers at lines ${hits.join(', ')}`); failures++; }
+  }
   const config = JSON.parse(readFileSync(configPath, 'utf8'));
   if (!Array.isArray(config.files) || !config.files.every((name) => typeof name === 'string')) {
     throw new Error('public-scan.json must declare a files array');
   }
   const terms = [...parseTerms(JSON.stringify(config.terms)), ...parseTerms(process.env.PUBLIC_SCAN_TERMS || '[]')];
-  let failures = 0;
   for (const name of config.files) {
     const path = resolve(root, name);
     if (isAbsolute(name) || relative(root, path).startsWith('..')) throw new Error('scan path must stay inside the repository');
