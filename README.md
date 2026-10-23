@@ -55,14 +55,9 @@ proofs for agentic workflows.
 | `code_phage` | Reviews a plan against a stated goal before code is written and advises your agent. | shipped |
 | `tasks` | Keeps a priority-ordered session plan, then lets the owner make selected items durable in `TASKS.md`. | shipped |
 | `decision-to-spec` skill | Drafts one reviewable assignment from your explicit decision or a sourced, quoted relay, with observable outcomes and a stop point. | packaged skill |
-<<<<<<< HEAD
 | `agentic_decision_evidence` | Records the stated source of a decision (direct or relayed, with quote, where, when and relayer) for a private assignment; it verifies no identity and creates no authority. | shipped |
-| `agentic_merge_review_record` | Records independent Standards and Spec verdicts for an exact PR head; read only when the merge policy is `agents-after-checks-and-review`, and it merges nothing. | shipped |
-=======
-| `agentic_decision_evidence` | Records the stated source of a decision (direct or relayed, with quote, where, when and relayer) for a private assignment; it verifies no identity and creates no authority. | merged, unreleased |
 | `agentic_relay_check_request` | Checks whether a recorded, scoped relay covers each requested private action; read-only preflight, with authority checked again at the action boundary. | merged, unreleased |
-| `agentic_merge_review_record` | Records independent Standards and Spec verdicts for an exact PR head; read only when the merge policy is `agents-after-checks-and-review`, and it merges nothing. | merged, unreleased |
->>>>>>> 0f48f38 (Include bounded loops in 2.0.0 package)
+| `agentic_merge_review_record` | Records independent Standards and Spec verdicts for an exact PR head; read only when the merge policy is `agents-after-checks-and-review`, and it merges nothing. | shipped |
 | `agentic_herdr_communication` | Submits one prompt and observes delivery and marked reports; never grants authority. | shipped |
 | `agentic_herdr_spawn_worker` | Starts one Pi worker in a pane or tab, with native confirmation. | shipped |
 | `agentic_aidr` | A remedy for AI;DR. Reviews writing for clarity, simplicity, brevity, and humanity. | shipped |
@@ -438,9 +433,6 @@ silently, and return results as untrusted evidence.
 </details>
 
 <details>
-<<<<<<< HEAD
-<summary><strong>durable dispatch, resume after interruption without resending</strong> <em>(shipped)</em></summary>
-=======
 <summary><strong>loop-until-done, bounded session-task loops</strong> <em>(merged, unreleased)</em></summary>
 
 `/loop-until-done <steps> <approved goal> :: <observable exit check>` gives
@@ -459,8 +451,7 @@ package file list. See `scripts/enforcement/loop_until_done_guide.md`.
 </details>
 
 <details>
-<summary><strong>durable dispatch, resume after interruption without resending</strong> <em>(merged, unreleased)</em></summary>
->>>>>>> 0f48f38 (Include bounded loops in 2.0.0 package)
+<summary><strong>durable dispatch, resume after interruption without resending</strong> <em>(shipped)</em></summary>
 
 `agentic_worker_dispatch` keeps each journey on disk, so a crash or restart
 in the middle of a journey neither loses its place nor repeats a prompt.
