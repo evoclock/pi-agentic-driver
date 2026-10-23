@@ -80,11 +80,13 @@ test("rule 5 split: frozen sequence takes precedence over unknown status inside 
   assert.equal(stalledUnknownReason({ status: "unknown", sequenceFrozen: false }), "status-unknown");
 });
 
-test("rule 6: idle with no complete report is idle-eligible, not a stuck state", () => {
-  const result = classifyObservation(obs({ agentStatus: "idle", reportState: "pending" }));
-  assert.equal(result.state, "idle-eligible");
-  assert.equal(result.reasonCode, null);
-  assert.equal(result.confidenceBasis, "rule-6-idle-no-report");
+test("rule 6: idle without a done report is stalled for repair", () => {
+  for (const reportState of ["pending", "unavailable"]) {
+    const result = classifyObservation(obs({ agentStatus: "idle", reportState }));
+    assert.equal(result.state, "idle-without-report");
+    assert.equal(result.reasonCode, "idle-report-missing");
+    assert.equal(result.confidenceBasis, "rule-6-idle-no-report");
+  }
 });
 
 test("rule 7: done without an extractable complete report is done-without-report", () => {
@@ -113,9 +115,10 @@ test("state→reason mapping table is closed and matches NUDGE §5", () => {
     "stuck-on-dialog": "blocked-modal",
     "stalled-unknown": null,
     "done-without-report": "done-report-unavailable",
+    "idle-without-report": "idle-report-missing",
   });
   assert.deepEqual(NUDGE_STUCK_REASONS, [
-    "blocked-modal", "working-sequence-frozen", "status-unknown", "done-report-unavailable",
+    "blocked-modal", "working-sequence-frozen", "status-unknown", "done-report-unavailable", "idle-report-missing",
   ]);
 });
 

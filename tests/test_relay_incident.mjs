@@ -88,13 +88,15 @@ test("incident B: four scoped approvals and Tier 2 registry onboarding permit fo
   const lint = spawnSync("python3", [join(process.cwd(), "skills/public-pr-wording/pr_wording_lint.py"), "--title", "Improve the private review flow", "--body-file", body], { encoding: "utf8" });
   assert.equal(lint.status, 0, lint.stdout + lint.stderr);
 });
-test("fully headless covered spawn succeeds without a UI", async () => {
+test("scoped approval passes through to the worker without a second confirmation", async () => {
   const f = setup();
   const entry = await recordApproval(f.profile, f.approval("alpha"));
   assert.equal(f.context.hasUI, false);
   assert.equal(f.context.ui, undefined);
   const result = await executeHerdrSpawnWorker(params("alpha", entry.id), f.context, f.options);
   assert.equal(result.status, "spawned", JSON.stringify(result));
+  assert.equal(result.authorityCreated, false);
+  assert.equal(JSON.parse(readFileSync(f.log, "utf8").split("\n").find((line) => line.includes('"tab","create"')))[2], "--workspace");
   assert.match(readFileSync(join(f.profile, "approvals/uses.v1.jsonl"), "utf8"), /"result":"spawned"/);
 });
 test("headless spawn without authority keeps native confirmation refusal", async () => {
@@ -303,7 +305,7 @@ for (const revokedAuthority of ["lease", "registry"]) {
     assert.match(result.cleanup, /worker agent is live/);
     const calls = readFileSync(f.log, "utf8").split("\n").filter(Boolean).map(JSON.parse);
     assert.deepEqual(calls.map((argv) => argv.slice(0, 2)), [
-      ["agent", "list"], ["tab", "create"], ["agent", "start"], ["agent", "get"], ["pane", "get"],
+      ["agent", "list"], ["workspace", "list"], ["pane", "list"], ["tab", "create"], ["agent", "start"], ["agent", "get"], ["pane", "get"],
     ], "no retry or automatic cleanup after the agent starts");
   });
 }

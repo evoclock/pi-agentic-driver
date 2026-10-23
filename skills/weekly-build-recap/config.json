@@ -1,0 +1,32 @@
+{
+  "schema": "weekly-build-recap.config.v1",
+  "owner": null,
+  "authors": ["github-actions[bot]"],
+  "default_theme": "light",
+  "default_palette": "neutral",
+  "palettes": {
+    "neutral": {
+      "accents": {"slate": "#64748b", "sage": "#829987", "clay": "#a78473"},
+      "chrome": ["#30343a", "#484e54", "#626970", "#7a8086", "#b5b9bb", "#e4e6e5"],
+      "background": "#fafafa",
+      "headline": ["slate", "sage", "clay"]
+    },
+    "flockmate": {
+      "accents": {
+        "sage": "#79c39e", "rust": "#e77843", "peach": "#ee9b69",
+        "mustard": "#ceb05e", "slate_blue": "#617082", "mauve_burgundy": "#76536b",
+        "muted_olive": "#6e7354", "deep_teal": "#3f6f70", "ochre": "#a77c2e",
+        "forest": "#52705f", "clay": "#9c5f45"
+      },
+      "chrome": ["#1a1816", "#383431", "#4a4540", "#5c564f", "#b09080", "#ead1b5"],
+      "background": "#ffffff",
+      "headline": ["rust", "sage", "peach"]
+    },
+    "okabe-ito-reduced": {
+      "accents": {"vermillion": "#D55E00", "orange": "#E69F00", "green": "#009E73", "purple": "#CC79A7"},
+      "chrome": ["#1a1816", "#383431", "#4a4540", "#5c564f", "#999999", "#e0e0e0"],
+      "background": "#ffffff",
+      "headline": ["vermillion", "green", "orange"]
+    }
+  }
+}

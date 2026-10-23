@@ -113,7 +113,7 @@ test("cross-surface: the window must leave room for at least one backoff/observa
 
 test("closed reason enum is pinned for message-hash non-repetition support", () => {
   assert.deepEqual(NUDGE_STUCK_REASONS, [
-    "blocked-modal", "working-sequence-frozen", "status-unknown", "done-report-unavailable",
+    "blocked-modal", "working-sequence-frozen", "status-unknown", "done-report-unavailable", "idle-report-missing",
   ]);
 });
 

@@ -1091,10 +1091,27 @@ export function currentPaneArgv() {
   return Object.freeze(["pane", "current", "--current"]);
 }
 
-export function tabCreateArgv(canonicalRoot, role) {
+export function tabCreateArgv(canonicalRoot, role, workspaceId) {
   return Object.freeze([
-    "tab", "create", "--cwd", canonicalRoot, "--no-focus", "--label", role,
+    "tab", "create", "--workspace", workspaceId, "--cwd", canonicalRoot, "--no-focus", "--label", role,
   ]);
+}
+
+async function workerWorkspace(canonicalRoot, repository, options, signal) {
+  const listed = parseJsonEnvelope(await invokeHerdr(["workspace", "list"], canonicalRoot, options, signal), "workspace list");
+  if (!Array.isArray(listed.workspaces) || listed.workspaces.length > 128) {
+    throw lifecycleError("workspace_untrusted", "workspace list is invalid", "denied");
+  }
+  const matches = listed.workspaces.filter((item) => item?.label === repository &&
+    typeof item.workspace_id === "string" && /^w[A-Za-z0-9]+$/.test(item.workspace_id));
+  if (matches.length !== 1) throw lifecycleError("workspace_untrusted", "the repository needs one matching workspace", "denied");
+  const workspaceId = matches[0].workspace_id;
+  const panes = parseJsonEnvelope(await invokeHerdr(["pane", "list", "--workspace", workspaceId], canonicalRoot, options, signal), "pane list");
+  if (!Array.isArray(panes.panes) || panes.panes.length > 128 ||
+      !panes.panes.some((pane) => pane?.workspace_id === workspaceId && sameRealPath(pane.cwd, canonicalRoot))) {
+    throw lifecycleError("workspace_untrusted", "the workspace has no pane in the trusted repository", "denied");
+  }
+  return workspaceId;
 }
 
 export function splitArgv(coordinatorPaneId, canonicalRoot, placement) {
@@ -1222,6 +1239,7 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
   try {
     request = validateSpawnParams(params);
     const { placement, role, model, repository } = request;
+    if (placement !== "tab") throw lifecycleError("worker_tab_required", "workers require a new tab, not a coordinator pane split", "denied");
 
     // Resolve BEFORE any mutation: registry + realpath + Git root.
     let canonicalRoot = resolveTrustedSpawnRepository(context?.cwd, repository);
@@ -1252,6 +1270,7 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
     if (duplicateRoleExists(listed, role)) {
       throw lifecycleError("duplicate_worker_name", "a live agent already holds this name", "denied");
     }
+    const workspaceId = await workerWorkspace(canonicalRoot, repository, options, signal);
     let confirmed;
     if (request.authority) {
       try {
@@ -1314,8 +1333,11 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
     let tabId;
     try {
       if (placement === "tab") {
-        layoutRaw = await invokeHerdr(tabCreateArgv(spawnCwd, role), spawnCwd, options, signal);
+        layoutRaw = await invokeHerdr(tabCreateArgv(spawnCwd, role, workspaceId), spawnCwd, options, signal);
         ({ rootPaneId, tabId } = parseTabCreate(layoutRaw));
+        if (!rootPaneId.startsWith(`${workspaceId}:`) || !tabId.startsWith(`${workspaceId}:`)) {
+          throw lifecycleError("workspace_mismatch", "the new tab was placed outside the repository workspace", "denied");
+        }
       } else {
         layoutRaw = await invokeHerdr(
           splitArgv(coordinator.paneId, spawnCwd, placement),
@@ -1523,6 +1545,7 @@ export async function preflightAttendedElectronSpawn(params, context, options = 
     assertHerdrExecutableAvailable(options);
     const { canonicalRoot, modelArgv, worktreeTarget } = resolveAttendedElectronPrerequisites(request, context, options);
     await observeDuplicateRole(worktreeTarget ? worktreeTarget.worktreePath : canonicalRoot, request.role, options, null);
+    await workerWorkspace(canonicalRoot, request.repository, options, null);
     revalidateSpawnAuthority(
       context.cwd, request.repository, canonicalRoot, request, worktreeTarget, options,
       "during the preflight agent-list observation",
@@ -1580,6 +1603,7 @@ export async function executeHerdrSpawnWorkerAttendedElectron(params, context, o
       : null;
     let spawnCwd = worktreeTarget ? worktreeTarget.worktreePath : canonicalRoot;
     await observeDuplicateRole(spawnCwd, role, options, signal);
+    const workspaceId = await workerWorkspace(canonicalRoot, repository, options, signal);
 
     // ONE native owner confirmation from the attended host. A denial is a
     // stop; a throw is a structured refusal. Never re-asked, never retried.
@@ -1614,8 +1638,11 @@ export async function executeHerdrSpawnWorkerAttendedElectron(params, context, o
     let rootPaneId;
     let layoutRaw;
     try {
-      layoutRaw = await invokeHerdr(tabCreateArgv(spawnCwd, role), spawnCwd, options, signal);
+      layoutRaw = await invokeHerdr(tabCreateArgv(spawnCwd, role, workspaceId), spawnCwd, options, signal);
       ({ rootPaneId, tabId } = parseTabCreate(layoutRaw));
+      if (!rootPaneId.startsWith(`${workspaceId}:`) || !tabId.startsWith(`${workspaceId}:`)) {
+        throw lifecycleError("workspace_mismatch", "the new tab was placed outside the repository workspace", "denied");
+      }
     } catch (error) {
       return partialResult(error, {
         partial: "tab_created", paneId: rootPaneId, tabId, role, modelArgv,

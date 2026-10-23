@@ -44,7 +44,7 @@ export const HERDR_MAX_PROMPT_BYTES = 32 * 1024;
 // Re-export the classifier-owned closed taxonomy for config consumers.
 export { NUDGE_STUCK_REASONS };
 const CONFIG_SUPPORTED_STUCK_REASONS = Object.freeze([
-  "blocked-modal", "working-sequence-frozen", "status-unknown", "done-report-unavailable",
+  "blocked-modal", "working-sequence-frozen", "status-unknown", "done-report-unavailable", "idle-report-missing",
 ]);
 
 function isNonNegativeSafeInteger(value) {

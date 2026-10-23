@@ -355,6 +355,7 @@ function deliveryFixture({ status = "idle", report = "fresh worker findings", fa
   const padWidth = typeof padEcho === "number" ? padEcho : padEcho ? 40 : 0;
   const calls = [];
   let answered = false;
+  let currentStatus = status;
   let promptCount = 0;
   let reads = 0;
   let echoedPrompt;
@@ -363,7 +364,7 @@ function deliveryFixture({ status = "idle", report = "fresh worker findings", fa
     calls.push({ action, role, argv: [...argv] });
     if (action === "get") {
       // The role's activity sequence advances once the answer is written.
-      return { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: role, agent: "pi", status, state_change_seq: answered ? 2 : 1, repository: root } }) };
+      return { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: role, agent: "pi", status: currentStatus, state_change_seq: answered ? 2 : 1, repository: root } }) };
     }
     if (action === "prompt") {
       promptCount += 1;
@@ -390,8 +391,27 @@ function deliveryFixture({ status = "idle", report = "fresh worker findings", fa
     }
     throw new Error(`unexpected action: ${action}`);
   };
-  return { calls, runProcess, markAnswered: () => { answered = true; }, get promptCount() { return promptCount; }, get echoedPrompt() { return echoedPrompt; } };
+  return { calls, runProcess, setStatus: (value) => { currentStatus = value; }, markAnswered: () => { answered = true; }, get promptCount() { return promptCount; }, get echoedPrompt() { return echoedPrompt; } };
 }
+
+test("persisted busy-worker brief stays queued until a delivery query observes idle", async (t) => {
+  const { store } = await offlineStore(t);
+  const f = deliveryFixture({ status: "working" });
+  const options = { runProcess: f.runProcess, offlinePersistence: store };
+  const queued = await executeHerdrCommunication(
+    { action: "submit", role: "worker", prompt: "review later", timeoutMs: 1000 }, { cwd: root }, options,
+  );
+  assert.equal(queued.deliveryState, "queued");
+  assert.equal(f.promptCount, 0);
+  const pending = await executeHerdrCommunication({ action: "delivery", deliveryId: queued.deliveryId }, { cwd: root }, options);
+  assert.equal(pending.deliveryState, "queued");
+  f.setStatus("idle");
+  const delivered = await executeHerdrCommunication({ action: "delivery", deliveryId: queued.deliveryId }, { cwd: root }, options);
+  assert.equal(delivered.deliveryState, "delivered");
+  assert.equal(f.promptCount, 1);
+  await executeHerdrCommunication({ action: "delivery", deliveryId: queued.deliveryId }, { cwd: root }, options);
+  assert.equal(f.promptCount, 1);
+});
 
 test("offline communication refuses every role-keyed observation without transport", async (t) => {
   const { store } = await offlineStore(t);
@@ -662,14 +682,19 @@ test("prompt refusals are structured and never throw", async () => {
   assert.equal(oversized.code, "prompt_oversized");
 
   const busy = deliveryFixture({ status: "working" });
-  const notPromptable = await executeHerdrCommunication(
+  const queued = await executeHerdrCommunication(
     { action: "prompt", role: "worker", prompt: "x", timeoutMs: 100 },
     { cwd: root }, { runProcess: busy.runProcess },
   );
-  assert.equal(notPromptable.ok, false);
-  assert.equal(notPromptable.status, "refused");
-  assert.equal(notPromptable.code, "role_not_promptable");
+  assert.equal(queued.ok, true);
+  assert.equal(queued.deliveryState, "queued");
   assert.equal(busy.calls.filter((call) => call.action === "prompt").length, 0);
+  const stillBusy = await executeHerdrCommunication({ action: "delivery", deliveryId: queued.deliveryId }, { cwd: root }, { runProcess: busy.runProcess });
+  assert.equal(stillBusy.deliveryState, "queued");
+  busy.setStatus("idle");
+  const sent = await executeHerdrCommunication({ action: "delivery", deliveryId: queued.deliveryId }, { cwd: root }, { runProcess: busy.runProcess });
+  assert.equal(sent.deliveryState, "delivered");
+  assert.equal(busy.calls.filter((call) => call.action === "prompt").length, 1);
 
   const goneRunProcess = async ({ argv }) => {
     if (argv[1] === "get") return { code: 2, stdout: "", stderr: "agent_name_not_found" };

@@ -56,14 +56,14 @@ proofs for agentic workflows.
 | `tasks` | Keeps a priority-ordered session plan, then lets the owner make selected items durable in `TASKS.md`. | shipped |
 | `decision-to-spec` skill | Drafts one reviewable assignment from your explicit decision or a sourced, quoted relay, with observable outcomes and a stop point. | packaged skill |
 | `agentic_decision_evidence` | Records the stated source of a decision (direct or relayed, with quote, where, when and relayer) for a private assignment; it verifies no identity and creates no authority. | shipped |
-| `agentic_relay_check_request` | Checks whether a recorded, scoped relay covers each requested private action; read-only preflight, with authority checked again at the action boundary. | merged, unreleased |
+| `agentic_relay_check_request` | Checks whether a recorded, scoped relay covers each requested private action; read-only preflight, with authority checked again at the action boundary. | included in 2.1.0 |
 | `agentic_merge_review_record` | Records independent Standards and Spec verdicts for an exact PR head; read only when the merge policy is `agents-after-checks-and-review`, and it merges nothing. | shipped |
 | `agentic_herdr_communication` | Submits one prompt and observes delivery and marked reports; never grants authority. | shipped |
-| `agentic_herdr_spawn_worker` | Starts one Pi worker in a pane or tab, with native confirmation. | shipped |
+| `agentic_herdr_spawn_worker` | Starts one Pi worker in its repository's own labeled workspace, in a pane or tab, with native confirmation. | shipped |
 | `agentic_aidr` | A remedy for AI;DR. Reviews writing for clarity, simplicity, brevity, and humanity. | shipped |
 | `agentic_linux_microvm_cutover` | Runs one job in a throwaway QEMU/KVM virtual machine on a Linux host, with a severity-tiered killswitch that stops escape attempts. | user-enabled, native confirmation |
-| `agentic_worker_dispatch` | Runs bounded worker journeys and observes worker liveness. Each iteration is a durable checkpoint, so an interrupted journey resumes without resending an uncertain prompt; the `journeys` action lists the records. | shipped; durable recovery merged, unreleased |
-| `agentic_journey_outward_effect` | Makes one confirmed Git push, or private draft PR create or update, for an existing journey; after an interruption it checks the remote and never repeats an uncertain write. | merged, unreleased, native confirmation |
+| `agentic_worker_dispatch` | Runs bounded worker journeys and observes worker liveness. Each iteration is a durable checkpoint, so an interrupted journey resumes without resending an uncertain prompt; the `journeys` action lists the records. | included in 2.1.0 |
+| `agentic_journey_outward_effect` | Makes one confirmed Git push, or private draft PR create or update, for an existing journey; after an interruption it checks the remote and never repeats an uncertain write. | included in 2.1.0, native confirmation |
 | `agentic_kanban_board` | Shows the workspace task board: lanes, flags, priorities, dependencies, and which cards can run. | shipped |
 | `agentic_kanban_board_write` | Adds cards to the board through the trusted writer, which records who authorized the work. | shipped |
 | `agentic_kanban_board_update` | Moves, closes, flags, edits, or removes cards on the board, always recording who authorized the change. | shipped |
@@ -72,6 +72,8 @@ proofs for agentic workflows.
 | `agentic-recovery-evidence` | Opens private recovery evidence in the local TUI; it is not a model-callable tool or recovery authorization. | shipped, local review only |
 | Router | Capacity/policy routing for Board Pulse: seats with scope statements, tunable policy values, and a binding dispatch gate. | shipped |
 | Janus (bundled service) | Local Jev evaluation service on loopback: semantic ranking, the dispatch-gate judgment, redaction before every external call. See `janus/README.md`. | shipped |
+| `weekly-build-recap` skill | Prepares a local weekly GitHub recap with a picture and draft posts; posting remains yours. | shipped |
+| Bounded loop-until-done | Keeps a session working toward an explicit stopping condition within configured limits; packaged since 2.0.0 and documented here. | shipped |
 
 **Status: active development and testing.** The disabled NUDGE classifier and
 private evidence store are packaged foundations, not a running recovery
@@ -81,6 +83,8 @@ not presented as live features. Worker dispatch persistence is on by
 default and resumes interrupted journeys from durable checkpoints. Its crash
 tests use a simulated Herdr adapter, a local Git remote and a simulated
 GitHub endpoint, so recovery in a live deployed pane is not yet proven.
+
+Busy workers can receive queued briefs or messages without treating delivery as a completed answer. An idle worker without a done marker is classified as stalled, rather than complete; the former idle-eligible state has been renamed. See `scripts/enforcement/loop_until_done_guide.md` for the bounded loop's limits and stopping behavior. The weekly recap skill lives in `skills/weekly-build-recap/` and writes local drafts only.
 
 ## Code review and planning
 
@@ -433,7 +437,7 @@ silently, and return results as untrusted evidence.
 </details>
 
 <details>
-<summary><strong>loop-until-done, bounded session-task loops</strong> <em>(merged, unreleased)</em></summary>
+<summary><strong>loop-until-done, bounded session-task loops</strong> <em>(packaged since 2.0.0)</em></summary>
 
 `/loop-until-done <steps> <approved goal> :: <observable exit check>` gives
 one already-authorized coordinator session task a fixed worker-dispatch budget.
@@ -927,7 +931,7 @@ treats agent reports as untrusted evidence. It never overwrites an existing `AGE
 *Methods your agent loads on request. A skill never grants authority.*
 
 <details>
-<summary><strong>Packaged skills, driver workflows and pstack ports for Pi</strong> <em>(merged, unreleased)</em></summary>
+<summary><strong>Packaged skills, driver workflows and pstack ports for Pi</strong> <em>(included in 2.1.0)</em></summary>
 
 The package registers 59 skills alongside the extensions. Invoke one with
 `/skill:<name>`. Pi may load a skill description on its own; loading is not

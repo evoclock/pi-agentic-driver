@@ -70,6 +70,12 @@ const cwdArg = () => {
   return index >= 0 ? argv[index + 1] : process.cwd();
 };
 const command = argv[0];
+if (command === "workspace" && argv[1] === "list") {
+  emit({ workspaces: [{ label: mode === "foreign-workspace" ? "other-repo" : "agents-work", workspace_id: "w7" }] }); process.exit(0);
+}
+if (command === "pane" && argv[1] === "list") {
+  emit({ panes: [{ workspace_id: "w7", cwd: mode === "foreign-pane" ? "/not/the/repository" : process.env.FAKE_HERDR_WORKER_ROOT }] }); process.exit(0);
+}
 if (command === "agent" && argv[1] === "list") {
   if (mode === "duplicate") emit({ agents: [{ name: argv[2] || "worker" }] });
   else emit({ agents: [] });
@@ -176,6 +182,7 @@ function fixture(options = {}) {
   process.env.FAKE_HERDR_MODE = options.mode ?? "";
   process.env.FAKE_HERDR_STATE = statePath;
   process.env.FAKE_HERDR_PANE_STATE = join(root, "pane-state.json");
+  process.env.FAKE_HERDR_WORKER_ROOT = workerRoot;
 
   const herdrOptions = {
     testExecutablePath: fake,
@@ -204,7 +211,8 @@ function fixture(options = {}) {
 
 function readLog(log) {
   if (!existsSync(log)) return [];
-  return readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  return readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line))
+    .filter(({ argv }) => !["workspace", "pane"].includes(argv[0]) || argv[1] !== "list");
 }
 
 function cleanup(root) {
@@ -227,6 +235,27 @@ test("a parameterized target is optional and bounded: old four-key calls stay va
     (error) => error.code === "closed_parameters");
 });
 
+test("worker spawn refuses a foreign workspace or pane before tab creation", async () => {
+  for (const mode of ["foreign-workspace", "foreign-pane"]) {
+    const f = fixture({ mode });
+    try {
+      process.env.HERDR_PANE_ID = "w1:p1";
+      const result = await executeHerdrSpawnWorker(f.params, f.context, f.herdrOptions);
+      assert.equal(result.code, "workspace_untrusted", JSON.stringify(result));
+      assert.equal(readLog(f.log).some(({ argv }) => argv[0] === "tab"), false);
+    } finally { cleanup(f.root); }
+  }
+});
+
+test("a worker cannot split the coordinator pane", async () => {
+  const f = fixture({ placement: "right" });
+  try {
+    const result = await executeHerdrSpawnWorker(f.params, f.context, f.herdrOptions);
+    assert.equal(result.code, "worker_tab_required");
+    assert.deepEqual(readLog(f.log), []);
+  } finally { cleanup(f.root); }
+});
+
 test("authorized repo + active exact lease + confirmation spawns once at the exact target", async () => {
   const f = fixture();
   const confirmations = [];
@@ -245,7 +274,7 @@ test("authorized repo + active exact lease + confirmation spawns once at the exa
     const calls = readLog(f.log);
     assert.deepEqual(calls.map((entry) => entry.argv).filter((argv) => argv[0] === "tab" || argv[0] === "agent"), [
       ["agent", "list"],
-      ["tab", "create", "--cwd", realpathSync(f.worktree), "--no-focus", "--label", "worker"],
+      ["tab", "create", "--workspace", "w7", "--cwd", realpathSync(f.worktree), "--no-focus", "--label", "worker"],
       ["agent", "start", "worker", "--kind", "pi", "--pane", "w7:p10", "--timeout", "120000", "--", "--model", MODEL],
       ["agent", "get", "worker"],
     ]);
@@ -286,7 +315,7 @@ for (const boundary of ["tui", "attended"]) {
         assert.equal(revoked, true);
         const commands = [["agent", "list"], ["tab", "create"], ...(mutation === "start" ? [["agent", "start"]] : [])];
         console.log("dispatch timing", JSON.stringify({ boundary, mutation, dispatches, result }));
-        assert.deepEqual(dispatches.map((entry) => entry.command), commands);
+        assert.deepEqual(dispatches.map((entry) => entry.command), [["agent", "list"], ["workspace", "list"], ["pane", "list"], ...commands.slice(1)]);
         assert.ok(dispatches.every((entry) => !entry.revoked && entry.leases === 1), "every actual dispatch precedes revocation, without an owned yield");
         assert.deepEqual(readLog(f.log).map((entry) => entry.argv.slice(0, 2)), commands, "one actual effect per dispatch, no retry");
         assert.equal(result.ok, false);
@@ -325,7 +354,7 @@ test("a missing target keeps the old behavior and never consults Treehouse", asy
     assert.equal(result.worktreePath, undefined);
     assert.equal(result.leaseId, undefined);
     const tab = readLog(f.log).find((entry) => entry.argv[0] === "tab");
-    assert.equal(tab.argv[3], realpathSync(f.workerRoot));
+    assert.equal(tab.argv[5], realpathSync(f.workerRoot));
   } finally {
     cleanup(f.root);
   }
@@ -430,7 +459,7 @@ test("the attended Electron boundary honors the same target and refusal rules", 
     assert.equal(result.worktreePath, realpathSync(ok.worktree));
     assert.equal(result.leaseId, LEASE_ID);
     const tab = readLog(ok.log).find((entry) => entry.argv[0] === "tab");
-    assert.equal(tab.argv[3], realpathSync(ok.worktree));
+    assert.equal(tab.argv[5], realpathSync(ok.worktree));
   } finally {
     cleanup(ok.root);
   }
@@ -520,7 +549,7 @@ test("WT-01: an ordinary dirty legitimate target is still accepted (dirty state 
   }
 });
 
-test("WT-02/STD-02: lease revoked during the coordinator pane observation is refused before any split", async () => {
+test("WT-02/STD-02: coordinator pane placements are denied before observing a lease", async () => {
   for (const placement of ["right", "below"]) {
     const f = fixture({ placement });
     process.env.HERDR_PANE_ID = "synthetic-pane";
@@ -545,8 +574,8 @@ test("WT-02/STD-02: lease revoked during the coordinator pane observation is ref
     try {
       const result = await executeHerdrSpawnWorker(f.params, f.context, f.herdrOptions);
       assert.equal(result.ok, false, placement);
-      assert.equal(result.code, "worktree_target_changed", placement);
-      assert.equal(result.status, "blocked", `${placement}: no mutation happened`);
+      assert.equal(result.code, "worker_tab_required", placement);
+      assert.equal(result.status, "denied", `${placement}: no mutation happened`);
       assert.equal(
         readLog(f.log).filter((entry) => entry.argv[0] === "pane" && entry.argv[1] === "split").length,
         0,
@@ -706,20 +735,13 @@ test("WT-05/STD-05: read-back reports independently persisted pane cwd; a wrong 
   }
 });
 
-test("WT-05: a target-specific split runs in the target cwd and is accepted for right placement", async () => {
+test("WT-05: a target-specific split is denied before creating a pane", async () => {
   const f = fixture({ placement: "right" });
-  process.env.HERDR_PANE_ID = "synthetic-pane";
   try {
     const result = await executeHerdrSpawnWorker(f.params, f.context, f.herdrOptions);
-    assert.equal(result.ok, true, JSON.stringify(result));
-    const split = readLog(f.log).find((entry) => entry.argv[0] === "pane" && entry.argv[1] === "split");
-    assert.equal(split.argv[6], realpathSync(f.worktree), "the split --cwd is the target");
-    assert.equal(realpathSync(split.cwd), realpathSync(f.worktree), "the split process cwd is the target");
-    const state = JSON.parse(readFileSync(process.env.FAKE_HERDR_PANE_STATE, "utf8"));
-    assert.equal(state["w7:p10"], realpathSync(f.worktree));
-  } finally {
-    cleanup(f.root);
-  }
+    assert.equal(result.code, "worker_tab_required");
+    assert.deepEqual(readLog(f.log), []);
+  } finally { cleanup(f.root); }
 });
 
 test("WT-06/STD-06: Git probes are bounded and fail with a structured error", async () => {
@@ -803,7 +825,7 @@ function revokeRegistryDuring(f, action, sub) {
   };
 }
 
-test("WT-08/STD-07/SPEC-005: registry revocation during the coordinator pane observation is refused before any split", async () => {
+test("WT-08/STD-07/SPEC-005: coordinator pane placements are refused before any registry observation", async () => {
   for (const placement of ["right", "below"]) {
     const f = fixture({ placement });
     process.env.HERDR_PANE_ID = "synthetic-pane";
@@ -811,7 +833,7 @@ test("WT-08/STD-07/SPEC-005: registry revocation during the coordinator pane obs
     try {
       const result = await executeHerdrSpawnWorker(f.params, f.context, f.herdrOptions);
       assert.equal(result.ok, false, `${placement}: ${JSON.stringify(result)}`);
-      assert.equal(result.code, "repository_untrusted", placement);
+      assert.equal(result.code, "worker_tab_required", placement);
       assert.equal(result.status, "denied", `${placement}: no layout mutation happened`);
       assert.equal(result.partial, undefined, `${placement}: no layout partial is claimed`);
       const log = readLog(f.log);

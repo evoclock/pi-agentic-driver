@@ -16,6 +16,7 @@ export const NUDGE_STUCK_REASONS = Object.freeze([
   "working-sequence-frozen",
   "status-unknown",
   "done-report-unavailable",
+  "idle-report-missing",
 ]);
 
 // The seven classifier states (NUDGE §2), in rule order.
@@ -25,19 +26,20 @@ export const NUDGE_CLASSIFIER_STATES = Object.freeze([
   "stuck-on-dialog",
   "working-on-task",
   "stalled-unknown",
-  "idle-eligible",
+  "idle-without-report",
   "done-without-report",
 ]);
 
 // Classifier state → stuck reason (NUDGE §5 table). States outside the
 // stuck taxonomy map to null: `complete`, `gone`, `working-on-task`, and
-// `idle-eligible` are not recovery triggers.
+// a complete report is not a recovery trigger.
 export const NUDGE_STATE_REASON = Object.freeze({
   "stuck-on-dialog": "blocked-modal",
   // Deliberately null: callers must use stalledUnknownReason() to resolve
   // frozen-sequence versus unknown-status evidence.
   "stalled-unknown": null,
   "done-without-report": "done-report-unavailable",
+  "idle-without-report": "idle-report-missing",
 });
 
 // `stalled-unknown` splits on evidence: a frozen working sequence is
@@ -153,9 +155,10 @@ export function classifyObservation({
       confidenceBasis: agentStatus === "working" ? "rule-5-frozen-sequence" : "rule-5-unknown-status",
     };
   }
-  // Rule 6 — idle-eligible: idle with no complete report.
+  // Rule 6 — idle without the completion marker is a stalled handoff,
+  // including a worker that stopped after filing a request or note.
   if (agentStatus === "idle") {
-    return { state: "idle-eligible", reasonCode: null, confidenceBasis: "rule-6-idle-no-report" };
+    return { state: "idle-without-report", reasonCode: "idle-report-missing", confidenceBasis: "rule-6-idle-no-report" };
   }
   // Rule 7 — done-without-report: done with no extractable complete report;
   // terminal evidence failure `done-report-unavailable`.
