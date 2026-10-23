@@ -47,7 +47,7 @@ test("fresh offline packed install loads all configured skills and imports", asy
     const expected = manifest.pi.skills.map((entry) => entry.split("/").at(-1));
     assert.equal(expected.filter((name) => name.endsWith("-pi")).length, 54, "all pinned Pi ports must ship");
     assert.deepEqual(expected.filter((name) => !name.endsWith("-pi")).sort(),
-      ["decision-to-spec", "harvest-lessons", "public-pr-wording", "pulse", "tasks"].sort(),
+      ["decision-to-spec", "harvest-lessons", "public-pr-wording", "pulse", "tasks", "weekly-build-recap"].sort(),
       "the packaged non-port skills must ship");
     const loader = new DefaultResourceLoader({
       cwd: consumer,

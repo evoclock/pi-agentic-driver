@@ -48,6 +48,12 @@ const fail = (code, message) => {
   process.exit(1);
 };
 const command = argv[0];
+if (command === "workspace" && argv[1] === "list") {
+  emit({ workspaces: [{ label: "agents-work", workspace_id: "w7" }] }); process.exit(0);
+}
+if (command === "pane" && argv[1] === "list") {
+  emit({ panes: [{ workspace_id: "w7", cwd: process.cwd() }] }); process.exit(0);
+}
 if (command === "agent" && argv[1] === "list") {
   if (mode === "duplicate") emit({ agents: [{ name: argv[2] || "worker" }] });
   else emit({ agents: [] });
@@ -161,7 +167,8 @@ test("spawn target requires a registered lowercase standalone Git root, not a wo
 
 function readLog(log) {
   if (!existsSync(log)) return [];
-  return readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line).argv);
+  return readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line).argv)
+    .filter((argv) => !["workspace", "pane"].includes(argv[0]) || argv[1] !== "list");
 }
 
 function cleanup(root) {
@@ -308,7 +315,7 @@ test("the commit stage performs one guarded verified start with exact argv and r
     assert.ok(confirmations[0].message.includes(MODEL));
     assert.deepEqual(readLog(f.log), [
       ["agent", "list"],
-      ["tab", "create", "--cwd", realpathSync(f.workerRoot), "--no-focus", "--label", "worker"],
+      ["tab", "create", "--workspace", "w7", "--cwd", realpathSync(f.workerRoot), "--no-focus", "--label", "worker"],
       ["agent", "start", "worker", "--kind", "pi", "--pane", "w7:p10", "--timeout", "120000", "--", "--model", MODEL],
       ["agent", "get", "worker"],
       ["pane", "get", "w7:p10"],
@@ -485,7 +492,7 @@ test("a native TUI lifecycle still refuses a missing HERDR_PANE_ID (never manufa
     const tuiContext = { mode: "tui", hasUI: true, ui: { confirm: async () => true }, cwd: f.coordinator };
     const { executeHerdrSpawnWorker } = await import("../scripts/enforcement/herdr_lifecycle_pi.js");
     const result = await executeHerdrSpawnWorker(
-      { placement: "below", role: "worker", model: MODEL, repository: WORKER_REPO },
+      { placement: "tab", role: "worker", model: MODEL, repository: WORKER_REPO },
       tuiContext,
       f.herdrOptions,
     );

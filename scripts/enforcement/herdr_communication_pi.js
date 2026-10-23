@@ -1325,6 +1325,10 @@ async function queryPersistedDelivery(request, context, options, signal, reposit
   const observed = await queryDelivery(request, context, options, signal, repositories);
   if (observed.deliveryState === "answered") {
     await store.update("delivery", saved.id, saved.digest, { state: "answered", report: observed.report, answeredAt: observed.answeredAt, proof: "snapshot-backed-v1" });
+  } else if (saved.state === "queued" && observed.deliveryState === "delivered") {
+    await store.update("delivery", saved.id, saved.digest, { state: "delivered", acceptedAt: observed.acceptedAt });
+  } else if (observed.deliveryState === "unknown") {
+    await store.update("delivery", saved.id, saved.digest, { state: "held", code: observed.code ?? "handoff-uncertain" });
   }
   return { ...observed, persisted: true };
 }
@@ -1476,11 +1480,20 @@ async function deliverPrompt(operation, request, context, options, signal, repos
   }
   let record;
   try {
-    // Preflight: the role must map to a live, idle Pi agent in a trusted
-    // repository. A refusal here is structured and final — there is no
-    // fallback target, no retry, and no resend.
+    // Preflight: the role must map to a live Pi agent in a trusted
+    // repository. A busy role holds the brief until an idle delivery query;
+    // there is no fallback target, retry, or mid-run pane write.
     const current = await invokeHerdr("get", { action: "get", role }, context, options, signal);
-    publicAgentObservation(extractAgent(current, "agent_info"), role, repositories, { requirePromptable: true });
+    const preflight = publicAgentObservation(extractAgent(current, "agent_info"), role, repositories);
+    if (!PROMPTABLE_STATUSES.has(preflight.status)) {
+      record = createDelivery(role, request.prompt, undefined, undefined, options);
+      record.waitingForIdle = true;
+      return {
+        schema: HERDR_COMMUNICATION_SCHEMA, ok: true, status: "accepted", operation,
+        deliveryId: record.deliveryId, role, deliveryState: "queued", promptSent: false,
+        nonAuthorizing: true, authorityCreated: false,
+      };
+    }
     // Pre-delivery snapshot: without it, a later delivery query can never
     // attribute a report to this handoff and reports 'unattributed' rather
     // than guessing.
@@ -1689,6 +1702,35 @@ async function queryDelivery(request, context, options, signal, repositories) {
   }
   if (record.state === "unattributed") {
     return deliverySnapshot(record, { reason: record.reason });
+  }
+  // A busy role retains the brief without writing into its running pane.
+  // Only a delivery query may hand it off, after a fresh idle observation.
+  if (record.state === "queued" && record.waitingForIdle) {
+    if (record.handoffPending) return deliverySnapshot(record);
+    record.handoffPending = true;
+    try {
+      const current = await invokeHerdr("get", { action: "get", role: record.role }, context, options, signal);
+      const observation = publicAgentObservation(extractAgent(current, "agent_info"), record.role, repositories);
+      if (!PROMPTABLE_STATUSES.has(observation.status)) return deliverySnapshot(record);
+      record.pre = readText(await invokeHerdr("read", { action: "read", role: record.role }, context, options, signal));
+      record.seqBefore = stateChangeSeq(current);
+      record.handoffAttempted = true;
+      const accepted = await invokeHerdr("prompt_async", {
+        action: "prompt", role: record.role, prompt: record.prompt,
+        timeoutMs: COMMAND_TIMEOUT_MS, sentPrompt: record.sentPrompt,
+      }, context, options, signal);
+      publicAgentObservation(extractAgent(accepted, "agent_prompted"), record.role, repositories);
+      record.state = "delivered";
+      record.acceptedAt = new Date().toISOString();
+      record.waitingForIdle = false;
+    } catch (error) {
+      // Once the handoff was attempted, failure is uncertain; never resend.
+      record.state = record.handoffAttempted ? "unknown" : "queued";
+      record.code = error instanceof HerdrCommunicationError ? error.code : "unexpected_adapter_failure";
+    } finally {
+      record.handoffPending = false;
+    }
+    return deliverySnapshot(record, { ...(record.code ? { code: record.code } : {}) });
   }
   // queued or delivered.
   if (!record.pre) {

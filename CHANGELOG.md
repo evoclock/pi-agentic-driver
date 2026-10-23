@@ -1,8 +1,16 @@
 # Changelog
 
-Release dates below come from the read-only npm registry `time` record for `@evoclock/pi-agentic-driver` (checked 2026-10-22). Version 2.0.0 is proposed, not published.
+Release dates below come from the read-only npm registry `time` record for `@evoclock/pi-agentic-driver` (checked 2026-10-22).
 
-## 2.0.0 (unreleased)
+## 2.1.0 (unreleased)
+
+- Add the weekly build recap skill with an optional local phrase override and neutral default palette.
+- Guard worker spawning by workspace label so workers start in their repository's own workspace.
+- Queue briefs and messages for busy workers instead of dropping them.
+- Classify idle workers without a done marker as stalled; the former idle-eligible state was renamed.
+- Document bounded loop-until-done, packaged since 2.0.0 rather than new in this release.
+
+## 2.0.0
 
 - Rename `claimFromVogelkopRequest` to `claimFromBoardRequest` without an alias.
 - Migrate `vogelkop.board-claim-request.v1` to `agentic-driver.board-claim-request.v2`, `vogelkop.board-claim-receipt.v1` to `agentic-driver.board-claim-receipt.v2`, `vogelkop.board-claim-route.v1` to `agentic-driver.board-claim-route.v2`, and `vogelkop.async-transport.receipt.v1` to `agentic-driver.async-transport.receipt.v2`. Legacy request schemas are refused; update producers and consumers together.

@@ -23,3 +23,4 @@ __pycache__/
 skills/public-pr-wording/pr_wording_config.local.json
 config/model-route-policy.v1.local.json
 config/public-sync-terms.local.json
+skills/weekly-build-recap/banned.local.json
