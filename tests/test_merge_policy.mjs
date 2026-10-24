@@ -8,7 +8,6 @@ import {
   mergePolicyPath, DEFAULT_MERGE_POLICY, HUMAN_MERGES_ONLY, AGENTS_AFTER_CHECKS_AND_REVIEW, MERGE_POLICY_SCHEMA,
 } from "../scripts/enforcement/merge_policy.js";
 import { guardToolCall, registerAttendedAuthorityGuard } from "../scripts/enforcement/attended_authority_guard.js";
-import { portedSkillHashes, FIXTURE } from "../scripts/ported_skill_hashes.mjs";
 
 const SHA = "a".repeat(40);
 const HEADLESS = { mode: "rpc", hasUI: false };
@@ -173,10 +172,4 @@ test("review record tool validates and writes only verdicts for a full SHA", asy
   assert.equal(noSession.details.recorded, false);
   assert.match(writes[0][0], new RegExp(`merge-reviews/${SHA}\\.json$`));
   assert.equal(JSON.parse(writes[0][1]).spec, "PASS");
-});
-
-test("ported pstack skills are byte-identical to the recorded hashes", () => {
-  const recorded = JSON.parse(readFileSync(FIXTURE, "utf8"));
-  assert.ok(Object.keys(recorded).some((k) => k.startsWith("skills/setup-pstack-pi/")));
-  assert.deepEqual(portedSkillHashes(), recorded);
 });

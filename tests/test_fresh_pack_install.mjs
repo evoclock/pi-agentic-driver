@@ -45,9 +45,9 @@ test("fresh offline packed install loads all configured skills and imports", asy
     const installed = join(consumer, "node_modules/@evoclock/pi-agentic-driver");
     const manifest = JSON.parse(readFileSync(join(installed, "package.json"), "utf8"));
     const expected = manifest.pi.skills.map((entry) => entry.split("/").at(-1));
-    assert.equal(expected.filter((name) => name.endsWith("-pi")).length, 54, "all pinned Pi ports must ship");
+    assert.deepEqual(expected.filter((name) => name.endsWith("-pi")), ["correct-pi"], "only the native correction skill ships");
     assert.deepEqual(expected.filter((name) => !name.endsWith("-pi")).sort(),
-      ["decision-to-spec", "harvest-lessons", "public-pr-wording", "pulse", "tasks", "weekly-build-recap"].sort(),
+      ["crew-tracker-sync", "decision-to-spec", "harvest-lessons", "public-pr-wording", "pulse", "release-public", "tasks", "weekly-build-recap"].sort(),
       "the packaged non-port skills must ship");
     const loader = new DefaultResourceLoader({
       cwd: consumer,

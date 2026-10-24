@@ -119,7 +119,9 @@ export function pulseCheck({ boardPath, modelRegistry = null, scopedModels = nul
     placement: pulsePolicy ? effectivePolicy.placement : null,
     activeSessions, providerLimit,
   });
-  return { ok: true, code: null, reason: null, scan, diagnosticHash, validated, effectivePolicy, pulsePolicy, activeClaims, activeSessions, providerLimit };
+  const noReady = !scan.cards.some((card) => card.result === "READY_FOR_NEXT");
+  const reason = noReady ? "No ready board card; rank unranked backlog cards P0–P3 and supply a definition of done before dispatch." : null;
+  return { ok: true, code: null, reason, scan, diagnosticHash, validated, effectivePolicy, pulsePolicy, activeClaims, activeSessions, providerLimit };
 }
 
 export async function routePulseCheck(check, { routerConfig, quotaObservations = [], healthObservations = {}, consumptionSamples = [], existingReservations = [], modelInstalled = null, janusRank = null, now = null } = {}) {

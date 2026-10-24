@@ -204,6 +204,7 @@ test("claims v3: evidence map is HMAC-covered — tampering with evidence fails 
       claims: raw.claims,
       consumedClaims: raw.consumedClaims,
       evidence: { [`${"e".repeat(64)}`]: { forged: true } },
+      events: raw.events,
     };
     forged.hmac = createHmac("sha256", writer.secret)
       .update(canonicalJsonString({

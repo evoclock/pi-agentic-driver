@@ -649,9 +649,10 @@ function readWriterState(statePath) {
       pendingClaimsState: state?.pendingClaimsState && typeof state.pendingClaimsState === "object"
         ? state.pendingClaimsState
         : null,
+      pendingBoardText: typeof state?.pendingBoardText === "string" ? state.pendingBoardText : null,
     };
   } catch {
-    return { highWaterMark: 0, secret: null, issuedCardIds: [], claimsGeneration: 0, claimsDigest: null, pendingClaimsState: null };
+    return { highWaterMark: 0, secret: null, issuedCardIds: [], claimsGeneration: 0, claimsDigest: null, pendingClaimsState: null, pendingBoardText: null };
   }
 }
 
@@ -1072,6 +1073,39 @@ function applyCardChanges(card, changes) {
 // definitionOfDone, stoppingPoint, scopePaths, capabilities, dependencies
 // (full replacement list), base, dueDate, role, tags. The authority record is
 // REQUIRED and re-recorded (HMAC bound to the recomputed card hash).
+// Re-sign edited semantics only for cards already issued by this writer.
+// A human edit cannot forge an issued ID or the original writer provenance.
+function resignEditedBoardLocked(boardPath, registries) {
+  if (!existsSync(boardPath)) return { ok: true };
+  const parsed = parseBoard(readFileSync(boardPath, "utf8"));
+  const state = readWriterState(writerStatePath(boardPath));
+  const actions = [];
+  for (const card of parsed.cards) {
+    if (!card.hash || card.hash === computeCardHash(card)) continue;
+    const provenance = verifyAuthorityProvenance({ cardId: card.cardId, cardHash: card.hash,
+      statePath: writerStatePath(boardPath),
+      authoritySource: { ...card.authoritySource, writerHmac: card.authorityWriterHmac } });
+    if (!provenance.ok) return { ok: false, code: "board-invalid", errors: [provenance.reason] };
+    const oldDigest = card.hash;
+    card.specHash = card.specText == null ? null : computeSpecHash(card.specText);
+    card.dodHash = card.dodText == null ? null : computeSpecHash(card.dodText);
+    card.hash = computeCardHash(card);
+    card.authorityWriterHmac = authorityRecordHmac(card.authoritySource, state.secret, card.hash);
+    actions.push({ action: "edit", at: new Date().toISOString(), cardId: card.cardId,
+      oldDigest, newDigest: card.hash, specDigest: card.specHash, dodDigest: card.dodHash });
+  }
+  if (!actions.length) return { ok: true };
+  const checked = validateBoard(serializeBoard(parsed.cards, { surface: "tasks" }), registries);
+  if (!checked.ok) return { ok: false, code: "board-invalid", errors: checked.errors };
+  const recovery = recoverClaimsAnchorLocked(boardPath);
+  if (!recovery.ok) return { ok: false, code: "claims-anchor-recovery-failed", errors: [recovery.reason] };
+  const current = readClaimsState(boardPath);
+  if (!current.ok) return { ok: false, code: "claims-corrupt", errors: [current.reason] };
+  writeClaims(boardPath, current.state.claims, { consumedClaims: current.state.consumedClaims,
+    transaction: current.state.transaction, actions, boardContent: serializeBoard(parsed.cards, { surface: "tasks" }) });
+  return { ok: true };
+}
+
 export function updateCard({ boardPath, cardId, changes, authority, registries = {}, surface = "tasks", now = null }) {
   if (typeof boardPath !== "string" || boardPath === "") {
     throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
@@ -1083,6 +1117,8 @@ export function updateCard({ boardPath, cardId, changes, authority, registries =
 }
 
 function updateCardLocked({ boardPath, cardId, changes, authority, registries, surface, now }) {
+  const resign = resignEditedBoardLocked(boardPath, registries);
+  if (!resign.ok) return resign;
   if (!existsSync(boardPath)) {
     return { ok: false, code: "board-unavailable", reason: "board file is no longer present (board-unavailable)", errors: ["board file is no longer present (board-unavailable)"], persisted: false };
   }
@@ -1112,6 +1148,27 @@ function updateCardLocked({ boardPath, cardId, changes, authority, registries, s
   // The authority record is REQUIRED for every mutation and is validated
   // exactly as at creation (recordAuthoritySource throws on malformation).
   const record = recordAuthoritySource(authority);
+  const claimsRead = readClaimsState(boardPath);
+  if (!claimsRead.ok) return { ok: false, code: "claims-corrupt", errors: [claimsRead.reason] };
+  const active = claimsRead.state.claims.find((claim) => claim.cardId === cardId);
+  const oldDod = active && (claimsRead.state.events.findLast((event) => event.action === "claim"
+    && event.envelopeId === active.envelopeId)?.dodDigest ?? active.envelope.acceptance.dodHash);
+  const currentDod = validatedBoard.cards[index].dodText == null ? null : computeSpecHash(validatedBoard.cards[index].dodText);
+  const drift = changes?.done === true && active && oldDod !== currentDod;
+  if (drift) {
+    const check = changes.recheck;
+    if (!check || !exactKeys(check, ["against", "result", "evidence"])
+      || check.against !== currentDod || !["pass", "fail"].includes(check.result)
+      || typeof check.evidence !== "string" || !check.evidence.trim() || check.evidence.length > 1024) {
+      return { ok: false, code: "dod-recheck-required", errors: ["re-check against the new DoD and provide {against, result, evidence} before completion"] };
+    }
+    if (check.result === "fail") {
+      writeClaims(boardPath, claimsRead.state.claims, { actions: [{ action: "dod-drift", at: new Date().toISOString(), cardId,
+        oldDodDigest: oldDod, newDodDigest: currentDod, checkedAgainst: check.against,
+        result: check.result, evidence: check.evidence }] });
+      return { ok: false, code: "dod-recheck-failed", errors: ["re-check failed; card remains in progress with the same claimant"], persisted: false, cardId };
+    }
+  }
   const { updated, changed, error } = applyCardChanges(validatedBoard.cards[index], changes);
   if (error) return { ok: false, code: error.code, errors: error.errors, persisted: false, cardId };
   if (changed.length === 0) {
@@ -1137,9 +1194,14 @@ function updateCardLocked({ boardPath, cardId, changes, authority, registries, s
   if (!roundTrip.ok) {
     return { ok: false, code: "serialization-invalid", errors: roundTrip.errors, persisted: false, cardId };
   }
-  const tmpPath = `${boardPath}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmpPath, serialized, "utf8");
-  renameSync(tmpPath, boardPath);
+  const actions = [];
+  if (drift) actions.push({ action: "dod-drift", at: new Date().toISOString(), cardId,
+    oldDodDigest: oldDod, newDodDigest: currentDod, checkedAgainst: changes.recheck.against,
+    result: changes.recheck.result, evidence: changes.recheck.evidence });
+  actions.push({ action: changes?.done === true ? "complete" : "edit", at: new Date().toISOString(), cardId,
+    oldDigest: validatedBoard.cards[index].hash, newDigest: updated.hash,
+    specDigest: computeSpecHash(updated.specText), dodDigest: computeSpecHash(updated.dodText) });
+  writeClaims(boardPath, claimsRead.state.claims, { actions, boardContent: serialized });
   // Derived projection recomputed from the canonical board after the mutation.
   const projection = writeProjection(boardPath, cards);
   return { ok: true, cardId, card: Object.freeze({ ...updated }), changedFields: changed, persisted: true, projection, ...(now ? { now } : {}) };
@@ -1194,6 +1256,7 @@ function deleteCardLocked({ boardPath, cardId, authority, registries, surface, n
 export function isDispatchable(card, boardIndex) {
   const failed = [];
   if (card.lane !== "backlog") failed.push(`lane is "${card.lane}", not "backlog"`);
+  if (!PRIORITIES.includes(card.priority)) failed.push("card is unranked; owner must assign P0–P3 before dispatch");
   if ((card.flags ?? []).includes("proposed")) failed.push("card carries the #proposed flag");
   if ((card.flags ?? []).includes("blocked")) failed.push("card carries the #blocked flag");
   if ((card.flags ?? []).includes("cancelled")) failed.push("card carries the #cancelled flag");
@@ -1275,7 +1338,7 @@ export function isDispatchable(card, boardIndex) {
 // Markdown stays canonical for task semantics.
 // ---------------------------------------------------------------------------
 
-export const CLAIMS_SCHEMA = "agentic-driver.board-claims.v3";
+export const CLAIMS_SCHEMA = "agentic-driver.board-claims.v4";
 export const ENVELOPE_SCHEMA = "agentic-driver.assignment-envelope.v2";
 export const AUTOMATION_POLICY_SCHEMA = "agentic-driver.automation-policy.v1";
 export const PLACEMENTS = Object.freeze(["container", "host"]);
@@ -1324,6 +1387,7 @@ function claimsFileHmac(value, secret, { includeEvidence = true } = {}) {
     consumedClaims: value.consumedClaims ?? [],
   };
   if (includeEvidence) payload.evidence = value.evidence ?? {};
+  if (value.schema === CLAIMS_SCHEMA) payload.events = value.events;
   return createHmac("sha256", secret)
     .update(canonicalJsonString(payload), "utf8")
     .digest("hex");
@@ -1427,7 +1491,8 @@ const CONSUMED_REASONS = Object.freeze([
 const TRANSACTION_FIELDS = Object.freeze(["op", "cardId", "envelopeId", "at", "phase"]);
 const REPLACE_TRANSACTION_FIELDS = Object.freeze(["op", "cardId", "envelopeId", "at", "phase", "oldEnvelopeId", "oldReason"]);
 // v2→v3: verdict evidence is closed and HMAC-authenticated; claims also gain lineage.
-const CLAIMS_STATE_FIELDS = Object.freeze(["schema", "generation", "transaction", "claims", "consumedClaims", "evidence", "hmac"]);
+const CLAIMS_STATE_FIELDS = Object.freeze(["schema", "generation", "transaction", "claims", "consumedClaims", "evidence", "events", "hmac"]);
+const V3_CLAIMS_STATE_FIELDS = Object.freeze(["schema", "generation", "transaction", "claims", "consumedClaims", "evidence", "hmac"]);
 const V2_CLAIMS_STATE_FIELDS = Object.freeze(["schema", "generation", "transaction", "claims", "consumedClaims", "hmac"]);
 const EVIDENCE_KEY_RE = /^[0-9a-f]{64}$/;
 
@@ -1486,6 +1551,39 @@ function wellFormedTransaction(tx) {
 // digest, is replay of older correctly signed state — rejected. Malformed
 // JSON, wrong shape, or an HMAC that does not verify → {ok: false, reason};
 // the caller MUST fail closed (refuse dispatch).
+// Event digests cover the canonical JSON of every field except digest itself.
+// The authenticated claims file remains the source of truth; the mirror is
+// rebuilt from it after recovery, never accepted as authority.
+export function verifyCardActionChain(events) {
+  if (!Array.isArray(events)) return { ok: false, index: 0, reason: "events must be an array" };
+  let previous = null;
+  for (let index = 0; index < events.length; index++) {
+    const event = events[index];
+    if (!event || typeof event !== "object" || Array.isArray(event)) return { ok: false, index, reason: "malformed event" };
+    const { digest, ...body } = event;
+    if (!ISO_TS_RE.test(body.at) || !["claim", "complete", "edit", "dod-drift"].includes(body.action)
+      || body.previousDigest !== previous || digest !== sha256Hex(canonicalJsonString(body))) {
+      return { ok: false, index, reason: "event digest chain breaks" };
+    }
+    previous = digest;
+  }
+  return { ok: true, digest: previous };
+}
+
+function boardLogPath(boardPath) {
+  return join(dirname(boardPath), ".vo" + "gelkop", "board-log.jsonl");
+}
+
+function mirrorCardActions(boardPath, events) {
+  const path = boardLogPath(boardPath);
+  mkdirSync(dirname(path), { recursive: true });
+  const content = events.map((event) => JSON.stringify(event)).join("\n") + (events.length ? "\n" : "");
+  if (existsSync(path) && readFileSync(path, "utf8") === content) return;
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, content, "utf8");
+  renameSync(tmp, path);
+}
+
 export function readClaimsState(boardPath) {
   const path = claimsPath(boardPath);
   const writerState = readWriterState(writerStatePath(boardPath));
@@ -1496,7 +1594,7 @@ export function readClaimsState(boardPath) {
     if (writerState.claimsDigest !== null || writerState.claimsGeneration > 0) {
       return { ok: false, reason: "the claims file is missing but the writer state anchors issued claims state — deletion is rejected (fails closed)" };
     }
-    return { ok: true, missing: true, state: { generation: 0, transaction: null, claims: [], consumedClaims: [], evidence: {} } };
+    return { ok: true, missing: true, state: { generation: 0, transaction: null, claims: [], consumedClaims: [], evidence: {}, events: [] } };
   }
   const value = readJsonFile(path);
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -1513,9 +1611,13 @@ export function readClaimsState(boardPath) {
       return { ok: false, reason: "the claims file is malformed or has an unknown shape (fails closed)" };
     }
     evidence = {};
-  } else if (!exactKeys(value, CLAIMS_STATE_FIELDS)) {
+  } else if (!exactKeys(value, value.schema === CLAIMS_SCHEMA ? CLAIMS_STATE_FIELDS : V3_CLAIMS_STATE_FIELDS)
+    || (value.schema !== CLAIMS_SCHEMA && value.schema !== "agentic-driver.board-claims.v3")) {
     return { ok: false, reason: "the claims file is malformed or has an unknown shape (fails closed)" };
   }
+  const events = value.schema === CLAIMS_SCHEMA ? value.events : [];
+  const chain = verifyCardActionChain(events);
+  if (!chain.ok) return { ok: false, reason: `card action chain breaks at event ${chain.index}: ${chain.reason} (fails closed)` };
   if (!isPlainEvidenceMap(evidence)) {
     return { ok: false, reason: "the claims evidence map is malformed (fails closed)" };
   }
@@ -1555,6 +1657,7 @@ export function readClaimsState(boardPath) {
       claims: value.claims,
       consumedClaims: value.consumedClaims,
       evidence,
+      events,
     },
   };
 }
@@ -1600,12 +1703,23 @@ function recoverClaimsAnchorLocked(boardPath) {
   const statePath = writerStatePath(boardPath);
   const writerState = readWriterState(statePath);
   const pending = writerState.pendingClaimsState;
-  if (pending === null) return { ok: true, recovered: false };
+  if (pending === null) {
+    if (writerState.pendingBoardText !== null) {
+      const tmp = `${boardPath}.tmp-${process.pid}-${Date.now()}`;
+      writeFileSync(tmp, writerState.pendingBoardText, "utf8");
+      renameSync(tmp, boardPath);
+      writeWriterState(statePath, { ...writerState, pendingBoardText: null });
+      const current = readClaimsState(boardPath);
+      if (current.ok) mirrorCardActions(boardPath, current.state.events);
+      return { ok: true, recovered: true };
+    }
+    return { ok: true, recovered: false };
+  }
   if (writerState.secret === null || !pending || typeof pending !== "object") {
     return { ok: false, reason: "the staged claims-anchor transaction is malformed or unauthenticated (fails closed)" };
   }
   const pendingLegacy = pending.schema === "agentic-driver.board-claims.v2";
-  if (pendingLegacy ? !exactKeys(pending, V2_CLAIMS_STATE_FIELDS) : !exactKeys(pending, CLAIMS_STATE_FIELDS)
+  if (pendingLegacy ? !exactKeys(pending, V2_CLAIMS_STATE_FIELDS) : !exactKeys(pending, pending.schema === CLAIMS_SCHEMA ? CLAIMS_STATE_FIELDS : V3_CLAIMS_STATE_FIELDS)
     || !Array.isArray(pending.claims) || !pending.claims.every((claim) => wellFormedClaim(claim, { legacy: pendingLegacy }))) {
     return { ok: false, reason: "the staged claims-anchor transaction is malformed or unauthenticated (fails closed)" };
   }
@@ -1619,10 +1733,17 @@ function recoverClaimsAnchorLocked(boardPath) {
     claimsDigest: claimsAnchorDigest(pending, writerState.secret),
     pendingClaimsState: null,
   });
+  if (writerState.pendingBoardText !== null) {
+    const tmp = `${boardPath}.tmp-${process.pid}-${Date.now()}`;
+    writeFileSync(tmp, writerState.pendingBoardText, "utf8");
+    renameSync(tmp, boardPath);
+    writeWriterState(statePath, { ...readWriterState(statePath), pendingBoardText: null });
+  }
+  mirrorCardActions(boardPath, pending.events ?? []);
   return { ok: true, recovered: true };
 }
 
-function writeClaims(boardPath, claims, { consumedClaims = null, transaction = null } = {}) {
+function writeClaims(boardPath, claims, { consumedClaims = null, transaction = null, actions = [], boardContent = null } = {}) {
   const statePath = writerStatePath(boardPath);
   let writerState = readWriterState(statePath);
   if (writerState.secret === null) {
@@ -1638,6 +1759,11 @@ function writeClaims(boardPath, claims, { consumedClaims = null, transaction = n
   const upgradedClaims = claims.map((claim) => claim.parentClaimId === undefined && claim.attemptIndex === undefined
     ? { ...claim, parentClaimId: null, attemptIndex: 0 }
     : claim);
+  const events = [...previous.state.events];
+  for (const action of actions) {
+    const body = { ...action, previousDigest: events.at(-1)?.digest ?? null };
+    events.push({ ...body, digest: sha256Hex(canonicalJsonString(body)) });
+  }
   const value = {
     schema: CLAIMS_SCHEMA,
     generation: previous.state.generation + 1,
@@ -1645,11 +1771,12 @@ function writeClaims(boardPath, claims, { consumedClaims = null, transaction = n
     claims: upgradedClaims,
     consumedClaims: consumedClaims ?? previous.state.consumedClaims,
     evidence: previous.state.evidence ?? {},
+    events,
   };
   value.hmac = claimsFileHmac(value, writerState.secret);
   // Prepare → claims → commit. Because prepare contains the complete signed
   // next value, recovery can safely roll forward after either later write.
-  writeWriterState(statePath, { ...writerState, pendingClaimsState: value });
+  writeWriterState(statePath, { ...writerState, pendingClaimsState: value, pendingBoardText: boardContent });
   writeJsonFileAtomic(claimsPath(boardPath), value);
   writeWriterState(statePath, {
     ...writerState,
@@ -1657,6 +1784,13 @@ function writeClaims(boardPath, claims, { consumedClaims = null, transaction = n
     claimsDigest: claimsAnchorDigest(value, writerState.secret),
     pendingClaimsState: null,
   });
+  if (boardContent !== null) {
+    const tmp = `${boardPath}.tmp-${process.pid}-${Date.now()}`;
+    writeFileSync(tmp, boardContent, "utf8");
+    renameSync(tmp, boardPath);
+    writeWriterState(statePath, { ...readWriterState(statePath), pendingBoardText: null });
+  }
+  mirrorCardActions(boardPath, events);
 }
 
 // The automation policy (§3.2, §4): an explicit, revocable record the USER
@@ -1962,8 +2096,8 @@ export function dispatchEligibility({ card, boardIndex, boardPath, activeClaims 
 
 const PRIORITY_ORDER = Object.freeze({ P0: 0, P1: 1, P2: 2, P3: 3 });
 
-// Select the highest-priority dispatchable, unclaimed, provenance-verified
-// card. Optional cardId restricts selection to that card.
+// Select the highest-priority ready, unclaimed, provenance-verified backlog
+// card. Stable board order breaks ties. Optional cardId restricts selection.
 export function selectDispatchableCard({ cards, boardPath, activeClaims, cardId = null }) {
   const index = new Map(cards.map((card) => [card.cardId, card]));
   const candidates = cards
@@ -1972,7 +2106,7 @@ export function selectDispatchableCard({ cards, boardPath, activeClaims, cardId 
     .filter((entry) => entry.eligibility.eligible)
     .sort((a, b) =>
       (PRIORITY_ORDER[a.card.priority] ?? 99) - (PRIORITY_ORDER[b.card.priority] ?? 99)
-      || String(a.card.cardId).localeCompare(String(b.card.cardId)));
+      || cards.indexOf(a.card) - cards.indexOf(b.card));
   return candidates[0] ?? null;
 }
 
@@ -2087,6 +2221,8 @@ function confirmedBatchRouteFor(cardId, confirmedBatch) {
 
 function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, repository, startingRevision, confirmedBatch = null, route = null }) {
   const at = now ?? new Date().toISOString();
+  const resign = resignEditedBoardLocked(boardPath, {});
+  if (!resign.ok) return resign;
   if (!existsSync(boardPath)) {
     return { ok: false, code: "board-unavailable", reason: "board file is no longer present (board-unavailable)" };
   }
@@ -2185,7 +2321,7 @@ function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, rep
   if (selected === null) {
     return { ok: false, code: "no-dispatchable-card", reason: cardId
       ? `card ${cardId} is not dispatchable, is already claimed, or lacks writer provenance`
-      : "no dispatchable unclaimed card is available" };
+      : "no ready unclaimed card is available; rank unranked backlog cards P0–P3 or add a definition of done (board status for owner)" };
   }
   const card = selected.card;
   const selectedRoute = confirmedBatch !== null ? confirmedBatchRouteFor(card.cardId, confirmedBatch) : route;
@@ -2205,7 +2341,8 @@ function claimCardLocked({ boardPath, cardId, role, policy, configPath, now, rep
   // crash leaves either the old or the new complete state, and the record
   // drives roll-forward recovery on the next operation.
   const transaction = { op: "claim", cardId: card.cardId, envelopeId: envelope.envelopeId, at, phase: "claims-written" };
-  writeClaims(boardPath, nextClaims, { transaction });
+  writeClaims(boardPath, nextClaims, { transaction, actions: [{ action: "claim", at, cardId: card.cardId,
+    envelopeId: envelope.envelopeId, specDigest: computeSpecHash(card.specText), dodDigest: computeSpecHash(card.dodText) }] });
   // Active-state publication: the projection is recomputed with the claim
   // visible, in the same locked operation (§3.6).
   const projection = writeProjection(boardPath, validatedBoard.cards, nextClaims);
@@ -2400,7 +2537,7 @@ function validateEnvelopeForExecutionLocked({ boardPath, envelope, now = null, r
 // Item 2: completion consumption — when the work reaches its stopping point,
 // the envelope attempt is consumed ("completed") and its claim released.
 // Never marks the card done (completion is human-only, §3.1).
-export function consumeEnvelope({ boardPath, envelopeId, reason = "completed" } = {}) {
+export function consumeEnvelope({ boardPath, envelopeId, reason = "completed", recheck = null } = {}) {
   if (typeof boardPath !== "string" || boardPath === "") {
     throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
   }
@@ -2420,6 +2557,24 @@ export function consumeEnvelope({ boardPath, envelopeId, reason = "completed" } 
     if (!claim) {
       return { ok: false, code: "envelope-not-active", reason: "the envelope has no active claim to consume" };
     }
+    const oldDod = read.state.events.findLast((event) => event.action === "claim" && event.envelopeId === envelopeId)?.dodDigest
+      ?? claim.envelope.acceptance.dodHash;
+    const card = existsSync(boardPath) ? parseBoard(readFileSync(boardPath, "utf8")).cards.find((entry) => entry.cardId === claim.cardId) : null;
+    if (reason === "completed" && !card) return { ok: false, code: "card-unavailable", reason: "claimed card is unavailable" };
+    const newDod = card?.dodText == null ? null : computeSpecHash(card.dodText);
+    const drift = reason === "completed" && oldDod !== newDod;
+    if (drift && (!recheck || !exactKeys(recheck, ["against", "result", "evidence"])
+      || recheck.against !== newDod || !["pass", "fail"].includes(recheck.result)
+      || typeof recheck.evidence !== "string" || !recheck.evidence.trim() || recheck.evidence.length > 1024)) {
+      return { ok: false, code: "dod-recheck-required", reason: "re-check against the new DoD and provide {against, result, evidence}" };
+    }
+    const driftAction = drift ? [{ action: "dod-drift", at: new Date().toISOString(), cardId: claim.cardId,
+      oldDodDigest: oldDod, newDodDigest: newDod, checkedAgainst: recheck.against,
+      result: recheck.result, evidence: recheck.evidence }] : [];
+    if (drift && recheck.result === "fail") {
+      writeClaims(boardPath, read.state.claims, { actions: driftAction });
+      return { ok: false, code: "dod-recheck-failed", reason: "re-check failed; claimant remains active" };
+    }
     const kept = read.state.claims.filter((entry) => entry.envelopeId !== envelopeId);
     const consumedClaims = [...read.state.consumedClaims, {
       cardId: claim.cardId,
@@ -2427,7 +2582,10 @@ export function consumeEnvelope({ boardPath, envelopeId, reason = "completed" } 
       consumedAt: new Date().toISOString(),
       reason,
     }];
-    writeClaims(boardPath, kept, { consumedClaims });
+    writeClaims(boardPath, kept, { consumedClaims, actions: reason === "completed"
+      ? [...driftAction, { action: "complete", at: new Date().toISOString(), cardId: claim.cardId, envelopeId,
+        specDigest: card.specText == null ? null : computeSpecHash(card.specText), dodDigest: newDod }]
+      : [] });
     if (existsSync(boardPath)) {
       const validated = validateBoard(readFileSync(boardPath, "utf8"), {});
       if (validated.ok) writeProjection(boardPath, validated.cards, kept);
@@ -2985,6 +3143,9 @@ export function registerKanbanBoardTools(pi, { boardPath = null, resolveBoardPat
           priority: { type: "string", enum: [...PRIORITIES], description: "update: new priority (P0-P3)." },
           specification: { type: "string", description: "update: new specification text (hash recomputed by the writer)." },
           definitionOfDone: { type: "string", description: "update: new definition-of-done text (hash recomputed by the writer)." },
+          recheck: { type: "object", description: "Required for completion when the claimed DoD changed. The claimant checks the new DoD; the writer validates only the digest and shape.", additionalProperties: false,
+            properties: { against: { type: "string" }, result: { type: "string", enum: ["pass", "fail"] }, evidence: { type: "string" } },
+            required: ["against", "result", "evidence"] },
           stoppingPoint: { type: "string", description: "update: new stopping point." },
           scopePaths: { type: "array", items: { type: "string" }, description: "update: full replacement scope-path list." },
           capabilities: { type: "array", items: { type: "string" }, description: "update: full replacement capability list." },
@@ -3024,7 +3185,7 @@ export function registerKanbanBoardTools(pi, { boardPath = null, resolveBoardPat
         // Map the flat tool input onto the writer's changes subset. Absent
         // fields are left untouched; list fields are full replacement lists.
         const changes = {};
-        for (const key of ["lane", "done", "flags", "title", "description", "priority", "specification", "definitionOfDone", "stoppingPoint", "scopePaths", "capabilities", "dependencies", "tags", "base", "dueDate", "role"]) {
+        for (const key of ["lane", "done", "flags", "title", "description", "priority", "specification", "definitionOfDone", "stoppingPoint", "scopePaths", "capabilities", "dependencies", "tags", "base", "dueDate", "role", "recheck"]) {
           if (input?.[key] !== undefined) changes[key] = input[key];
         }
         let result;

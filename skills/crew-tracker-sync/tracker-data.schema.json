@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Crew tracker data",
+  "type": "object",
+  "required": ["streams", "merges", "decisions", "steps", "settled"],
+  "properties": {
+    "streams": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "prefixItems": [
+          { "type": "string", "description": "Agent" },
+          { "type": "string", "description": "Area" },
+          { "type": "string", "description": "Current work, including time" },
+          { "type": "string", "description": "Next for the human" }
+        ],
+        "minItems": 4,
+        "maxItems": 4
+      }
+    },
+    "merges": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "prefixItems": [
+          { "type": "string", "description": "Title" },
+          { "type": "string", "description": "Repository" },
+          { "type": "string", "description": "Owner agent" },
+          {
+            "type": "string",
+            "description": "draft (<age>), ready, merged <time>, closed <time>, or blocked <why>",
+            "pattern": "^(draft \\(.+\\)|ready|merged .+|closed .+|blocked .+)$"
+          }
+        ],
+        "minItems": 4,
+        "maxItems": 4
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["state", "text"],
+        "properties": {
+          "state": { "enum": ["open", "settled"] },
+          "title": { "type": "string" },
+          "text": { "type": "string" },
+          "recommendation": { "type": "string" },
+          "why": { "type": "string" },
+          "phone_ok": { "type": "boolean" },
+          "owner": { "type": "string" },
+          "meta": { "type": "string", "description": "Time in the human's labelled local time zone" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["text", "done", "meta"],
+        "properties": {
+          "text": { "type": "string" },
+          "done": { "type": "boolean" },
+          "meta": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "settled": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["title", "detail", "meta"],
+        "properties": {
+          "title": { "type": "string" },
+          "detail": { "type": "string" },
+          "meta": { "type": "string", "description": "Time and actor" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "merge_note": {
+      "type": "string",
+      "description": "Reminder that only ready, green PRs move to Your steps"
+    }
+  },
+  "additionalProperties": true
+}
