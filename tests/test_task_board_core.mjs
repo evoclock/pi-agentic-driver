@@ -21,7 +21,7 @@ import {
   allocateCardId, recordAuthoritySource, writeCard, isValidAuthoritySource,
   encodeFieldText, decodeFieldText, sanitizeFreeText, declaredBoardPrefix, withWriterLock,
   writerStatePath, writerLockPath, authorityRecordHmac, verifyAuthorityProvenance,
-  isDispatchable, observeBoardProvider, registerKanbanBoardTools,
+  isDispatchable, selectDispatchableCard, observeBoardProvider, registerKanbanBoardTools,
   stripTitle, FIELD_KEY_ALIASES,
 } from "../scripts/enforcement/task_board_core_pi.js";
 
@@ -62,6 +62,20 @@ function baseCard(overrides = {}) {
   card.authorityWriterHmac = authorityRecordHmac(card.authoritySource, "test-secret", card.hash);
   return card;
 }
+
+test("ready selection excludes unranked and flagged cards and preserves board order within priority", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ready-board-"));
+  const boardPath = join(dir, "TASKS.md");
+  try {
+    for (const [title, priority, flags] of [["unranked", undefined, []], ["first", "P1", []], ["second", "P1", []], ["flagged", "P0", ["proposed"]]]) {
+      assert.equal(writeCard({ boardPath, input: { title, priority, flags, spec: "spec", definitionOfDone: "done", stoppingPoint: "review", scope: ["src/"] }, authority: { source: "instruction", sessionOrReportId: "test", quotedInstruction: "create ready card" }, registries }).ok, true);
+    }
+    const cards = parseBoard(readFileSync(boardPath, "utf8")).cards;
+    assert.equal(selectDispatchableCard({ cards, boardPath, activeClaims: [] }).card.title, "first");
+    assert.equal(selectDispatchableCard({ cards: [...cards].reverse(), boardPath, activeClaims: [] }).card.title, "second");
+    assert.equal(selectDispatchableCard({ cards, boardPath, activeClaims: [{ cardId: cards.find((c) => c.title === "first").cardId }] }).card.title, "second");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 // --- §1: closed vocabularies and identity ----------------------------------
 
@@ -401,7 +415,7 @@ test("F1: cards not written through the trusted writer cannot dispatch (ledger +
     const r = writeCard({
       boardPath,
       surface: "tasks",
-      input: { title: "legit", spec: "the spec", definitionOfDone: "the dod", stoppingPoint: "tests green", scope: ["src/"] },
+      input: { title: "legit", priority: "P2", spec: "the spec", definitionOfDone: "the dod", stoppingPoint: "tests green", scope: ["src/"] },
       authority: { source: "instruction", sessionOrReportId: "sess-1", quotedInstruction: "write the card" },
       registries,
     });
@@ -860,8 +874,9 @@ test("B6 regression: titles and instruction text cannot inject field or comment 
     // Round-trips: serialized spec/DoD text decodes to the original input.
     assert.equal(card.specText, "s");
     assert.equal(card.dodText, "d");
-    // And the persisted card dispatches (hash + text verification all hold).
-    assert.equal(isDispatchable(card, boardIndex(parsed.cards)).dispatchable, true);
+    // Unranked cards require owner ranking even when their hashes verify.
+    assert.equal(isDispatchable(card, boardIndex(parsed.cards)).dispatchable, false);
+    assert.ok(isDispatchable(card, boardIndex(parsed.cards)).failedConditions.some((reason) => reason.includes("unranked")));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

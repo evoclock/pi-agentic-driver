@@ -144,19 +144,19 @@ test("every shipped skill folder has valid frontmatter and package registration"
   assert.deepEqual([...pkg.pi.skills].sort(), expected.sort(), "shipped skill registration drift");
 });
 
-test("each Pi port is declared and published without retired skill entry points", () => {
+test("only the native correction skill uses a Pi suffix", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const ports = readdirSync(join(REPO_ROOT, "skills"))
     .filter((name) => name.endsWith("-pi") && existsSync(join(REPO_ROOT, "skills", name, "SKILL.md")))
     .sort();
-  assert.equal(ports.length, 54, "all pinned pstack ports are present");
+  assert.deepEqual(ports, ["correct-pi"]);
   assert.deepEqual(pkg.pi.skills.filter((path) => path.endsWith("-pi")).sort(), ports.map((name) => `./skills/${name}`));
   for (const name of ports) assert.ok(pkg.files.includes(`skills/${name}`), `port omitted from published files: ${name}`);
   for (const name of ["how", "blast-radius", "interrogate", "show-me-your-work", "setup-pstack"]) {
     assert.ok(!existsSync(join(REPO_ROOT, "skills", name, "SKILL.md")), `retired skill remains discoverable: ${name}`);
     assert.ok(!pkg.pi.skills.includes(`./skills/${name}`));
   }
-  for (const file of ["skills/how/LICENSE", "skills/how/WORKFLOW_BOUNDARIES.md", "skills/setup-pstack-pi/assets/pstack-model-roles.v1.example.json"]) {
+  for (const file of ["skills/how/LICENSE", "skills/how/WORKFLOW_BOUNDARIES.md"]) {
     assert.ok(pkg.files.some((path) => file === path || file.startsWith(`${path}/`) || path.startsWith(`${file}/`)), `missing support: ${file}`);
   }
 });
@@ -200,7 +200,7 @@ test("packed tarball retains the offline Durable module without private scratch"
     }
     assert.ok(files.has("skills/how/LICENSE"));
     assert.ok(files.has("skills/how/WORKFLOW_BOUNDARIES.md"));
-    assert.ok(files.has("skills/setup-pstack-pi/assets/pstack-model-roles.v1.example.json"));
+    assert.ok(![...files].some((file) => file.startsWith("skills/setup-pstack-pi/")));
     for (const name of ["how", "blast-radius", "interrogate", "show-me-your-work", "setup-pstack"]) {
       assert.ok(!files.has(`skills/${name}/SKILL.md`), `retired skill included in tarball: ${name}`);
     }

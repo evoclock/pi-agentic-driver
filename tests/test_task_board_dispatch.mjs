@@ -22,6 +22,7 @@ import {
   dispatchEligibility, selectDispatchableCard, validateBoard, replaceAttempt,
   writerStatePath, claimsPath, automationPolicyPath,
   projectionPath, registerKanbanBoardTools, ENVELOPE_SCHEMA, canonicalJsonString, withWriterLock,
+  verifyCardActionChain, computeSpecHash,
 } from "../scripts/enforcement/task_board_core_pi.js";
 
 const authority = { source: "instruction", sessionOrReportId: "sess-test", quotedInstruction: "write the card" };
@@ -1113,4 +1114,62 @@ test("replaceAttempt: crash-injection in both claims-anchor windows rolls forwar
       assert.notEqual(r.envelope.envelopeId, injected.newEnvelopeId);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   }
+});
+
+test("card action chain, manual re-sign, DoD re-check and derived mirror", () => {
+  const dir = freshDir();
+  try {
+    const { boardPath, first } = fixtureBoard(dir);
+    withPolicy(boardPath);
+    const claimed = claimCard({ boardPath, role: "implementer", cardId: first });
+    assert.equal(claimed.ok, true, JSON.stringify(claimed));
+    const oldDod = computeSpecHash("done one");
+    assert.equal(readClaimsState(boardPath).state.events[0].dodDigest, oldDod);
+    writeFileSync(boardPath, readFileSync(boardPath, "utf8").replace("First", "Renamed"));
+    const edit = updateCard({ boardPath, cardId: first, changes: { definitionOfDone: "done changed" }, authority });
+    assert.equal(edit.ok, true, JSON.stringify(edit));
+    const newDod = computeSpecHash("done changed");
+    const without = consumeEnvelope({ boardPath, envelopeId: claimed.envelope.envelopeId });
+    assert.equal(without.code, "dod-recheck-required");
+    const wrong = consumeEnvelope({ boardPath, envelopeId: claimed.envelope.envelopeId,
+      recheck: { against: oldDod, result: "pass", evidence: "tests" } });
+    assert.equal(wrong.code, "dod-recheck-required");
+    const failed = consumeEnvelope({ boardPath, envelopeId: claimed.envelope.envelopeId,
+      recheck: { against: newDod, result: "fail", evidence: "test failure" } });
+    assert.equal(failed.code, "dod-recheck-failed");
+    assert.equal(readClaims(boardPath)[0].envelopeId, claimed.envelope.envelopeId);
+    const passed = consumeEnvelope({ boardPath, envelopeId: claimed.envelope.envelopeId,
+      recheck: { against: newDod, result: "pass", evidence: "PR and tests" } });
+    assert.equal(passed.ok, true, JSON.stringify(passed));
+    const events = readClaimsState(boardPath).state.events;
+    assert.deepEqual(events.filter((event) => event.action === "dod-drift").map((event) => event.result), ["fail", "pass"]);
+    assert.ok(events.some((event) => event.action === "edit"));
+    assert.equal(events.at(-1).action, "complete");
+    assert.equal(verifyCardActionChain(events).ok, true);
+    assert.equal(verifyCardActionChain(events.map((event, index) => index === 0 ? { ...event, dodDigest: newDod } : event)).index, 0);
+    assert.deepEqual(readFileSync(join(dir, ".vogelkop", "board-log.jsonl"), "utf8").trim().split("\n").map(JSON.parse), events);
+    const tampered = JSON.parse(readFileSync(claimsPath(boardPath), "utf8"));
+    tampered.events[0].dodDigest = newDod;
+    writeFileSync(claimsPath(boardPath), JSON.stringify(tampered));
+    assert.equal(readClaimsState(boardPath).ok, false, "tampered ledger fails closed");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("authorized done update checks drift without releasing the claimant on failure", () => {
+  const dir = freshDir();
+  try {
+    const { boardPath, first } = fixtureBoard(dir);
+    withPolicy(boardPath);
+    const claimed = claimCard({ boardPath, role: "implementer", cardId: first });
+    assert.equal(claimed.ok, true);
+    assert.equal(updateCard({ boardPath, cardId: first, changes: { definitionOfDone: "new criteria" }, authority }).ok, true);
+    const newDod = computeSpecHash("new criteria");
+    assert.equal(updateCard({ boardPath, cardId: first, changes: { done: true }, authority }).code, "dod-recheck-required");
+    assert.equal(updateCard({ boardPath, cardId: first,
+      changes: { done: true, recheck: { against: newDod, result: "fail", evidence: "test failed" } }, authority }).code, "dod-recheck-failed");
+    assert.equal(readClaims(boardPath)[0].envelopeId, claimed.envelope.envelopeId);
+    assert.equal(updateCard({ boardPath, cardId: first,
+      changes: { done: true, recheck: { against: newDod, result: "pass", evidence: "test and PR" } }, authority }).ok, true);
+    assert.equal(readClaimsState(boardPath).state.events.at(-2).result, "pass");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -56,14 +56,14 @@ proofs for agentic workflows.
 | `tasks` | Keeps a priority-ordered session plan, then lets the owner make selected items durable in `TASKS.md`. | shipped |
 | `decision-to-spec` skill | Drafts one reviewable assignment from your explicit decision or a sourced, quoted relay, with observable outcomes and a stop point. | packaged skill |
 | `agentic_decision_evidence` | Records the stated source of a decision (direct or relayed, with quote, where, when and relayer) for a private assignment; it verifies no identity and creates no authority. | shipped |
-| `agentic_relay_check_request` | Checks whether a recorded, scoped relay covers each requested private action; read-only preflight, with authority checked again at the action boundary. | included in 2.1.0 |
+| `agentic_relay_check_request` | Checks whether a recorded, scoped relay covers each requested private action; read-only preflight, with authority checked again at the action boundary. | merged, unreleased |
 | `agentic_merge_review_record` | Records independent Standards and Spec verdicts for an exact PR head; read only when the merge policy is `agents-after-checks-and-review`, and it merges nothing. | shipped |
 | `agentic_herdr_communication` | Submits one prompt and observes delivery and marked reports; never grants authority. | shipped |
 | `agentic_herdr_spawn_worker` | Starts one Pi worker in its repository's own labeled workspace, in a pane or tab, with native confirmation. | shipped |
 | `agentic_aidr` | A remedy for AI;DR. Reviews writing for clarity, simplicity, brevity, and humanity. | shipped |
 | `agentic_linux_microvm_cutover` | Runs one job in a throwaway QEMU/KVM virtual machine on a Linux host, with a severity-tiered killswitch that stops escape attempts. | user-enabled, native confirmation |
-| `agentic_worker_dispatch` | Runs bounded worker journeys and observes worker liveness. Each iteration is a durable checkpoint, so an interrupted journey resumes without resending an uncertain prompt; the `journeys` action lists the records. | included in 2.1.0 |
-| `agentic_journey_outward_effect` | Makes one confirmed Git push, or private draft PR create or update, for an existing journey; after an interruption it checks the remote and never repeats an uncertain write. | included in 2.1.0, native confirmation |
+| `agentic_worker_dispatch` | Runs bounded worker journeys and observes worker liveness. Each iteration is a durable checkpoint, so an interrupted journey resumes without resending an uncertain prompt; the `journeys` action lists the records. | shipped; durable recovery merged, unreleased |
+| `agentic_journey_outward_effect` | Makes one confirmed Git push, or private draft PR create or update, for an existing journey; after an interruption it checks the remote and never repeats an uncertain write. | merged, unreleased, native confirmation |
 | `agentic_kanban_board` | Shows the workspace task board: lanes, flags, priorities, dependencies, and which cards can run. | shipped |
 | `agentic_kanban_board_write` | Adds cards to the board through the trusted writer, which records who authorized the work. | shipped |
 | `agentic_kanban_board_update` | Moves, closes, flags, edits, or removes cards on the board, always recording who authorized the change. | shipped |
@@ -437,7 +437,7 @@ silently, and return results as untrusted evidence.
 </details>
 
 <details>
-<summary><strong>loop-until-done, bounded session-task loops</strong> <em>(packaged since 2.0.0)</em></summary>
+<summary><strong>loop-until-done, bounded session-task loops</strong> <em>(merged, unreleased)</em></summary>
 
 `/loop-until-done <steps> <approved goal> :: <observable exit check>` gives
 one already-authorized coordinator session task a fixed worker-dispatch budget.
@@ -931,9 +931,9 @@ treats agent reports as untrusted evidence. It never overwrites an existing `AGE
 *Methods your agent loads on request. A skill never grants authority.*
 
 <details>
-<summary><strong>Packaged skills, driver workflows and pstack ports for Pi</strong> <em>(included in 2.1.0)</em></summary>
+<summary><strong>Packaged driver skills</strong></summary>
 
-The package registers 59 skills alongside the extensions. Invoke one with
+The package registers native skills alongside the extensions. Invoke one with
 `/skill:<name>`. Pi may load a skill description on its own; loading is not
 approval to act, and no skill grants permission to merge, publish, install
 or change a model route.
@@ -952,24 +952,16 @@ or change a model route.
   own names go in a personal config that is never committed.
 - **correct-pi.** Turns an owner-selected recurring correction into a
   structural guard, then requires a check that catches a real past failure.
-- **pstack ports for Pi.** 54 skills adapted from Lauren Tan's pstack, each
-  with a `-pi` suffix so it does not collide with an installed upstream
-  copy: 30 workflow skills, such as `poteto-mode-pi`, `tdd-pi`,
-  `blast-radius-pi` and `show-me-your-work-pi`, and 24 `principle-*-pi`
-  skills. All follow the shared rules in `skills/how/WORKFLOW_BOUNDARIES.md`.
-  A skill that delegates to a model role reads the project-local
-  `.pi/pstack-model-roles.v1.json` created by `/skill:setup-pstack-pi`, and
-  stops if the role is missing; it never picks a model on its own.
+- **pstack methods.** The separate `pi-poteto-mode` package supplies the
+  pstack skill ports. Install it separately if you need those methods.
+  `correct-pi` remains a native driver skill.
 - **Packaged-skill checks.** Public CI verifies skill frontmatter and package
   registration, then loads the packed artifact in a fresh consumer and checks
   for Pi skill diagnostics. This is release validation, not an install-time
   permission or security boundary.
 
-`docs/pstack-pi-ports-comparison.md` compares these ports with the other
-published pstack ports for Pi.
-
-Credit: pstack by Lauren Tan, MIT, adapted from `cursor/plugins` at
-`99743e9`. Each ported skill names its upstream source and commit.
+The historical comparison of pstack ports remains in
+`docs/pstack-pi-ports-comparison.md`; the driver no longer ships those ports.
 
 </details>
 

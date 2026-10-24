@@ -1,0 +1,5 @@
+# Public release
+
+From the source repository (not the public package), use `python3 scripts/release_public.py X.Y.Z --public <public-checkout> --dry-run` for a side-effect-free step list. Prepare a clean source release branch based on `origin/main` and a clean public checkout on `chore/release-X.Y.Z` based on its `origin/main`. Then run without `--dry-run` only when the release version and notes are approved. The command syncs, tags the public branch head, packs it, records the tarball checksum, creates a GitHub release, and opens a draft PR. Review the generated changelog entry and release notes before using them for a real release.
+
+Merge the public PR with a **merge commit**. Squash and rebase do not preserve the tagged commit on main. After merging, run `python3 scripts/release_public.py X.Y.Z --public <public-checkout> --verify-merged`. It fails if the tag is not reachable from `origin/main`. The owner then handles npm sign-in and package publication. The command never performs those operations or merges or pushes main.

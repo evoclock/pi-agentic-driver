@@ -1,8 +1,12 @@
+## 3.0.0
+
+- Remove the 53 bundled pstack Pi skill ports; install pi-poteto-mode separately. The native correct-pi skill remains.
+
 # Changelog
 
 Release dates below come from the read-only npm registry `time` record for `@evoclock/pi-agentic-driver` (checked 2026-10-22).
 
-## 2.1.0 (unreleased)
+## 2.1.0 (2026-10-23)
 
 - Add the weekly build recap skill with an optional local phrase override and neutral default palette.
 - Guard worker spawning by workspace label so workers start in their repository's own workspace.

@@ -195,13 +195,13 @@ export function evaluateCard({ card, boardIndex, activeClaims = [], pulsePolicy 
 }
 
 // One full board scan (§4.3, §5). Deterministic: cards in board P0→P3 then
-// card-ID order; capacity in role-then-route declaration order; proposals in
+// stable board order; capacity in role-then-route declaration order; proposals in
 // selection order. No cross-board priority comparison happens here.
 export function scanBoard({ cards, boardPath, boardRevision = null, policyRevision = null, activeClaims = [], pulsePolicy = null, modelObservations = null, declaredModels = null, observedAt = null, placement = null, activeSessions = [], providerLimit = null }) {
   const index = new Map(cards.map((card) => [card.cardId, card]));
   const ordered = [...cards].sort((a, b) =>
     (PRIORITY_ORDER[a.priority] ?? 99) - (PRIORITY_ORDER[b.priority] ?? 99)
-    || String(a.cardId).localeCompare(String(b.cardId)));
+    || cards.indexOf(a) - cards.indexOf(b));
 
   const cardResults = [];
   const capacity = [];
