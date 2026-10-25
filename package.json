@@ -161,15 +161,18 @@
   },
   "dependencies": {
     "@earendil-works/chord": "1.0.4",
-    "@earendil-works/pi-ai": "1.0.4",
     "@earendil-works/pi-durable": "1.0.4",
     "typescript": "5.9.2"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/evoclock/pi-agentic-driver.git"
   },
   "devDependencies": {
+    "@earendil-works/pi-ai": "1.0.4",
     "@earendil-works/pi-coding-agent": "1.2.0"
   }
 }
