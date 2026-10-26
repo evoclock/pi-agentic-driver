@@ -1740,7 +1740,7 @@ export async function executeHerdrRegisterRepository({ name, ledgerId }, context
   try {
     const coordinator = realpathSync(context.cwd);
     root = resolve(coordinator, "..", name);
-    if (lstatSync(root).isSymbolicLink() || !lstatSync(root).isDirectory() || realpathSync(root) !== root || gitRoot(root) !== root) return refusal("canonical sibling Git clone");
+    if (lstatSync(root).isSymbolicLink() || !lstatSync(root).isDirectory() || realpathSync(root) !== root || gitRoot(root) !== root) return refusal("canonical sibling Git checkout");
     const dotGit = join(root, ".git");
     if (!lstatSync(dotGit).isDirectory() || realpathSync(dotGit) !== dotGit) return refusal("verified origin and non-worktree clone");
     const primaryIdentity = statIdentity(root, "registration_refused", "registration clone");
@@ -1776,7 +1776,7 @@ export async function executeHerdrRegisterRepository({ name, ledgerId }, context
           || statIdentity(root, "registration_refused", "registration clone") !== primaryIdentity
           || !lstatSync(dotGit).isDirectory() || realpathSync(dotGit) !== dotGit
           || statIdentity(dotGit, "registration_refused", "registration Git directory") !== gitIdentity
-          || gitRoot(root) !== root) return refusal("canonical sibling Git clone changed");
+          || gitRoot(root) !== root) return refusal("canonical sibling Git checkout changed");
       if (gitProbe(root, ["rev-parse", "--git-common-dir"]) !== common
           || gitProbe(root, ["remote", "get-url", "origin"]) !== origin) return refusal("verified origin and non-worktree clone changed");
       copyFileSync(registryPath, `${registryPath}.${new Date().toISOString().replaceAll(":", "-")}.bak`, fsConstants.COPYFILE_EXCL);

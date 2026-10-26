@@ -38,6 +38,19 @@ export function conflictLines(text, markdown = false) {
   return hits;
 }
 
+function readmeReleaseStatus() {
+  try {
+    execFileSync('python3', ['scripts/check_readme_release_status.py', '--if-release-branch'], {
+      cwd: root,
+      stdio: 'inherit',
+    });
+    return 0;
+  } catch (error) {
+    console.error(`README release status check failed (${error.status ?? 'error'})`);
+    return 1;
+  }
+}
+
 function main() {
   const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: root }).toString('utf8').split('\0').filter(Boolean);
   let failures = 0;
@@ -61,6 +74,7 @@ function main() {
       failures++;
     }
   }
+  if (readmeReleaseStatus()) failures++;
   console.log(`Public scan: ${config.files.length} files, ${failures} findings`);
   return failures ? 1 : 0;
 }

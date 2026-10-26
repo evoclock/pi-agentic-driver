@@ -68,6 +68,15 @@ Do not create a second authority, approval, receipt, evidence, inventory, or
 queue store. Keep repository-local state repository-local. Preserve unrelated
 changes and stop when the requested write set is ambiguous.
 
+## Code workspace lifecycle
+
+For code changes, start at the registered repository root and acquire a durable
+Treehouse slot with `treehouse get --lease --branch <branch>`. If the repository
+root is not registered, stop rather than creating an unmanaged checkout. Keep
+its lease identity and return the exact slot with `treehouse return <path>` and
+`treehouse prune` only after integration and reconciliation of dirty files and
+unique commits. Do not build a nested pool under skill sources or scratch.
+
 ## Safe completion
 
 Do not retry invisibly after denial, drift, timeout, or a failed check. Do not
@@ -77,7 +86,6 @@ task.
 
 ## Repository-specific section
 
-Add project-specific instructions below this line. Keep them separate from the
-portable contract above.
+After every change, run `make gate` and fix what it reports.
 
 <!-- pi-agentic-driver:portable-contract-end -->

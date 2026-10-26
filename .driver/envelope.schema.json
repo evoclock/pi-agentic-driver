@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agentic Driver repository envelope",
+  "description": "Validates policy shape only. A host must enforce allowed paths, effects, and caps.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "allowedModelBilling",
+    "caps",
+    "allowedPaths",
+    "allowedEffects",
+    "mergeMode",
+    "outOfEnvelope"
+  ],
+  "properties": {
+    "version": {
+      "const": "driver-envelope.v1"
+    },
+    "allowedModelBilling": {
+      "type": "array",
+      "description": "Billing classes this repository may use.",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["api-billed", "subscription", "local"]
+      }
+    },
+    "caps": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wallClockSeconds", "iterations", "apiSpendUsd"],
+      "properties": {
+        "wallClockSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum wall-clock time for every run, independent of billing class."
+        },
+        "iterations": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum work iterations for every run, independent of billing class."
+        },
+        "apiSpendUsd": {
+          "oneOf": [
+            { "type": "number", "minimum": 0 },
+            { "type": "null" }
+          ],
+          "description": "A non-negative spend cap only for API-billed models; null when API billing is not allowed."
+        }
+      }
+    },
+    "allowedPaths": {
+      "type": "array",
+      "description": "Repository-relative path globs. The run contract must narrow these for each goal.",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\]+$"
+      }
+    },
+    "allowedEffects": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "read",
+          "edit",
+          "run-checks",
+          "commit",
+          "push-review-branch",
+          "open-draft-pr",
+          "merge",
+          "release",
+          "publish",
+          "delete-branch",
+          "force-push",
+          "change-repository-settings",
+          "manage-credentials"
+        ]
+      }
+    },
+    "mergeMode": {
+      "enum": ["merge-ready", "merge"]
+    },
+    "outOfEnvelope": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "scope-change",
+          "effect-not-allowed",
+          "api-spend-over-cap",
+          "unknown-api-cost",
+          "destructive-or-irreversible-effect",
+          "unclear-goal-after-one-regeneration",
+          "review-diverged-after-second-opinion"
+        ]
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "allowedModelBilling": {
+            "contains": { "const": "api-billed" }
+          }
+        },
+        "required": ["allowedModelBilling"]
+      },
+      "then": {
+        "properties": {
+          "caps": {
+            "properties": {
+              "apiSpendUsd": { "type": "number", "minimum": 0 }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "caps": {
+            "properties": {
+              "apiSpendUsd": { "type": "null" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mergeMode": { "const": "merge" }
+        },
+        "required": ["mergeMode"]
+      },
+      "then": {
+        "properties": {
+          "allowedEffects": {
+            "contains": { "const": "merge" }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "allowedEffects": {
+            "not": { "contains": { "const": "merge" } }
+          }
+        }
+      }
+    }
+  ]
+}

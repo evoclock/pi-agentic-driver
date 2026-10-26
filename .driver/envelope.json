@@ -1,0 +1,38 @@
+{
+  "version": "driver-envelope.v1",
+  "allowedModelBilling": ["subscription", "local"],
+  "caps": {
+    "wallClockSeconds": 3600,
+    "iterations": 12,
+    "apiSpendUsd": null
+  },
+  "allowedPaths": [
+    ".driver/**",
+    "docs/**",
+    "extensions/**",
+    "lib/**",
+    "scripts/**",
+    "skills/**",
+    "tests/**",
+    "package.json",
+    "README.md"
+  ],
+  "allowedEffects": [
+    "read",
+    "edit",
+    "run-checks",
+    "commit",
+    "push-review-branch",
+    "open-draft-pr"
+  ],
+  "mergeMode": "merge-ready",
+  "outOfEnvelope": [
+    "scope-change",
+    "effect-not-allowed",
+    "api-spend-over-cap",
+    "unknown-api-cost",
+    "destructive-or-irreversible-effect",
+    "unclear-goal-after-one-regeneration",
+    "review-diverged-after-second-opinion"
+  ]
+}

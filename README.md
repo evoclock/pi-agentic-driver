@@ -53,8 +53,8 @@ proofs for agentic workflows.
 **HARD (fleet-wide):** anything that controls bots encodes this in git here, not only in assistant skills.
 
 - Pi tabs/panes: **only** `agentic_herdr_spawn_worker` / Pi **herdr** spawn (spelling **herdr**).
-- Never raw `herdr agent start` or other bare Herdr agent-start CLI.
-- Default Pi model: `openai-codex/gpt-6-sol` until the operator names another.
+- Never raw `herdr agent start` or other bare Herdr agent-start CLI (the attended-authority guard refuses those bash forms fail-closed).
+- Default Pi model: the operator-named default Pi model until the operator names another.
 - Details for agents: [AGENTS.md](./AGENTS.md).
 
 ## Shipped features
@@ -450,18 +450,13 @@ silently, and return results as untrusted evidence.
 
 `/loop-until-done <steps> <approved goal> :: <observable exit check>` gives
 one already-authorized coordinator session task a fixed worker-dispatch budget.
-Configure the limits, wake, and stall recovery in `.agentic-driver/loop-until-done.defaults.json`.
+Configure the limits and wake in `.agentic-driver/loop-until-done.defaults.json`.
 The defaults allow at most 200 attempts or 30 minutes, whichever comes first.
 Each attempt consumes a step before dispatch. After a successful exchange,
 the default wake prompts a check immediately; an interval can delay that prompt.
 Each wake asks the agent to check the original exit condition before another
 dispatch. The per-session allowance cannot be extended or restarted. This
 command does not dispatch board cards; Board Pulse owns those.
-
-Stall detection is enabled by default. It sends one chase prompt after two
-minutes without progress, three identical tool calls, or a final `[BLOCKED]`
-report. Set `stall.enabled` to `false` to disable it, or adjust
-`stall.idleTimeoutMs` and `stall.repeatedToolCalls` in the defaults file.
 
 The extension, its defaults, and its guide are included in the 2.0.0 npm
 package file list. See `scripts/enforcement/loop_until_done_guide.md`.

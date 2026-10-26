@@ -59,6 +59,16 @@ const SAFE_COMMAND_PREFIXES = [
   "git config --get", "git ls-files",
 ];
 
+// Fleet HARD: raw Herdr agent-start from bash is never allowed. Bots must
+// use agentic_herdr_spawn_worker / Pi herdr spawn only. These are refused
+// fail-closed with no confirmation path (unlike destructive Git ops).
+const FORBIDDEN_SHELL_PATTERNS = [
+  {
+    pattern: /(?:^|[\s;&|`(]|\$\()(?:\S*\/)?herdr\b[^\n|;]*\bagent\b[^\n|;]*\bstart\b/,
+    kind: "raw herdr agent start (use agentic_herdr_spawn_worker)",
+  },
+];
+
 // Arbitrary-code interpreter execution: any code payload can perform a
 // destructive operation, so these forms are classified fail-closed.
 const DESTRUCTIVE_SHELL_PATTERNS = [
@@ -129,6 +139,12 @@ export function classifyBashCommand(command) {
   // destructive payload cannot hide behind a safe-looking prefix.
   const compound = /[;&|>`]|\$\(|\n/.test(text);
   const redirection = /(^|\s)(>{1,2}|<)/.test(text);
+  // Fleet forbidden forms always win: no safe-prefix escape, no confirm.
+  for (const { pattern, kind } of FORBIDDEN_SHELL_PATTERNS) {
+    if (pattern.test(text) || pattern.test(unquoteTokens(text))) {
+      return { destructive: true, forbidden: true, kind };
+    }
+  }
   // Structural destructive verdicts win over safe-looking prefixes, so a
   // destructive form such as `git branch -D` cannot hide behind a safe
   // prefix such as `git branch`.
@@ -204,7 +220,10 @@ export function mergeBlockReason(policy, source, why) {
   return `${MERGE_POLICY_SCHEMA}: needs-owner-approval: pull-request merge refused (policy ${policy}, ${source}): ${why}`;
 }
 
-export function denialReason(toolName, kind, context) {
+export function denialReason(toolName, kind, context, options = {}) {
+  if (options.forbidden) {
+    return `${GUARD_SCHEMA}: forbidden ${toolName} operation (${kind}) refused fail-closed; use agentic_herdr_spawn_worker / Pi herdr spawn only`;
+  }
   if (!isNativeTuiContext(context)) {
     return `${GUARD_SCHEMA}: destructive ${toolName} operation (${kind}) refused fail-closed: no native confirmation surface in this headless context`;
   }
@@ -257,6 +276,10 @@ export async function guardToolCall(event, ctx, options = {}) {
   if (!verdict.destructive) return undefined;
 
   const context = options.context ?? ctx;
+  // Forbidden fleet forms: never confirmable.
+  if (verdict.forbidden) {
+    return { block: true, reason: denialReason(toolName, verdict.kind, context, { forbidden: true }) };
+  }
   if (!isNativeTuiContext(context)) {
     return { block: true, reason: denialReason(toolName, verdict.kind, context) };
   }

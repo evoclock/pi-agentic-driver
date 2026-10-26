@@ -1,5 +1,6 @@
 node_modules/
 scratch/
+.driver/test-gate-evidence/
 /scan-terms.local.json
 /.ci-buildkite/
 /.briefs/

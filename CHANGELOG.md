@@ -1,7 +1,3 @@
-## 3.0.0
-
-- Remove the 53 bundled pstack Pi skill ports; install pi-poteto-mode separately. The native correct-pi skill remains.
-
 # Changelog
 
 Release dates below come from the read-only npm registry `time` record for `@evoclock/pi-agentic-driver` (checked 2026-10-22).

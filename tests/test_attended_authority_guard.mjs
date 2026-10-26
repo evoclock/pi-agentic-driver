@@ -113,6 +113,36 @@ test("write over an existing file is destructive; new file is not", () => {
   assert.equal(classifyWriteCall("read", { path: ".env" }, exists).destructive, false);
 });
 
+test("raw herdr agent start is forbidden fail-closed (no confirm)", async () => {
+  for (const command of [
+    "herdr agent start worker --kind pi --pane w1:p1 -- --model openai-codex/default-sol",
+    "/opt/homebrew/bin/herdr agent start foo --kind pi --pane w1:p2",
+    "herdr agent start role-name",
+    "env FOO=1 herdr agent start x --kind pi --pane w1:p1",
+  ]) {
+    const verdict = classifyBashCommand(command);
+    assert.equal(verdict.destructive, true, command);
+    assert.equal(verdict.forbidden, true, command);
+    assert.match(verdict.kind, /raw herdr agent start/);
+  }
+  // Allowed herdr verbs that are not agent start must not trip the forbid rule.
+  assert.equal(classifyBashCommand("herdr agent list").destructive, false);
+  assert.equal(classifyBashCommand("herdr pane list").destructive, false);
+
+  const tui = {
+    mode: "tui",
+    hasUI: true,
+    ui: { confirm: async () => true },
+  };
+  const blocked = await guardToolCall(
+    { toolName: "bash", input: { command: "herdr agent start x --kind pi --pane w1:p1" } },
+    tui,
+  );
+  assert.equal(blocked?.block, true);
+  assert.match(blocked.reason, /forbidden/);
+  assert.match(blocked.reason, /agentic_herdr_spawn_worker/);
+});
+
 test("headless contexts refuse destructive operations fail-closed", async () => {
   const result = await guardToolCall(
     { toolName: "bash", input: { command: "git reset --hard" } },

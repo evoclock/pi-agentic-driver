@@ -1,0 +1,154 @@
+{
+  "schema": "driver-gate-rules.v1",
+  "baseRef": "origin/main",
+  "speedBudgetSeconds": 600,
+  "checks": [
+    {
+      "id": "hash-allowances",
+      "kind": "internal",
+      "label": "Validate hash-scoped allowances"
+    },
+    {
+      "id": "hook-integrity",
+      "kind": "internal",
+      "label": "Check Git hooks and bypasses"
+    },
+    {
+      "id": "no-hidden-installs",
+      "kind": "internal",
+      "label": "Check automation and skill install commands"
+    },
+    {
+      "id": "inventory",
+      "kind": "command",
+      "label": "Check codebase inventory",
+      "command": ["python3", "scripts/codebase_inventory.py", "--check"],
+      "failureMessage": "Run `python3 scripts/codebase_inventory.py`, review the inventory diff, then rerun `make gate`."
+    },
+    {
+      "id": "treehouse-codepath",
+      "kind": "command",
+      "label": "Check managed workspace usage",
+      "command": ["python3", "scripts/treehouse_codepath_scan.py"]
+    },
+    {
+      "id": "public-scan",
+      "kind": "command",
+      "label": "Check public-facing content",
+      "command": [".buildkite/public-scan.sh"]
+    },
+    {
+      "id": "durable-tests",
+      "kind": "command",
+      "label": "Durable test subset",
+      "command": ["npm", "run", "test:ci"]
+    },
+    {
+      "id": "janus-types",
+      "kind": "command",
+      "label": "Janus type check",
+      "command": ["janus/node_modules/.bin/tsc", "--noEmit", "-p", "janus/tsconfig.json"]
+    },
+    {
+      "id": "policy-unit-tests",
+      "kind": "command",
+      "label": "Node policy unit tests",
+      "command": [
+        "node",
+        "--test",
+        "tests/test_aidr_writing_review.mjs",
+        "tests/test_pr_review_gate.mjs",
+        "tests/test_public_pr_wording.mjs"
+      ]
+    },
+    {
+      "id": "janus-tests",
+      "kind": "command",
+      "label": "Janus unit tests",
+      "command": ["npm", "test"],
+      "cwd": "janus"
+    },
+    {
+      "id": "python-tests",
+      "kind": "command",
+      "label": "Python unit tests",
+      "command": ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"]
+    },
+    {
+      "id": "weekly-recap-tests",
+      "kind": "command",
+      "label": "Weekly recap unit tests",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "skills/weekly-build-recap",
+        "-p",
+        "test_*.py"
+      ]
+    },
+    {
+      "id": "precommit-hook",
+      "kind": "command",
+      "label": "Replay repository pre-commit hook",
+      "command": [".githooks/pre-commit"],
+      "when": "buildkite",
+      "failureMessage": "Fix the staged inventory or restore the checked-in pre-commit hook."
+    },
+    {
+      "id": "secrets-scan",
+      "kind": "deferred",
+      "reason": "Full secrets scanning is deferred to §10.13; no credential scanner is implemented in this slice."
+    },
+    {
+      "id": "dependency-diff",
+      "kind": "deferred",
+      "reason": "Dependency-diff policy is deferred to §10.13; dependency auditing remains an outer-loop task."
+    },
+    {
+      "id": "antipattern-scan",
+      "kind": "deferred",
+      "reason": "Full antipattern scanning is deferred to §10.13; this slice does not build that scanner."
+    }
+  ],
+  "hashScopedAllowances": [
+    {
+      "check": "no-hidden-installs",
+      "path": ".buildkite/pipeline.yml",
+      "sha256": "4c31f9e6a0529234ee0da8971b5016d5915f13ea03c0beba09462a974a81ca24",
+      "reason": "Buildkite uses Socket Firewall for install-time dependencies, runs gate and test-gate, then uploads host evidence; this is CI, not skill bootstrap."
+    },
+    {
+      "check": "no-hidden-installs",
+      "path": "scripts/enforcement/guest_containment_taxonomy.v1.json",
+      "sha256": "0b194cdfd86f23fd68c2685c2ccfc556a0e311e2973b1ff619c6c78791d65fcd",
+      "reason": "This policy data names package-manager commands to deny; it does not execute install commands."
+    },
+    {
+      "check": "no-hidden-installs",
+      "path": "scripts/enforcement/linux_microvm_remote_fixture.sh",
+      "sha256": "f3f18024398ccfc7ecf5e0dfbc87f9459534dc37e268e09859a62e7a9c072f0b",
+      "reason": "This fixture embeds denied-command patterns and assertions; the matched install phrases are classifier test data, not install operations."
+    }
+  ],
+  "outerLoopDeferred": [
+    {
+      "check": "full-node-suite",
+      "reason": "`npm test` runs Node tests outside the CI durable and policy-unit subsets; defer to the broader outer loop."
+    },
+    {
+      "check": "pr-wording-review",
+      "reason": "PR wording and review require PR metadata and GH_TOKEN; keep the existing Buildkite steps unchanged."
+    },
+    {
+      "check": "release-readme-status",
+      "reason": "The existing release-branch status check remains a separate Buildkite step."
+    },
+    {
+      "check": "secrets-dependency-antipattern",
+      "reason": "Full scanners are explicit §10.13 follow-up work; the gate prints stable TODO skips until then."
+    }
+  ]
+}
