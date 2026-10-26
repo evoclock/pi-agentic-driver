@@ -7,6 +7,6 @@ steps:
       - "npm test"
       - "npm pack --dry-run"
   - label: "Public content scan"
-    agents: { queue: mac-mini }
+    agents: { queue: linux-small }
     timeout_in_minutes: 5
     command: "node .github/tools/public_term_scan.mjs"
