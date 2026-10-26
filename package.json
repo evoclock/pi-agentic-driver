@@ -1,6 +1,6 @@
 {
   "name": "@evoclock/pi-agentic-driver",
-  "version": "3.0.0",
+  "version": "2.1.0",
   "description": "Guardrail extensions for Agentic Driver: advisory review, bounded Herdr communication, and guarded worker lifecycle.",
   "type": "module",
   "scripts": {
@@ -70,7 +70,6 @@
     "scripts/enforcement/herdr_async_dispatch_pi.js",
     "scripts/enforcement/herdr_async_seam_pi.js",
     "scripts/enforcement/loop_until_done_pi.js",
-    "scripts/enforcement/stall_detector_pi.js",
     "scripts/enforcement/loop_until_done_guide.md",
     ".agentic-driver/loop-until-done.defaults.json",
     "scripts/enforcement/durable_assignment_pi.js",
@@ -93,6 +92,7 @@
     "README.md",
     "LICENSE",
     "extensions/herdr-lifecycle.ts",
+    "extensions/inventory-refresh.ts",
     "extensions/treehouse-recycle.ts",
     "scripts/enforcement/treehouse_recycle_pi.js",
     "config/treehouse.v1.json",
@@ -108,6 +108,7 @@
     "scripts/aidr_writing_review.js",
     "scripts/codebase_inventory.py",
     "scripts/codebase_inventory_gate.py",
+    "scripts/inventory_refresh.sh",
     "config/codebase-inventory.schema.json",
     ".githooks/pre-commit",
     "templates/AGENTS.md",
@@ -137,8 +138,20 @@
     "skills/how/LICENSE",
     "skills/how/WORKFLOW_BOUNDARIES.md",
     "skills/correct-pi",
+    "skills/driver-mode/SKILL.md",
+    "skills/driver-principle-boundary-only-authority/SKILL.md",
+    "skills/driver-principle-cite-your-status/SKILL.md",
+    "skills/driver-principle-dependency-policy/SKILL.md",
+    "skills/driver-principle-evidence/SKILL.md",
+    "skills/driver-principle-fail-loud/SKILL.md",
+    "skills/driver-principle-working-memory-is-not-authority/SKILL.md",
     "skills/release-public",
     "docs/release-public.md",
+    "skills/test-gate/SKILL.md",
+    "skills/session-handover/SKILL.md",
+    "scripts/session_handover.py",
+    "skills/ralph/SKILL.md",
+    "scripts/ralph.py",
     "extensions/tasks.ts",
     "scripts/enforcement/session_tasks_core_pi.js",
     "scripts/enforcement/session_tasks_validate_pi.js",
@@ -157,23 +170,30 @@
       "./skills/harvest-lessons",
       "./skills/public-pr-wording",
       "./skills/release-public",
-      "./skills/correct-pi"
+      "./skills/correct-pi",
+      "./skills/driver-mode",
+      "./skills/test-gate",
+      "./skills/session-handover",
+      "./skills/ralph",
+      "./skills/driver-principle-boundary-only-authority",
+      "./skills/driver-principle-cite-your-status",
+      "./skills/driver-principle-dependency-policy",
+      "./skills/driver-principle-evidence",
+      "./skills/driver-principle-fail-loud",
+      "./skills/driver-principle-working-memory-is-not-authority"
     ]
   },
   "dependencies": {
     "@earendil-works/chord": "1.0.4",
+    "@earendil-works/pi-ai": "1.0.4",
     "@earendil-works/pi-durable": "1.0.4",
     "typescript": "5.9.2"
-  },
-  "peerDependencies": {
-    "@earendil-works/pi-ai": "*"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/evoclock/pi-agentic-driver.git"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "1.0.4",
     "@earendil-works/pi-coding-agent": "1.2.0"
   }
 }

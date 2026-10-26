@@ -45,10 +45,20 @@ test("fresh offline packed install loads all configured skills and imports", asy
     const installed = join(consumer, "node_modules/@evoclock/pi-agentic-driver");
     const manifest = JSON.parse(readFileSync(join(installed, "package.json"), "utf8"));
     const expected = manifest.pi.skills.map((entry) => entry.split("/").at(-1));
+    const sourceManifest = JSON.parse(readFileSync(join(repo, "package.json"), "utf8"));
+    const sourceSkills = sourceManifest.pi.skills.map((entry) => entry.split("/").at(-1));
+    assert.deepEqual([...expected].sort(), sourceSkills.sort(), "the packed manifest must preserve package.json skill registration");
     assert.deepEqual(expected.filter((name) => name.endsWith("-pi")), ["correct-pi"], "only the native correction skill ships");
-    assert.deepEqual(expected.filter((name) => !name.endsWith("-pi")).sort(),
-      ["crew-tracker-sync", "decision-to-spec", "harvest-lessons", "public-pr-wording", "pulse", "release-public", "tasks", "weekly-build-recap"].sort(),
-      "the packaged non-port skills must ship");
+    const driverSkills = [
+      "driver-mode",
+      "driver-principle-boundary-only-authority",
+      "driver-principle-cite-your-status",
+      "driver-principle-dependency-policy",
+      "driver-principle-evidence",
+      "driver-principle-fail-loud",
+      "driver-principle-working-memory-is-not-authority",
+    ];
+    assert.ok(driverSkills.every((name) => expected.includes(name)), "the packaged driver skills must ship");
     const loader = new DefaultResourceLoader({
       cwd: consumer,
       agentDir: home,

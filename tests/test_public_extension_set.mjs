@@ -73,6 +73,7 @@ test("package file list matches the public extension set", () => {
     "extensions/herdr-communication.ts",
     "extensions/herdr-dispatch.ts",
     "extensions/herdr-lifecycle.ts",
+    "extensions/inventory-refresh.ts",
     "extensions/linux-microvm.ts",
     "extensions/loop-until-done.ts",
     "extensions/pulse.ts",
