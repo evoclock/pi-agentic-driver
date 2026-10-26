@@ -70,6 +70,7 @@
     "scripts/enforcement/herdr_async_dispatch_pi.js",
     "scripts/enforcement/herdr_async_seam_pi.js",
     "scripts/enforcement/loop_until_done_pi.js",
+    "scripts/enforcement/stall_detector_pi.js",
     "scripts/enforcement/loop_until_done_guide.md",
     ".agentic-driver/loop-until-done.defaults.json",
     "scripts/enforcement/durable_assignment_pi.js",

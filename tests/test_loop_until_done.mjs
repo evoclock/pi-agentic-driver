@@ -8,14 +8,15 @@ function host(entries = [], now = () => Date.now(), config = loadLoopConfig()) {
   const handlers = new Map();
   const commands = new Map();
   const sent = [];
+  const deliveries = [];
   const pi = {
     on(name, handler) { handlers.set(name, handler); },
     registerCommand(name, spec) { commands.set(name, spec); },
     appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); },
-    sendUserMessage(message) { sent.push(message); },
+    sendUserMessage(message, options) { sent.push(message); deliveries.push(options); },
   };
   const ctx = { sessionManager: { getEntries: () => [...entries] } };
-  return { pi, handlers, commands, sent, entries, ctx, budget: registerLoopUntilDone(pi, now, config) };
+  return { pi, handlers, commands, sent, deliveries, entries, ctx, budget: registerLoopUntilDone(pi, now, config) };
 }
 
 const command = (h) => h.commands.get("loop-until-done").handler;
@@ -213,7 +214,10 @@ test("Invalid configuration fails closed before command registration", () => {
     { maxSteps: 2, maxDurationMs: -1, wake: { mode: "until-done" } },
     { maxSteps: 2, maxDurationMs: 10, wake: { mode: "interval", periodMs: 0 } },
     { maxSteps: 2, maxDurationMs: 10, wake: { mode: "other" } },
-    { maxSteps: 2, maxDurationMs: 10, wake: { mode: "until-done", periodMs: 1 } }]) {
+    { maxSteps: 2, maxDurationMs: 10, wake: { mode: "until-done", periodMs: 1 } },
+    { maxSteps: 2, maxDurationMs: 10, wake: { mode: "until-done" }, stall: null },
+    { maxSteps: 2, maxDurationMs: 10, wake: { mode: "until-done" }, stall: { enabled: true } },
+    { maxSteps: 2, maxDurationMs: 10, wake: { mode: "until-done" }, stall: { enabled: true, idleTimeoutMs: 0, repeatedToolCalls: 3 } }]) {
     assert.throws(() => loadLoopConfig(() => JSON.stringify(config)), /Invalid loop configuration/);
   }
   assert.throws(() => loadLoopConfig(() => "not json"), /Invalid loop configuration/);
@@ -249,11 +253,87 @@ test("Changing configured limits or wake mode on reload cannot enlarge an active
     { ...original, maxSteps: 3 },
     { ...original, maxDurationMs: 100 },
     { ...original, wake: { mode: "interval", periodMs: 5 } },
+    { ...original, stall: { ...loadLoopConfig().stall, idleTimeoutMs: 60_000 } },
   ]) {
     const resumed = host(entries, () => 100, changed);
     resumed.handlers.get("session_start")(null, resumed.ctx);
     assert.match(dispatch(resumed).reason, /step limit reached/);
   }
+});
+
+test("An idle run gets one persisted chase prompt after the configured timeout", async () => {
+  let clock = 100;
+  const config = { ...loadLoopConfig(), maxSteps: 2, maxDurationMs: 1000,
+    stall: { ...loadLoopConfig().stall, idleTimeoutMs: 10 } };
+  const h = host([], () => clock, config);
+  await command(h)("2 goal :: check", {});
+  h.handlers.get("agent_start")({}, h.ctx);
+  clock += 10;
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(h.sent.length, 2);
+  assert.match(h.sent[1], /last confirmed step/);
+  assert.deepEqual(h.deliveries[1], { deliverAs: "steer" });
+  assert.equal(h.entries.filter((entry) => entry.data.event === "chase").length, 1);
+  assert.equal(h.budget.snapshot().chased, true);
+});
+
+test("Repeated identical tool calls trigger one chase and remain one-shot after reload", async () => {
+  const entries = [];
+  const config = { ...loadLoopConfig(), maxSteps: 3, maxDurationMs: 1000,
+    stall: { ...loadLoopConfig().stall, idleTimeoutMs: 500 } };
+  const h = host(entries, () => 100, config);
+  await command(h)("3 goal :: check", {});
+  h.handlers.get("agent_start")({}, h.ctx);
+  assert.equal(dispatch(h), undefined);
+  const remaining = h.budget.snapshot().remaining;
+  for (let index = 0; index < 3; index += 1) tool(h, "read", { path: "same-file" });
+  assert.equal(h.budget.snapshot().remaining, remaining);
+  assert.equal(h.sent.length, 2);
+  assert.match(h.sent[1], /same tool call repeated/);
+  assert.deepEqual(h.deliveries[1], { deliverAs: "steer" });
+  assert.equal(entries.filter((entry) => entry.data.event === "chase").length, 1);
+
+  const reloaded = host(entries, () => 100, config);
+  reloaded.handlers.get("session_start")(null, reloaded.ctx);
+  assert.equal(reloaded.budget.snapshot().chased, true);
+  reloaded.handlers.get("agent_start")({}, reloaded.ctx);
+  for (let index = 0; index < 5; index += 1) tool(reloaded, "read", { path: "same-file" });
+  assert.equal(reloaded.sent.length, 0);
+  assert.equal(entries.filter((entry) => entry.data.event === "chase").length, 1);
+});
+
+test("A final BLOCKED report gets one chase after settlement; non-final text does not", async () => {
+  const h = host([], () => 100, { ...loadLoopConfig(), maxSteps: 2, maxDurationMs: 1000,
+    stall: { ...loadLoopConfig().stall, idleTimeoutMs: 500 } });
+  await command(h)("2 goal :: check", {});
+  h.handlers.get("agent_start")({}, h.ctx);
+  h.handlers.get("turn_end")({ message: {
+    role: "assistant", stopReason: "toolUse",
+    content: [{ type: "text", text: "[BLOCKED: waiting for approval]" }, { type: "toolCall", name: "read" }],
+  } }, h.ctx);
+  assert.equal(h.sent.length, 1);
+  h.handlers.get("turn_end")({ message: {
+    role: "assistant", stopReason: "stop", content: [{ type: "text", text: "BLOCKED: waiting for approval" }],
+  } }, h.ctx);
+  h.handlers.get("agent_settled")({}, h.ctx);
+  assert.equal(h.sent.length, 2);
+  assert.match(h.sent[1], /State the exact blocker and stop/);
+  assert.equal(h.entries.filter((entry) => entry.data.event === "chase").length, 1);
+});
+
+test("Disabled stall detection sends no chase", async () => {
+  const h = host([], () => 100, { ...loadLoopConfig(), maxSteps: 2, maxDurationMs: 1000,
+    stall: { ...loadLoopConfig().stall, enabled: false, idleTimeoutMs: 5 } });
+  await command(h)("2 goal :: check", {});
+  h.handlers.get("agent_start")({}, h.ctx);
+  for (let index = 0; index < 5; index += 1) tool(h, "read", { path: "same-file" });
+  h.handlers.get("turn_end")({ message: {
+    role: "assistant", stopReason: "stop", content: [{ type: "text", text: "[BLOCKED]" }],
+  } }, h.ctx);
+  h.handlers.get("agent_settled")({}, h.ctx);
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.entries.filter((entry) => entry.data.event === "chase").length, 0);
 });
 
 for (const wake of [{ mode: "until-done" }, { mode: "interval", periodMs: 15 }]) {
