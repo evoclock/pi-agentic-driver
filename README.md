@@ -48,6 +48,15 @@ proofs for agentic workflows.
   <img src="assets/agentic-driver-full-color.gif" alt="Full-color Agentic Driver control vault" width="768">
 </p>
 
+## Fleet Herdr spawn rule
+
+**HARD (fleet-wide):** anything that controls bots encodes this in git here, not only in assistant skills.
+
+- Pi tabs/panes: **only** `agentic_herdr_spawn_worker` / Pi **herdr** spawn (spelling **herdr**).
+- Never raw `herdr agent start` or other bare Herdr agent-start CLI.
+- Default Pi model: `openai-codex/gpt-6-sol` until the operator names another.
+- Details for agents: [AGENTS.md](./AGENTS.md).
+
 ## Shipped features
 
 | Tool | What it does | Status |
