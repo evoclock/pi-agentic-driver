@@ -441,13 +441,18 @@ silently, and return results as untrusted evidence.
 
 `/loop-until-done <steps> <approved goal> :: <observable exit check>` gives
 one already-authorized coordinator session task a fixed worker-dispatch budget.
-Configure the limits and wake in `.agentic-driver/loop-until-done.defaults.json`.
+Configure the limits, wake, and stall recovery in `.agentic-driver/loop-until-done.defaults.json`.
 The defaults allow at most 200 attempts or 30 minutes, whichever comes first.
 Each attempt consumes a step before dispatch. After a successful exchange,
 the default wake prompts a check immediately; an interval can delay that prompt.
 Each wake asks the agent to check the original exit condition before another
 dispatch. The per-session allowance cannot be extended or restarted. This
 command does not dispatch board cards; Board Pulse owns those.
+
+Stall detection is enabled by default. It sends one chase prompt after two
+minutes without progress, three identical tool calls, or a final `[BLOCKED]`
+report. Set `stall.enabled` to `false` to disable it, or adjust
+`stall.idleTimeoutMs` and `stall.repeatedToolCalls` in the defaults file.
 
 The extension, its defaults, and its guide are included in the 2.0.0 npm
 package file list. See `scripts/enforcement/loop_until_done_guide.md`.

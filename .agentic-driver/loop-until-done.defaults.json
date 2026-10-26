@@ -1,5 +1,10 @@
 {
   "maxSteps": 200,
   "maxDurationMs": 1800000,
-  "wake": { "mode": "until-done" }
+  "wake": { "mode": "until-done" },
+  "stall": {
+    "enabled": true,
+    "idleTimeoutMs": 120000,
+    "repeatedToolCalls": 3
+  }
 }

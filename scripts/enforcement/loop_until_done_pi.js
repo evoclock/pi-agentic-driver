@@ -2,6 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { readFileSync } from "node:fs";
+import {
+  buildStallNudge,
+  createStallDetector,
+  DEFAULT_STALL_CONFIG,
+  STALL_REASONS,
+  validateStallConfig,
+} from "./stall_detector_pi.js";
 
 export const LOOP_COMMAND = "loop-until-done";
 const CONFIG = new URL("../../.agentic-driver/loop-until-done.defaults.json", import.meta.url);
@@ -10,7 +17,7 @@ export function loadLoopConfig(read = (url) => readFileSync(url, "utf8")) {
   let config;
   try { config = JSON.parse(read(CONFIG)); } catch { throw new Error("Invalid loop configuration: expected readable JSON."); }
   if (!config || Array.isArray(config) || typeof config !== "object"
-    || Object.keys(config).sort().join(",") !== "maxDurationMs,maxSteps,wake"
+    || !["maxDurationMs,maxSteps,wake", "maxDurationMs,maxSteps,stall,wake"].includes(Object.keys(config).sort().join(","))
     || !Number.isSafeInteger(config.maxSteps) || config.maxSteps < 1
     || !Number.isSafeInteger(config.maxDurationMs) || config.maxDurationMs < 1
     || !config.wake || Array.isArray(config.wake) || typeof config.wake !== "object"
@@ -21,7 +28,10 @@ export function loadLoopConfig(read = (url) => readFileSync(url, "utf8")) {
       : Object.keys(config.wake).join(",") !== "mode")) {
     throw new Error("Invalid loop configuration: positive safe integer limits and a valid wake mode are required.");
   }
-  return config;
+  const stallConfig = Object.prototype.hasOwnProperty.call(config, "stall") ? config.stall : DEFAULT_STALL_CONFIG;
+  const stall = validateStallConfig(stallConfig);
+  if (!stall.ok) throw new Error(`Invalid loop configuration: ${stall.errors.join("; ")}`);
+  return { ...config, stall: stall.config };
 }
 const ENTRY_TYPE = "loop-until-done-budget.v1";
 const GUIDE = new URL("./loop_until_done_guide.md", import.meta.url);
@@ -63,32 +73,46 @@ export function createLoopBudget(record, now = () => Date.now(), config = loadLo
       const records = entries.filter((entry) => entry.type === "custom" && entry.customType === ENTRY_TYPE)
         .map((entry) => entry.data);
       const starts = records.filter((data) => data?.event === "start");
+      const chases = records.filter((data) => data?.event === "chase");
       used = starts.length > 0;
       const steps = starts[0]?.steps;
       const startedAt = starts[0]?.startedAt;
+      const recordedStall = starts[0]?.stall ?? DEFAULT_STALL_CONFIG;
       const valid = starts.length === 1 && starts[0]?.maxSteps === config.maxSteps && starts[0]?.maxDurationMs === config.maxDurationMs
         && JSON.stringify(starts[0]?.wake) === JSON.stringify(config.wake)
+        && JSON.stringify(recordedStall) === JSON.stringify(config.stall)
         && Number.isSafeInteger(steps) && steps >= 1 && steps <= config.maxSteps
         && Number.isSafeInteger(startedAt) && startedAt >= 0
-        && records.every((data) => ["start", "attempt", "expire", "stop"].includes(data?.event));
-      if (!used) active = records.length ? { steps: 0, remaining: 0 } : null;
-      else if (!valid) active = { steps: 0, remaining: 0 };
+        && chases.length <= 1 && chases.every((data) => STALL_REASONS.includes(data.reason))
+        && records.every((data) => ["start", "attempt", "expire", "stop", "chase"].includes(data?.event));
+      if (!used) active = records.length ? { steps: 0, remaining: 0, chased: true } : null;
+      else if (!valid) active = { steps: 0, remaining: 0, chased: true };
       else if (records.some((data) => data.event === "stop")) active = null;
       else {
         const recordedExpiry = records.some((data) => data.event === "expire");
         const sameRun = active?.startedAt === startedAt;
         active = { steps, startedAt, expired: recordedExpiry || (sameRun && active.expired),
           expiryRecorded: recordedExpiry || (sameRun && active.expiryRecorded),
-          remaining: Math.max(0, steps - records.filter((data) => data.event === "attempt").length) };
+          remaining: Math.max(0, steps - records.filter((data) => data.event === "attempt").length),
+          chased: chases.length === 1 };
       }
     },
     start(request) {
       if (used || active) throw new Error("A loop has already started in this session; it cannot be restarted or reset.");
       const startedAt = now();
       if (!Number.isSafeInteger(startedAt) || startedAt < 0) throw new Error("A valid clock is required to open a bounded loop.");
-      record({ event: "start", steps: request.steps, startedAt, maxSteps: config.maxSteps, maxDurationMs: config.maxDurationMs, wake: config.wake });
+      record({ event: "start", steps: request.steps, startedAt, maxSteps: config.maxSteps, maxDurationMs: config.maxDurationMs,
+        wake: config.wake, stall: config.stall });
       used = true;
-      active = { ...request, startedAt, remaining: request.steps };
+      active = { ...request, startedAt, remaining: request.steps, chased: false };
+    },
+    claimChase(reason) {
+      if (!active || active.chased || !Number.isSafeInteger(active.steps) || active.steps < 1 || !STALL_REASONS.includes(reason)) {
+        return false;
+      }
+      record({ event: "chase", reason });
+      active.chased = true;
+      return true;
     },
     stop() {
       if (!active) return;
@@ -97,6 +121,7 @@ export function createLoopBudget(record, now = () => Date.now(), config = loadLo
     },
     snapshot() { return active && { ...active }; },
     hasStarted() { return used; },
+    hasChased() { return active?.chased === true; },
     guard(event) {
       if (!active) return undefined;
       const tool = event?.toolName;
@@ -151,22 +176,109 @@ export function registerLoopUntilDone(pi, now = () => Date.now(), config = loadL
   config = loadLoopConfig(() => JSON.stringify(config));
   REGISTERED.add(pi);
   const budget = createLoopBudget((data) => pi.appendEntry(ENTRY_TYPE, data), now, config);
+  const detector = createStallDetector(config.stall, now);
   let pendingWake = null;
+  let pendingIdleWatch = null;
+  let currentContext = null;
   let admitted = false;
   let successful = false;
   const cancelWake = () => { if (pendingWake !== null) clearTimeout(pendingWake); pendingWake = null; };
-  pi.on("tool_call", (event) => {
+  const cancelIdleWatch = () => { if (pendingIdleWatch !== null) clearTimeout(pendingIdleWatch); pendingIdleWatch = null; };
+  const resetStallWatch = () => { cancelIdleWatch(); detector.reset(); };
+  const reportChaseFailure = (ctx) => {
+    try { ctx?.ui?.notify?.("Stall recovery failed and will not retry.", "warning"); } catch { /* A stale or unavailable UI must not trigger another chase. */ }
+  };
+  const chase = (reason, deliverAs = null, ctx = currentContext) => {
+    const state = budget.snapshot();
+    const current = now();
+    if (!state || state.chased || state.expired || !Number.isSafeInteger(current) || current < state.startedAt
+      || current - state.startedAt >= config.maxDurationMs) return false;
+    let claimed = false;
+    try {
+      claimed = budget.claimChase(reason);
+    } catch {
+      resetStallWatch();
+      admitted = false;
+      successful = false;
+      reportChaseFailure(ctx);
+      return false;
+    }
+    if (!claimed) return false;
+    resetStallWatch();
+    admitted = false;
+    successful = false;
+    try {
+      const message = buildStallNudge(reason);
+      if (deliverAs) pi.sendUserMessage(message, { deliverAs });
+      else pi.sendUserMessage(message);
+    } catch {
+      reportChaseFailure(ctx);
+    }
+    return true;
+  };
+  const scheduleIdleWatch = () => {
+    const state = budget.snapshot();
+    if (!config.stall.enabled || !state || state.chased || state.expired || !detector.isRunning()) {
+      cancelIdleWatch();
+      return;
+    }
+    cancelIdleWatch();
+    pendingIdleWatch = setTimeout(() => {
+      pendingIdleWatch = null;
+      const reason = detector.checkIdle();
+      if (reason !== null) chase(reason, "steer", currentContext);
+      else scheduleIdleWatch();
+    }, config.stall.idleTimeoutMs);
+  };
+  const observeProgress = (ctx) => {
+    currentContext = ctx ?? currentContext;
+    if (!budget.snapshot() || budget.hasChased()) return;
+    detector.observeProgress();
+    scheduleIdleWatch();
+  };
+  pi.on("agent_start", (_event, ctx) => {
+    currentContext = ctx;
+    const state = budget.snapshot();
+    if (!config.stall.enabled || !state || state.chased || state.expired) {
+      resetStallWatch();
+      return;
+    }
+    detector.beginRun();
+    scheduleIdleWatch();
+  });
+  for (const event of ["agent_end", "turn_start", "message_start", "message_update", "tool_execution_start", "tool_execution_update", "tool_execution_end"]) {
+    pi.on(event, (_event, ctx) => observeProgress(ctx));
+  }
+  pi.on("turn_end", (event, ctx) => {
+    currentContext = ctx ?? currentContext;
+    if (!budget.snapshot() || budget.hasChased()) return;
+    detector.observeAssistantMessage(event?.message);
+    scheduleIdleWatch();
+  });
+  pi.on("tool_call", (event, ctx) => {
+    currentContext = ctx ?? currentContext;
     const result = budget.guard(event);
     if (event?.toolName === "agentic_worker_dispatch" && event?.input?.action === "dispatch" && !result && budget.snapshot()) admitted = true;
+    if (result === undefined && budget.snapshot() && !budget.hasChased()) {
+      const reason = detector.observeToolCall(event);
+      if (reason === "repeated-tool-loop") chase(reason, "steer", ctx);
+      else scheduleIdleWatch();
+    }
     return result;
   });
-  pi.on("tool_result", (event) => {
+  pi.on("tool_result", (event, ctx) => {
+    currentContext = ctx ?? currentContext;
+    if (budget.snapshot() && !budget.hasChased()) observeProgress(ctx);
     if (admitted && event?.toolName === "agentic_worker_dispatch" && !event?.isError) successful = true;
   });
-  pi.on("agent_settled", () => {
+  pi.on("agent_settled", (_event, ctx) => {
+    currentContext = ctx ?? currentContext;
+    cancelIdleWatch();
+    const reason = detector.endRun();
+    if (reason !== null && chase(reason, null, ctx)) return;
     if (!admitted) return;
     admitted = false;
-    if (!successful) return;
+    if (!successful) { successful = false; return; }
     successful = false;
     const state = budget.snapshot();
     if (!state || state.remaining < 1 || state.expired || pendingWake !== null) return;
@@ -180,15 +292,32 @@ export function registerLoopUntilDone(pi, now = () => Date.now(), config = loadL
     }, delay);
   });
   for (const event of ["session_start", "session_tree"]) {
-    pi.on(event, (_event, ctx) => { cancelWake(); admitted = false; successful = false; budget.restore(ctx.sessionManager.getEntries()); });
+    pi.on(event, (_event, ctx) => {
+      cancelWake();
+      resetStallWatch();
+      currentContext = ctx;
+      admitted = false;
+      successful = false;
+      budget.restore(ctx.sessionManager.getEntries());
+    });
   }
-  pi.on("session_shutdown", () => { cancelWake(); admitted = false; successful = false; budget.restore([]); });
+  pi.on("session_shutdown", () => {
+    cancelWake();
+    resetStallWatch();
+    currentContext = null;
+    admitted = false;
+    successful = false;
+    budget.restore([]);
+  });
   pi.registerCommand(LOOP_COMMAND, {
     description: `Work toward a checkable goal with up to ${config.maxSteps} dispatch attempts and a ${config.maxDurationMs} ms time ceiling`,
     argumentHint: `<1-${config.maxSteps} steps> <approved goal> :: <observable exit check> | stop`,
     handler: async (args, ctx) => {
       if (args?.trim() === "stop") {
         cancelWake();
+        resetStallWatch();
+        admitted = false;
+        successful = false;
         budget.stop();
         ctx?.ui?.notify?.("Loop stopped. No remaining step allowance.", "info");
         return;
@@ -203,6 +332,7 @@ export function registerLoopUntilDone(pi, now = () => Date.now(), config = loadL
         pi.sendUserMessage(`${guide}\n\nEnforced worker-dispatch allowance: ${request.steps} attempts and a ${config.maxDurationMs} ms time ceiling. A refusal or failure consumes an attempt. To close the run, use /${LOOP_COMMAND} stop; it cannot restart in this session. No tool or model can increase this allowance.`);
       } catch (error) {
         cancelWake();
+        resetStallWatch();
         budget.stop();
         throw error;
       }
