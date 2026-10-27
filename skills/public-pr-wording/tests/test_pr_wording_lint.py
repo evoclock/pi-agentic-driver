@@ -283,5 +283,14 @@ class PrWordingLint(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
 
 
+
+    def test_rejects_summary_test_plan_template(self):
+        """Never reopen public PRs with GitHub Summary / Test plan headings."""
+        body = "## Summary\nI changed a thing.\n\n## Test plan\n- ran tests\n"
+        result = run("Sync herdr refuse to public", body)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("sections are", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
