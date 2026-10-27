@@ -85,6 +85,7 @@ proofs for agentic workflows.
 | Bounded loop-until-done | Keeps a session working toward an explicit stopping condition within configured limits; packaged since 2.0.0 and documented here. | shipped |
 | Bounded stall recovery | One chase prompt after idle timeout, repeated identical tool calls, or a final `[BLOCKED]` report inside loop-until-done; packaged since 3.0.1. | shipped |
 | Raw `herdr agent start` refuse | Attended-authority bash guard refuses bare Herdr agent-start fail-closed (no confirm path); bots must use `agentic_herdr_spawn_worker`. Packaged since 3.0.1. | shipped |
+| Codebase inventory refresh | Regenerates `pipeline_output/codebase_inventory.jsonl` (hook + extension + gate) so agents can orient quickly; commits that skip the refresh are blocked. | shipped |
 
 **Status: active development and testing.** The disabled NUDGE classifier and
 private evidence store are packaged foundations, not a running recovery
@@ -194,22 +195,26 @@ copied).
   states while the trusted writer retains authority over admission,
   completion, reconciliation, and migration. The Tasks skill also bridges
   session planning to the durable `TASKS.md` board.
+- **codebase inventory refresh.** `pipeline_output/codebase_inventory.jsonl`
+  is the fast orientation lookup for agents. The packaged hook, extension,
+  and gate keep it current on every commit; agents should read that file
+  rather than re-walking the tree. Richer prior-art receipts inside planning
+  remain optional product work, not a separate Planned row here.
 - **role and phase routing.** The router separates planning, implementation,
   review, and escalation phases. It reports endpoint warm state when
-  configured. Warm-session preference remains future work; route affinity
-  never overrides authority.
+  configured. Route affinity never overrides authority.
 
-**Planned in this theme:**
+**Adjacent (load like other Pi packages):**
 
-- **prompted planning lifecycle.** Turn natural-language goals into complete
-  proposals with parent and scope choices at native boundaries. No retry
-  loops or model-supplied identifiers.
-- **native assignment selection.** Choose planned assignments through a
-  native UI over derived candidates, never through model-supplied targets.
-- **inventory refresh.** Regenerate the Git-aware codebase inventory with
-  verification receipts so prior-art matching stays honest.
-- **project status and state review.** Add read-only views of workspace Git
-  state, formal records, and task-state health.
+- **planning methods.** The separate `pi-poteto-mode` package owns planning
+  methods. This driver owns native confirmation and refuses model-supplied
+  IDs at authority boundaries; it does not re-home poteto's planning UI.
+- **status and review projections.** Use `pi-bowerbird` the same way you load
+  `pi-poteto-mode` when you want read-only Git/board status and review
+  projections. The driver does not rebuild that product in-package.
+
+Warm-session preference (prefer warm seat; never silent substitution) is
+tracked under Multi-agent communication below.
 
 <details>
 <summary><strong>router, capacity/policy routing with a binding dispatch gate</strong> <em>(released, 0.9.2)</em></summary>
@@ -589,16 +594,12 @@ Coming next:
 
 </details>
 
-- **project status and state review.** Read-only projections of workspace Git
-  state, formal records, and task-state health.
-- **role-lane routing and warm sessions.** Separate lanes handle
-  implementation, planning, and review, and the router prefers a warm session
-  so context and cache survive across tasks. Route affinity is an
-  optimisation, never authority: an incompatible lane yields an explicit
-  review-required result, never silent model substitution.
-- **task-ledger integration.** Agents read and act within the task ledger's
-  card states without owning board authority: no admission, completion,
-  reconciliation, or migration by the agent itself.
+**Planned in this theme:**
+
+- **warm-session preference.** Prefer a warm session for the lane and never
+  silently substitute another model or endpoint; incompatible seats yield an
+  explicit review-required result. Lanes and the router are already shipped
+  above; this line is only the remaining preference rule.
 
 ## Writing clearly
 
@@ -830,10 +831,10 @@ not seen. Branch protection on GitHub remains the real gate. See
 
 **Under development in this theme:**
 
-- **native macOS container proof.** The native Apple Container runtime has
-  passed a fixed local isolation qualification: read-only repository mount,
-  no network, automatic removal. The native Pi adapter is not yet part of the
-  released package.
+- **macOS local isolation path.** Under evaluation for a packaged Mac path
+  (Apple Container proof done offline; Cua is a candidate). Not in the npm
+  package yet. The shipped isolation story remains Linux microVM
+  (user-enabled).
 
 ## Session continuity
 
@@ -843,27 +844,17 @@ not seen. Branch protection on GitHub remains the real gate. See
 
 - **context-pressure handling.** Pressure detection, non-lossy handover,
   compaction completion without cancellation loops, and continuation of the
-  latest user goal. Development-only until the full live journey passes.
-- **lossless session-reference compaction.** Selective, lossless retrieval of
-  exact pre-compaction content, addressing factual degradation across
-  repeated compactions. Designed as an optional add-on, not yet implemented.
+  latest user goal.
+- **handover notes.** Durable repository-local handover notes so a fresh
+  session can identify goal, changed files, checks, and next step without
+  executing anything.
+- **modal-safe nudge.** Partial today: finish a proven modal-safe nudge
+  channel for Herdr (no terminal `prompt` / `send-keys` fallback). Packaged
+  recovery-evidence TUI stays review-only and never authorizes recovery.
 
-**Planned in this theme:**
-
-- **handover, checkpoint, and recovery.** Durable repository-local handover
-  notes, governed checkpoint mutation, watchdog handoff, and fresh-session
-  resumption that identifies goal, changed files, checks, and next step
-  without executing anything.
-- **recovery journey.** A private exact-evidence store and read-only TUI review
-  are packaged. Trusted journey authorization, safe handoff, durable unknown-
-  delivery lock, and a modal-safe nudge channel are still missing. No recovery
-  action is enabled by a stored hash, receipt, or display token.
-- **broader evidence ledger.** Deterministic indexing, lossless projection,
-  checkpoint produce/store/recover, and tested multihost reconciliation remain
-  planned beyond the bounded private store.
-- **offline multihost evidence.** Record run evidence on each host while
-  disconnected and reconcile it deterministically on reconnection, with no
-  host as sole authority.
+Broader ledger, offline multihost reconciliation, and a full recovery
+journey stay in the private plan docs until they have a ship date — not on
+the public README face.
 
 ## Working with Git safely
 
@@ -912,36 +903,24 @@ outward effects section of `docs/durable-persistence.md`.
 
 </details>
 
-**Planned:**
+**Planned (opt-in):**
 
-- **git workflow safeguards.** Not packaged yet. The planned capability covers
-  exact-file staging, native confirmation, post-confirmation drift checks,
-  and protected-operation boundaries.
-- **assignment-aware Git journeys.** Planned merge and protected-push flows
-  bound to a verified assignment, so consequential Git operations carry their
-  own recorded provenance.
+- **git workflow safeguards.** Exact-file staging, native confirmation, and
+  post-confirmation drift checks as an opt-in layer on top of attended
+  authority — for owners who want tighter staging gates without forcing them
+  on every session.
+- **assignment-aware Git journeys.** Opt-in merge and protected-push flows
+  bound to a verified assignment (including keeping human merge as the
+  default while allowing a recorded agent-merge path when you choose it).
 
 ## Package integrity
 
 *Extensions that keep the installed set honest and the record controlled.*
 
-**Planned:**
-
-- **security and integrity scanning.** Static scanning of MCP configs, agent
-  skills, and extension packages for hardcoded secrets, prompt and shell
-  injection, data-exfiltration endpoints, untrusted integrations, PII
-  leakage, and OWASP/MCP threat families, with accept/redact/reject
-  decisions. Built on the agent-scanner approach proven in Hillstar
-  Orchestrator and an isolation environment.
-- **checkpoint storage lifecycle.** Compression, deduplication, retention,
-  and purging rules for capsule and index stores once a product ships, so
-  session evidence has a managed lifetime instead of growing without bound.
-- **product knowledge graph.** Semantic graph projection of a shipped
-  product's checkpoints, decisions, and artifacts, so the record of what was
-  built stays queryable after active development ends.
-
-Each item lands here as its own extension when its scenario passes
-acceptance with all prohibited effects absent.
+Package-integrity scanning (Hillstar-style agent/skill/MCP scanner lineage),
+checkpoint storage lifecycle, and a product knowledge graph stay in the
+private plan until something ships. Each lands as its own extension when its
+scenario passes acceptance.
 
 ### Portable repository contract
 
@@ -981,6 +960,9 @@ or change a model route.
 - **pstack methods.** The separate `pi-poteto-mode` package supplies the
   pstack skill ports. Install it separately if you need those methods.
   `correct-pi` remains a native driver skill.
+- **status and review projections.** The separate `pi-bowerbird` package
+  supplies read-only Git/board status and review projections. Load it the
+  same way you load `pi-poteto-mode`; the driver does not reimplement it.
 - **Packaged-skill checks.** Public CI verifies skill frontmatter and package
   registration, then loads the packed artifact in a fresh consumer and checks
   for Pi skill diagnostics. This is release validation, not an install-time
