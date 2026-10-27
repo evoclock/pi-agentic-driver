@@ -7,3 +7,7 @@ Before the command bumps the version, syncs, tags, or packs, it reads the source
 The same check runs in CI for branches named `chore/release-*`. A release pull request cannot pass while the label remains. The shared script is `scripts/check_readme_release_status.py`. Agents Buildkite runs it directly. Public sync copies the script and the public content scan, and the public pipeline already runs that scan, so the public release pull request runs the same check.
 
 Merge the public PR with a **merge commit**. Squash and rebase do not preserve the tagged commit on main. After merging, run `python3 scripts/release_public.py X.Y.Z --public <public-checkout> --verify-merged`. It fails if the tag is not reachable from `origin/main`. The owner then handles npm sign-in and package publication. The command never performs those operations or merges or pushes main.
+
+## Public sync pull requests
+
+After `scripts/public_sync.py --apply`, open the public draft PR with `skills/public-pr-wording` only. Required sections are `## What changed`, `## Why`, `## How verified`, and `## Notes for agents` (first person, short bullets, no bot names, local paths, or battle story). Never use GitHub's `## Summary` / `## Test plan` template. `scripts/open_public_sync_pr.py` runs the lint and opens the draft. Release PRs from `release_public.py` already use this shape.

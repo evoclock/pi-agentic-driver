@@ -50,7 +50,7 @@ proofs for agentic workflows.
 
 ## Fleet Herdr spawn rule
 
-**HARD (fleet-wide):** anything that controls bots encodes this in git here, not only in assistant skills.
+**HARD (fleet-wide; packaged since 3.0.1):** anything that controls bots encodes this in git here, not only in assistant skills.
 
 - Pi tabs/panes: **only** `agentic_herdr_spawn_worker` / Pi **herdr** spawn (spelling **herdr**).
 - Never raw `herdr agent start` or other bare Herdr agent-start CLI (the attended-authority guard refuses those bash forms fail-closed).
@@ -83,6 +83,8 @@ proofs for agentic workflows.
 | Janus (bundled service) | Local Jev evaluation service on loopback: semantic ranking, the dispatch-gate judgment, redaction before every external call. See `janus/README.md`. | shipped |
 | `weekly-build-recap` skill | Prepares a local weekly GitHub recap with a picture and draft posts; posting remains yours. | shipped |
 | Bounded loop-until-done | Keeps a session working toward an explicit stopping condition within configured limits; packaged since 2.0.0 and documented here. | shipped |
+| Bounded stall recovery | One chase prompt after idle timeout, repeated identical tool calls, or a final `[BLOCKED]` report inside loop-until-done; packaged since 3.0.1. | shipped |
+| Raw `herdr agent start` refuse | Attended-authority bash guard refuses bare Herdr agent-start fail-closed (no confirm path); bots must use `agentic_herdr_spawn_worker`. Packaged since 3.0.1. | shipped |
 
 **Status: active development and testing.** The disabled NUDGE classifier and
 private evidence store are packaged foundations, not a running recovery
@@ -450,13 +452,19 @@ silently, and return results as untrusted evidence.
 
 `/loop-until-done <steps> <approved goal> :: <observable exit check>` gives
 one already-authorized coordinator session task a fixed worker-dispatch budget.
-Configure the limits and wake in `.agentic-driver/loop-until-done.defaults.json`.
+Configure the limits, wake, and stall recovery in `.agentic-driver/loop-until-done.defaults.json`.
 The defaults allow at most 200 attempts or 30 minutes, whichever comes first.
 Each attempt consumes a step before dispatch. After a successful exchange,
 the default wake prompts a check immediately; an interval can delay that prompt.
 Each wake asks the agent to check the original exit condition before another
 dispatch. The per-session allowance cannot be extended or restarted. This
 command does not dispatch board cards; Board Pulse owns those.
+
+Stall detection is enabled by default. It sends one chase prompt after two
+minutes without progress, three identical tool calls, or a final `[BLOCKED]`
+report. Set `stall.enabled` to `false` to disable it, or adjust
+`stall.idleTimeoutMs` and `stall.repeatedToolCalls` in the defaults file.
+Bounded stall recovery is packaged since 3.0.1.
 
 The extension, its defaults, and its guide are included in the 2.0.0 npm
 package file list. See `scripts/enforcement/loop_until_done_guide.md`.
@@ -789,6 +797,12 @@ continues, and the agent does not retry behind your back. In headless runs
 where no human can confirm, destructive commands are refused rather than
 silently allowed.
 
+**Raw Herdr agent start** *(packaged since 3.0.1)*. Bash forms that run
+`herdr agent start` (including wrapped paths and `env` prefixes) are
+forbidden fail-closed with no confirmation path. Use
+`agentic_herdr_spawn_worker` / Pi herdr spawn only. See the Fleet Herdr
+spawn rule above and [AGENTS.md](./AGENTS.md).
+
 **Merge policy** *(shipped)*. The guard also enforces one merge
 setting, read from `{PI_CODING_AGENT_DIR}/config/merge-policy.v1.json`
 (the installed agent config directory) and never from the working tree.
@@ -955,10 +969,13 @@ or change a model route.
   them into patterns, ranks them, and hands the top ones to `correct-pi` as
   guarded draft PRs. Its `agentic_harvest_lessons` collector is read-only and
   never writes files, posts or opens PRs.
-- **public-pr-wording.** Drafts PR titles and bodies in four sections, in
-  the repository owner's first person, with no bot or model names and no
-  local paths. The bundled lint enforces length caps and wording rules; your
-  own names go in a personal config that is never committed.
+- **public-pr-wording.** Drafts PR titles and bodies as `## What changed`,
+  `## Why`, `## How verified`, and `## Notes for agents`, in the repository
+  owner's first person, with no bot or model names and no local paths. The
+  bundled lint rejects GitHub's `## Summary` / `## Test plan` template and
+  enforces length caps and wording rules; your own names go in a personal
+  config that is never committed. Public sync PRs use this shape (packaged
+  since 3.0.1 for the Summary/Test-plan ban).
 - **correct-pi.** Turns an owner-selected recurring correction into a
   structural guard, then requires a check that catches a real past failure.
 - **pstack methods.** The separate `pi-poteto-mode` package supplies the
