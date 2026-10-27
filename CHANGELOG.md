@@ -1,3 +1,7 @@
+## 3.0.2
+
+- Restore `@earendil-works/pi-ai` as `peerDependencies: "*"` so Pi stops warning about host-provided duplicate modules.
+
 ## 3.0.1
 
 - Refuse raw herdr agent start fail-closed; document fleet Herdr spawn-only; keep public-pr-wording for sync PRs; document bounded stall recovery in README.

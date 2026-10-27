@@ -1,6 +1,6 @@
 {
   "name": "@evoclock/pi-agentic-driver",
-  "version": "3.0.1",
+  "version": "3.0.2",
   "description": "Guardrail extensions for Agentic Driver: advisory review, bounded Herdr communication, and guarded worker lifecycle.",
   "type": "module",
   "scripts": {
@@ -185,7 +185,6 @@
   },
   "dependencies": {
     "@earendil-works/chord": "1.0.4",
-    "@earendil-works/pi-ai": "1.0.4",
     "@earendil-works/pi-durable": "1.0.4",
     "typescript": "5.9.2"
   },
@@ -194,6 +193,10 @@
     "url": "git+https://github.com/evoclock/pi-agentic-driver.git"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "1.2.0"
+    "@earendil-works/pi-coding-agent": "1.2.0",
+    "@earendil-works/pi-ai": "1.0.4"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*"
   }
 }

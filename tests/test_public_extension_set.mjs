@@ -291,3 +291,9 @@ test("packaged file set closes over every relative script it imports", () => {
   }
   assert.deepEqual(missing, [], `packaged import set is incomplete:\n${missing.join("\n")}`);
 });
+
+test("host pi-ai is peerDependency * not a dependency", () => {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal((pkg.dependencies || {})["@earendil-works/pi-ai"], undefined);
+  assert.equal((pkg.peerDependencies || {})["@earendil-works/pi-ai"], "*");
+});
