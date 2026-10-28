@@ -1,18 +1,10 @@
-## 3.0.2
+## 3.0.3
 
-- Restore `@earendil-works/pi-ai` as `peerDependencies: "*"` so Pi stops warning about host-provided duplicate modules.
-
-## 3.0.1
-
-- Refuse raw herdr agent start fail-closed; document fleet Herdr spawn-only; keep public-pr-wording for sync PRs; document bounded stall recovery in README.
+- Document unattended Herdr spawn ledger grants; refuse all raw Herdr CLI including send-keys; treat empty ledger models/roles lists as any.
 
 # Changelog
 
 Release dates below come from the read-only npm registry `time` record for `@evoclock/pi-agentic-driver` (checked 2026-10-22).
-
-## 3.0.0
-
-- Remove the 53 bundled pstack Pi skill ports; install pi-poteto-mode separately. The native correct-pi skill remains.
 
 ## 2.1.0 (2026-10-23)
 

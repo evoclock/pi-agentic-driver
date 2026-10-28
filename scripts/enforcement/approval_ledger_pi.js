@@ -86,12 +86,20 @@ export async function recordApproval(profile, input) {
   if (input.maxUses != null && (!Number.isSafeInteger(input.maxUses) || input.maxUses < 1)) throw new Error("invalid use limit");
   return withApprovalLock(profile, () => {
     const entries = verifyApprovals(paths.ledger, paths.head);
-    const body = { ...input, scope: { paths: [], prs: [], branches: [], models: [], roles: [], ...input.scope }, schema: "relay-approval.v1", id: randomUUID(), prevHash: entries.at(-1)?.hash ?? null, recordedAt: now.toISOString(), expiresAt };
+    const body = { ...input, scope: { paths: [], prs: [], branches: [], ...input.scope }, schema: "relay-approval.v1", id: randomUUID(), prevHash: entries.at(-1)?.hash ?? null, recordedAt: now.toISOString(), expiresAt };
     const entry = { ...body, hash: digest(JSON.stringify(body)) };
     appendFileSync(paths.ledger, JSON.stringify(entry) + "\n", { flag: "a", mode: 0o600 });
     writeFileSync(paths.head, JSON.stringify({ count: entries.length + 1, lastHash: entry.hash }) + "\n", { mode: 0o600 });
     return entry;
   });
+}
+// An explicit empty array in a grant's models or roles means any model or
+// role. A missing field still fails closed, and so does any other value, so
+// only a deliberately written [] widens the grant. recordApproval therefore
+// does not default models or roles to [] when the input omits them.
+export function scopeListCovers(list, value) {
+  if (!Array.isArray(list)) return false;
+  return list.length === 0 || list.includes(value);
 }
 export function authorizeApproval(profile, id, { tier, repository, action, model, role, path, pr, branch }, now = new Date()) {
   const paths = approvalPaths(profile);
@@ -101,7 +109,7 @@ export function authorizeApproval(profile, id, { tier, repository, action, model
   const trusted = config.relayers?.some((r) => r.relayer === entry?.relayer && r.channel === entry?.channel && r.maxTier >= tier);
   const scope = entry?.scope;
   const used = (() => { try { return readFileSync(paths.uses, "utf8").split("\n").filter(Boolean).map(JSON.parse).filter((use) => use.ledgerId === id && use.result === "reserved").length; } catch (error) { if (error.code === "ENOENT") return 0; throw error; } })();
-  if (!entry || config.revokedIds?.includes(id) || tier > 2 || entry.tier < tier || !trusted || !scope || scope.repo !== repository || (tier === 2 && !entry.quote.includes(repository)) || !scope.actions?.includes(action) || (model && !scope.models?.includes(model)) || (role && !scope.roles?.includes(role)) || (path && !scope.paths?.includes(path)) || (pr && !scope.prs?.includes(pr)) || (branch && !scope.branches?.includes(branch)) || (entry.expiresAt && Date.parse(entry.expiresAt) <= now.getTime()) || (entry.maxUses != null && used >= entry.maxUses)) throw new Error("approval does not cover action");
+  if (!entry || config.revokedIds?.includes(id) || tier > 2 || entry.tier < tier || !trusted || !scope || scope.repo !== repository || (tier === 2 && !entry.quote.includes(repository)) || !scope.actions?.includes(action) || (model && !scopeListCovers(scope.models, model)) || (role && !scopeListCovers(scope.roles, role)) || (path && !scope.paths?.includes(path)) || (pr && !scope.prs?.includes(pr)) || (branch && !scope.branches?.includes(branch)) || (entry.expiresAt && Date.parse(entry.expiresAt) <= now.getTime()) || (entry.maxUses != null && used >= entry.maxUses)) throw new Error("approval does not cover action");
   return entry;
 }
 // The header names candidate records only. Each requested action is checked
