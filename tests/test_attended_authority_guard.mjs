@@ -115,7 +115,7 @@ test("write over an existing file is destructive; new file is not", () => {
 
 test("raw herdr agent start is forbidden fail-closed (no confirm)", async () => {
   for (const command of [
-    "herdr agent start worker --kind pi --pane w1:p1 -- --model openai-codex/default-sol",
+    "herdr agent start worker --kind pi --pane w1:p1 -- --model openai-codex/example-route",
     "/opt/homebrew/bin/herdr agent start foo --kind pi --pane w1:p2",
     "herdr agent start role-name",
     "env FOO=1 herdr agent start x --kind pi --pane w1:p1",
@@ -123,11 +123,10 @@ test("raw herdr agent start is forbidden fail-closed (no confirm)", async () => 
     const verdict = classifyBashCommand(command);
     assert.equal(verdict.destructive, true, command);
     assert.equal(verdict.forbidden, true, command);
-    assert.match(verdict.kind, /raw herdr agent start/);
+    assert.match(verdict.kind, /raw herdr CLI/);
   }
-  // Allowed herdr verbs that are not agent start must not trip the forbid rule.
-  assert.equal(classifyBashCommand("herdr agent list").destructive, false);
-  assert.equal(classifyBashCommand("herdr pane list").destructive, false);
+  assert.equal(classifyBashCommand("herdr agent list").forbidden, true);
+  assert.equal(classifyBashCommand("herdr pane list").forbidden, true);
 
   const tui = {
     mode: "tui",
@@ -141,6 +140,24 @@ test("raw herdr agent start is forbidden fail-closed (no confirm)", async () => 
   assert.equal(blocked?.block, true);
   assert.match(blocked.reason, /forbidden/);
   assert.match(blocked.reason, /agentic_herdr_spawn_worker/);
+});
+
+test("raw herdr terminal control and communication are forbidden without confirmation", async () => {
+  for (const command of [
+    "herdr agent prompt worker 'do this'",
+    "herdr agent read worker",
+    "herdr agent wait worker",
+    "herdr agent send worker hello",
+    "herdr pane send-keys w1:p1 Enter",
+    "herdr pane read w1:p1",
+    "env X=1 /opt/bin/herdr agent prompt worker hi",
+    "herdr agent 'prompt' worker hi",
+  ]) {
+    const verdict = classifyBashCommand(command);
+    assert.equal(verdict.forbidden, true, command);
+    const result = await guardToolCall({ toolName: "bash", input: { command } }, TUI);
+    assert.equal(result?.block, true, command);
+  }
 });
 
 test("headless contexts refuse destructive operations fail-closed", async () => {

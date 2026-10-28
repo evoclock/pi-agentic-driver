@@ -70,3 +70,29 @@ test("scope, relayer, expiry and use limit fail closed", async () => {
   await recordApprovalUse(root, entry.id, "spawn", "example", "reserved");
   assert.throws(() => authorizeApproval(root, entry.id, check));
 });
+test("an explicit empty roles or models list covers any role or model", async () => {
+  const root = fixture();
+  const anyRole = await recordApproval(root, { ...input(), scope: { ...input().scope, roles: [] } });
+  const anyModel = await recordApproval(root, { ...input(), scope: { ...input().scope, models: [] } });
+  const check = { tier: 1, repository: "example", action: "spawn", model: "local/example", role: "worker" };
+  assert.equal(authorizeApproval(root, anyRole.id, { ...check, role: "any-new-role" }).id, anyRole.id);
+  assert.throws(() => authorizeApproval(root, anyRole.id, { ...check, model: "local/other" }), /does not cover/);
+  assert.equal(authorizeApproval(root, anyModel.id, { ...check, model: "local/other" }).id, anyModel.id);
+  assert.throws(() => authorizeApproval(root, anyModel.id, { ...check, role: "other" }), /does not cover/);
+  // Repository and action still bind an any-role grant.
+  assert.throws(() => authorizeApproval(root, anyRole.id, { ...check, role: "x", repository: "elsewhere" }), /does not cover/);
+  assert.throws(() => authorizeApproval(root, anyRole.id, { ...check, role: "x", action: "merge" }), /does not cover/);
+});
+test("a missing roles or models field still fails closed", async () => {
+  const root = fixture();
+  const { roles, ...noRoles } = input().scope;
+  const { models, ...noModels } = input().scope;
+  const a = await recordApproval(root, { ...input(), scope: noRoles });
+  const b = await recordApproval(root, { ...input(), scope: noModels });
+  const check = { tier: 1, repository: "example", action: "spawn", model: "local/example", role: "worker" };
+  assert.throws(() => authorizeApproval(root, a.id, check), /does not cover/);
+  assert.throws(() => authorizeApproval(root, b.id, check), /does not cover/);
+  // The recorder must not turn an omitted field into an any-grant.
+  assert.equal(a.scope.roles, undefined);
+  assert.equal(b.scope.models, undefined);
+});

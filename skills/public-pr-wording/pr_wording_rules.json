@@ -42,14 +42,6 @@
     {
       "reason": "emoji (unslop rule 18)",
       "pattern": "[\\U0001F000-\\U0001FAFF\\u2600-\\u27BF]"
-    },
-    {
-      "reason": "legacy Summary heading; use What changed / Why / How verified / Notes for agents",
-      "pattern": "(?m)^##\\s*Summary\\s*$"
-    },
-    {
-      "reason": "legacy Test plan heading; use How verified",
-      "pattern": "(?m)^##\\s*Test\\s*plan\\s*$"
     }
   ],
   "clutter": [

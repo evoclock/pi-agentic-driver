@@ -1,3 +1,7 @@
+## 3.0.3
+
+- Document unattended Herdr spawn ledger grants; refuse all raw Herdr CLI including send-keys; treat empty ledger models/roles lists as any.
+
 ## 3.0.2
 
 - Restore `@earendil-works/pi-ai` as `peerDependencies: "*"` so Pi stops warning about host-provided duplicate modules.

@@ -59,13 +59,13 @@ const SAFE_COMMAND_PREFIXES = [
   "git config --get", "git ls-files",
 ];
 
-// Fleet HARD: raw Herdr agent-start from bash is never allowed. Bots must
-// use agentic_herdr_spawn_worker / Pi herdr spawn only. These are refused
-// fail-closed with no confirmation path (unlike destructive Git ops).
+// Fleet HARD: raw Herdr shell control is never allowed. Use the guarded Pi
+// spawn and communication tools, including for reads and polling. Refuse
+// without confirmation, unlike destructive Git operations.
 const FORBIDDEN_SHELL_PATTERNS = [
   {
-    pattern: /(?:^|[\s;&|`(]|\$\()(?:\S*\/)?herdr\b[^\n|;]*\bagent\b[^\n|;]*\bstart\b/,
-    kind: "raw herdr agent start (use agentic_herdr_spawn_worker)",
+    pattern: /(?:^|[\s;&|`(]|\$\()(?:\S*\/)?herdr\b(?:\s|$)/,
+    kind: "raw herdr CLI (use agentic_herdr_spawn_worker or agentic_herdr_communication)",
   },
 ];
 
