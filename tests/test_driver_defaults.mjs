@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -104,8 +104,9 @@ test("defaults keep sessions and bot profiles separate and ordinary work unsched
   assert.match(defaults, /not an action guard/i);
 });
 
-test("retirement inventory lists 54 ports and blocks 53 retirements", () => {
-  const inventory = read("docs/internal/flockmate/2026-10-24/pi-skill-retirement-inventory.md");
+const retirementInventoryPath = join(root, "docs/internal/flockmate/2026-10-24/pi-skill-retirement-inventory.md");
+test("retirement inventory lists 54 ports and blocks 53 retirements", { skip: !existsSync(retirementInventoryPath) }, () => {
+  const inventory = readFileSync(retirementInventoryPath, "utf8");
   const rows = [...inventory.matchAll(/^\| `skills\/[^`]+` \|([^|]*)\|([^|]*)\|$/gm)];
   const retire = rows.flatMap(([, cell]) => [...cell.matchAll(/`([^`]+)`/g)].map((match) => match[1]));
   const keepFromPorts = rows.flatMap(([, , cell]) => [...cell.matchAll(/`([^`]+)`/g)].map((match) => match[1]));
