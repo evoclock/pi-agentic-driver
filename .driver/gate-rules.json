@@ -123,16 +123,7 @@
       "id": "public-pr-wording-tests",
       "kind": "command",
       "label": "Public PR wording unit tests",
-      "command": [
-        "python3",
-        "-m",
-        "unittest",
-        "discover",
-        "-s",
-        "skills/public-pr-wording/tests",
-        "-p",
-        "test_*.py"
-      ]
+      "command": ["python3", "-m", "unittest", "discover", "-s", "skills/public-pr-wording/tests", "-p", "test_*.py"]
     },
     {
       "id": "precommit-hook",
@@ -163,6 +154,12 @@
   "hashScopedAllowances": [
     {
       "check": "no-hidden-installs",
+      "path": ".buildkite/pipeline.yml",
+      "sha256": "86cb5e5c8400d453a3b73f993cf1d1c4ef9cd8d26ce4c338c998d570142f5362",
+      "reason": "This reviewed Buildkite pipeline wraps dependency installs with Socket Firewall and warms the packed package cache before the offline test, gate, scan, and preview."
+    },
+    {
+      "check": "no-hidden-installs",
       "path": "scripts/enforcement/guest_containment_taxonomy.v1.json",
       "sha256": "0b194cdfd86f23fd68c2685c2ccfc556a0e311e2973b1ff619c6c78791d65fcd",
       "reason": "This policy data names package-manager commands to deny; it does not execute install commands."
@@ -181,11 +178,11 @@
     },
     {
       "check": "pr-wording-review",
-      "reason": "PR wording and review require PR metadata and GH_TOKEN; keep the existing Buildkite steps unchanged."
+      "reason": "PR wording runs against the PR base in Buildkite; independent review still requires separate PR metadata and evidence."
     },
     {
       "check": "release-readme-status",
-      "reason": "The existing release-branch status check remains a separate Buildkite step."
+      "reason": "The public content scan checks README release status on release branches."
     },
     {
       "check": "secrets-dependency-antipattern",

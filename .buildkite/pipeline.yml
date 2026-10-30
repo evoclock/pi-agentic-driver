@@ -4,9 +4,18 @@ steps:
     timeout_in_minutes: 30
     command:
       - "sfw npm ci"
+      - "sfw npm ci --prefix janus"
+      - "mkdir -p .ci-buildkite/pack .ci-buildkite/consumer"
+      - "npm pack --pack-destination .ci-buildkite/pack"
+      - "sfw npm install --ignore-scripts --no-audit --no-fund --prefix .ci-buildkite/consumer .ci-buildkite/pack/*.tgz"
+      - "make gate"
       - "npm test"
       - "npm pack --dry-run"
   - label: "Public content scan"
     agents: { queue: linux-small }
     timeout_in_minutes: 5
-    command: "node .github/tools/public_term_scan.mjs"
+    command: ".buildkite/public-scan.sh"
+  - label: "PR wording"
+    agents: { queue: linux-small }
+    timeout_in_minutes: 5
+    command: ".buildkite/pr-checks.sh wording"
