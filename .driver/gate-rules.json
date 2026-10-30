@@ -90,6 +90,12 @@
       ]
     },
     {
+      "id": "public-pr-wording-tests",
+      "kind": "command",
+      "label": "Public PR wording unit tests",
+      "command": ["python3", "-m", "unittest", "discover", "-s", "skills/public-pr-wording/tests", "-p", "test_*.py"]
+    },
+    {
       "id": "precommit-hook",
       "kind": "command",
       "label": "Replay repository pre-commit hook",
@@ -117,8 +123,8 @@
     {
       "check": "no-hidden-installs",
       "path": ".buildkite/pipeline.yml",
-      "sha256": "4c31f9e6a0529234ee0da8971b5016d5915f13ea03c0beba09462a974a81ca24",
-      "reason": "Buildkite uses Socket Firewall for install-time dependencies, runs gate and test-gate, then uploads host evidence; this is CI, not skill bootstrap."
+      "sha256": "86cb5e5c8400d453a3b73f993cf1d1c4ef9cd8d26ce4c338c998d570142f5362",
+      "reason": "This reviewed Buildkite pipeline wraps dependency installs with Socket Firewall and warms the packed package cache before the offline test, gate, scan, and preview."
     },
     {
       "check": "no-hidden-installs",
@@ -140,11 +146,11 @@
     },
     {
       "check": "pr-wording-review",
-      "reason": "PR wording and review require PR metadata and GH_TOKEN; keep the existing Buildkite steps unchanged."
+      "reason": "PR wording runs against the PR base in Buildkite; independent review still requires separate PR metadata and evidence."
     },
     {
       "check": "release-readme-status",
-      "reason": "The existing release-branch status check remains a separate Buildkite step."
+      "reason": "The public content scan checks README release status on release branches."
     },
     {
       "check": "secrets-dependency-antipattern",
