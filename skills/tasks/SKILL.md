@@ -26,8 +26,9 @@ it is not affiliated with, nor does it endorse, pi-agentic-driver.
 The driver-owned skill preserves picc-tasks' owner-facing UI as well as its
 session tools:
 
-- the above-editor widget shows visible tasks with `▫`/`▪`/`✓` status icons,
-  status, subject, owner, live unresolved blockers, and a count header;
+- the above-editor widget shows at most five ordered tasks with `▫`/`▪`/`✓`
+  status icons, status, subject, owner, live unresolved blockers, and counts
+  for the full visible task list;
 - the footer status pill shows active and done/total counts;
 - `/tasks` is a richer, read-only view with descriptions, `activeForm`, and
   `[internal]` markers.

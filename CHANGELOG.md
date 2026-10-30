@@ -1,3 +1,7 @@
+## 3.1.0
+
+- Registered workers start without repeated prompts, and the task panel shows five items while the full task list stays available.
+
 ## 3.0.3
 
 - Document unattended Herdr spawn ledger grants; refuse all raw Herdr CLI including send-keys; treat empty ledger models/roles lists as any.

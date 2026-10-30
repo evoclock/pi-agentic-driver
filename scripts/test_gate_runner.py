@@ -618,9 +618,9 @@ def verify_lock(root: Path, base_sha: str, tests: set[str], test_inputs: set[str
 
 
 def changed_code_mutation(root: Path, changed: set[str], base_sha: str) -> dict:
-    """Choose a changed JS comparison, or retain the existing Python return mutant."""
+    """Choose a changed JS/TS comparison or slice bound, or a Python return mutant."""
     for name in sorted(changed):
-        if not is_production_code_path(name) or not name.endswith((".js", ".mjs", ".cjs")):
+        if not is_production_code_path(name) or not name.endswith((".js", ".mjs", ".cjs", ".ts", ".tsx")):
             continue
         source = root / name
         if source.is_symlink() or not source.is_file():
@@ -642,6 +642,13 @@ def changed_code_mutation(root: Path, changed: set[str], base_sha: str) -> dict:
                     replacement = "===" if match.group(1) == "!==" else "!=="
                     return {"path": name, "start": (index + 1, start),
                             "end": (index + 1, end), "replacement": replacement}
+                if name.endswith((".ts", ".tsx")):
+                    bound = re.search(r"\.slice\(\s*0\s*,\s*(\d+)\s*\)", line)
+                    if bound:
+                        start = len(line[:bound.start(1)].encode("utf-8"))
+                        return {"path": name, "start": (index + 1, start),
+                                "end": (index + 1, start + len(bound.group(1))),
+                                "replacement": str(int(bound.group(1)) + 1)}
     for name in sorted(changed):
         if not is_production_code_path(name) or not name.endswith(".py"):
             continue
@@ -698,7 +705,7 @@ def mutation_observation(root: Path, gate_rules: dict, config: dict, changed: se
             if counts["errors"]:
                 raise Blocked("mutation run had errors; a runner crash is not a caught mutant")
             if observation["exitCode"] and counts["failures"]:
-                if name.endswith((".js", ".mjs", ".cjs")) and not re.search(
+                if name.endswith((".js", ".mjs", ".cjs", ".ts", ".tsx")) and not re.search(
                     r"\b(?:ERR_ASSERTION|AssertionError)\b", observation["output"]
                 ):
                     raise Blocked("JavaScript mutation failed without an observed assertion failure")

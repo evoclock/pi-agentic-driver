@@ -22,50 +22,32 @@
       "id": "inventory",
       "kind": "command",
       "label": "Check codebase inventory",
-      "command": [
-        "python3",
-        "scripts/codebase_inventory.py",
-        "--check"
-      ],
+      "command": ["python3", "scripts/codebase_inventory.py", "--check"],
       "failureMessage": "Run `python3 scripts/codebase_inventory.py`, review the inventory diff, then rerun `make gate`."
     },
     {
       "id": "treehouse-codepath",
       "kind": "command",
       "label": "Check managed workspace usage",
-      "command": [
-        "python3",
-        "scripts/treehouse_codepath_scan.py"
-      ]
+      "command": ["python3", "scripts/treehouse_codepath_scan.py"]
     },
     {
       "id": "public-scan",
       "kind": "command",
       "label": "Check public-facing content",
-      "command": [
-        ".buildkite/public-scan.sh"
-      ]
+      "command": [".buildkite/public-scan.sh"]
     },
     {
       "id": "durable-tests",
       "kind": "command",
       "label": "Durable test subset",
-      "command": [
-        "npm",
-        "run",
-        "test:ci"
-      ]
+      "command": ["npm", "run", "test:ci"]
     },
     {
       "id": "janus-types",
       "kind": "command",
       "label": "Janus type check",
-      "command": [
-        "janus/node_modules/.bin/tsc",
-        "--noEmit",
-        "-p",
-        "janus/tsconfig.json"
-      ]
+      "command": ["janus/node_modules/.bin/tsc", "--noEmit", "-p", "janus/tsconfig.json"]
     },
     {
       "id": "policy-unit-tests",
@@ -83,26 +65,14 @@
       "id": "janus-tests",
       "kind": "command",
       "label": "Janus unit tests",
-      "command": [
-        "npm",
-        "test"
-      ],
+      "command": ["npm", "test"],
       "cwd": "janus"
     },
     {
       "id": "python-tests",
       "kind": "command",
       "label": "Python unit tests",
-      "command": [
-        "python3",
-        "-m",
-        "unittest",
-        "discover",
-        "-s",
-        "tests",
-        "-p",
-        "test_*.py"
-      ]
+      "command": ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"]
     },
     {
       "id": "weekly-recap-tests",
@@ -129,26 +99,24 @@
       "id": "precommit-hook",
       "kind": "command",
       "label": "Replay repository pre-commit hook",
-      "command": [
-        ".githooks/pre-commit"
-      ],
+      "command": [".githooks/pre-commit"],
       "when": "buildkite",
       "failureMessage": "Fix the staged inventory or restore the checked-in pre-commit hook."
     },
     {
       "id": "secrets-scan",
       "kind": "deferred",
-      "reason": "Full secrets scanning is deferred to \u00a710.13; no credential scanner is implemented in this slice."
+      "reason": "Full secrets scanning is deferred to §10.13; no credential scanner is implemented in this slice."
     },
     {
       "id": "dependency-diff",
       "kind": "deferred",
-      "reason": "Dependency-diff policy is deferred to \u00a710.13; dependency auditing remains an outer-loop task."
+      "reason": "Dependency-diff policy is deferred to §10.13; dependency auditing remains an outer-loop task."
     },
     {
       "id": "antipattern-scan",
       "kind": "deferred",
-      "reason": "Full antipattern scanning is deferred to \u00a710.13; this slice does not build that scanner."
+      "reason": "Full antipattern scanning is deferred to §10.13; this slice does not build that scanner."
     }
   ],
   "hashScopedAllowances": [
@@ -186,7 +154,7 @@
     },
     {
       "check": "secrets-dependency-antipattern",
-      "reason": "Full scanners are explicit \u00a710.13 follow-up work; the gate prints stable TODO skips until then."
+      "reason": "Full scanners are explicit §10.13 follow-up work; the gate prints stable TODO skips until then."
     }
   ]
 }

@@ -96,6 +96,7 @@ const OWNER_AUTH = () => ({
 // Fix 1: picc-tasks v0.2.0 result-shape compatibility
 // ---------------------------------------------------------------------------
 
+// Why: TaskGet must keep its compatible restricted result shape.
 test("TaskGet.details.task carries exactly the v0.2.0 restricted shape", async () => {
   const h = await makeHarness({ env: {} });
   try {
@@ -119,6 +120,7 @@ test("TaskGet.details.task carries exactly the v0.2.0 restricted shape", async (
   } finally { h.cleanup(); }
 });
 
+// Why: Updates must report state changes and preserve dependency edges.
 test("TaskUpdate reports statusChange and mirrors inverse dependency edges", async () => {
   const h = await makeHarness({ env: {} });
   try {
@@ -156,6 +158,7 @@ test("TaskUpdate reports statusChange and mirrors inverse dependency edges", asy
 // Explicit session priority is presentation, never dispatch authority.
 // ---------------------------------------------------------------------------
 
+// Why: Priority changes presentation, not task authority.
 test("TaskList and widget sort P0–P3 and reject clearing priority", async () => {
   const h = await makeHarness({ ui: { theme: { fg: (_c, t) => t, bold: (t) => t, strikethrough: (t) => t } } });
   try {
@@ -191,6 +194,7 @@ test("TaskList and widget sort P0–P3 and reject clearing priority", async () =
 // picc-tasks UI parity: live widget, footer pill, and /tasks command
 // ---------------------------------------------------------------------------
 
+// Why: The compact widget cannot truncate stored tasks or the full views.
 test("picc-tasks UI parity refreshes the widget and footer on task mutations", async () => {
   const h = await makeHarness({
     ui: {
@@ -227,9 +231,21 @@ test("picc-tasks UI parity refreshes the widget and footer on task mutations", a
 
     const list = detailsOf(await h.call("TaskList"));
     assert.deepEqual(list.tasks.map((task) => task.id), ["1", "3"], "internal tasks stay out of TaskList");
+
+    for (let i = 1; i <= 5; i++) {
+      await h.call("TaskCreate", { subject: `Later ${i}`, description: `full detail ${i}` });
+    }
+    const compact = h.uiCalls.widgets.at(-1).value;
+    assert.equal(compact.length, 6, "one header and at most five task rows");
+    assert.match(compact[0], /5 pending · 1 in progress · 1 done/);
+    assert.match(compact.join("\n"), /Later 4/);
+    assert.doesNotMatch(compact.join("\n"), /Later 5/);
+    assert.equal(detailsOf(await h.call("TaskList")).tasks.length, 7);
+    assert.deepEqual(h.uiCalls.statuses.at(-1), { key: "picc-tasks", value: "1 active / 1/7 tasks" });
   } finally { h.cleanup(); }
 });
 
+// Why: The full view must show details hidden from the compact widget.
 test("/tasks is a richer informational view and swallows stale-context errors", async () => {
   const h = await makeHarness({
     ui: {
@@ -259,6 +275,7 @@ test("/tasks is a richer informational view and swallows stale-context errors", 
 // Fix 3: backlog default + canonical TASKS.md-only target
 // ---------------------------------------------------------------------------
 
+// Why: Promotion previews must keep pending work dispatchable by default.
 test("preview defaults surviving pending and in_progress tasks to backlog", async () => {
   const h = await makeHarness({ env: {} });
   try {
@@ -274,6 +291,7 @@ test("preview defaults surviving pending and in_progress tasks to backlog", asyn
   } finally { h.cleanup(); }
 });
 
+// Why: The projection cannot become a second board writer target.
 test("promotion targets canonical TASKS.md only; a board.md-only workspace still resolves to TASKS.md", async () => {
   const h = await makeHarness({ env: {} });
   try {
@@ -289,6 +307,7 @@ test("promotion targets canonical TASKS.md only; a board.md-only workspace still
 // Fix 2: preview token authority boundary
 // ---------------------------------------------------------------------------
 
+// Why: Commit must bind to a preview instead of model-invented state.
 test("commit without a preview token is refused", async () => {
   const h = await makeHarness({
     env: { AGENTIC_DRIVER_TASKS_CAPABILITY: "1" },
@@ -307,6 +326,7 @@ test("commit without a preview token is refused", async () => {
   } finally { h.cleanup(); }
 });
 
+// Why: Stale previews cannot authorize a changed board write.
 test("commit with a stale/mismatched preview token is refused", async () => {
   const h = await makeHarness({
     env: { AGENTIC_DRIVER_TASKS_CAPABILITY: "1" },
@@ -328,6 +348,7 @@ test("commit with a stale/mismatched preview token is refused", async () => {
   } finally { h.cleanup(); }
 });
 
+// Why: A missing native UI cannot approve promotion.
 test("headless commit fails closed (native confirmation required)", async () => {
   const h = await makeHarness({ env: { AGENTIC_DRIVER_TASKS_CAPABILITY: "1" } });
   try {
@@ -344,6 +365,7 @@ test("headless commit fails closed (native confirmation required)", async () => 
   } finally { h.cleanup(); }
 });
 
+// Why: Denial must leave the board unchanged.
 test("owner declining the native confirmation cancels the commit with no writes", async () => {
   const h = await makeHarness({
     env: { AGENTIC_DRIVER_TASKS_CAPABILITY: "1" },
@@ -362,6 +384,7 @@ test("owner declining the native confirmation cancels the commit with no writes"
   } finally { h.cleanup(); }
 });
 
+// Why: A session without the task capability cannot promote.
 test("commit without the capability marker is refused before any write", async () => {
   const h = await makeHarness({
     env: {}, // marker deliberately absent
@@ -385,6 +408,7 @@ test("commit without the capability marker is refused before any write", async (
 // Fix 4: retry/link reconciliation
 // ---------------------------------------------------------------------------
 
+// Why: Promotion retries reconcile existing links without duplicating cards.
 test("retry after a completed promotion recovers the existing card id and repairs a missing reverse link", async () => {
   const h = await makeHarness({
     env: { AGENTIC_DRIVER_TASKS_CAPABILITY: "1" },
@@ -429,6 +453,7 @@ test("retry after a completed promotion recovers the existing card id and repair
 // Fix 5: multiple blockers aggregate into one complete-list update
 // ---------------------------------------------------------------------------
 
+// Why: All resolved blockers must land in one complete dependency update.
 test("two resolved blockers aggregate into one complete-list dependency update", async () => {
   const h = await makeHarness({
     env: { AGENTIC_DRIVER_TASKS_CAPABILITY: "1" },
@@ -459,6 +484,7 @@ test("two resolved blockers aggregate into one complete-list dependency update",
   } finally { h.cleanup(); }
 });
 
+// Why: An incomplete dependency update must be reported, not hidden.
 test("a failed aggregate dependency update is reported loudly, never silently discarded", async () => {
   const h = await makeHarness({
     env: { AGENTIC_DRIVER_TASKS_CAPABILITY: "1" },
@@ -510,6 +536,7 @@ test("a failed aggregate dependency update is reported loudly, never silently di
 // Board integrity after tool-level promotion
 // ---------------------------------------------------------------------------
 
+// Why: A successful batch must preserve board validity.
 test("the board remains valid after a tool-level batch promotion", async () => {
   const h = await makeHarness({
     env: { AGENTIC_DRIVER_TASKS_CAPABILITY: "1" },
