@@ -223,6 +223,7 @@ function cleanup(root) {
   delete process.env.FAKE_HERDR_STATE;
 }
 
+// Why: Older callers remain valid while explicit targets reject relative paths.
 test("a parameterized target is optional and bounded: old four-key calls stay valid", () => {
   const base = { placement: "tab", role: "worker", model: MODEL, repository: WORKER_REPO };
   assert.equal(validateSpawnParams(base).worktreePath, undefined);
@@ -235,6 +236,7 @@ test("a parameterized target is optional and bounded: old four-key calls stay va
     (error) => error.code === "closed_parameters");
 });
 
+// Why: Workspace association must be checked before layout mutation.
 test("worker spawn refuses a foreign workspace or pane before tab creation", async () => {
   for (const mode of ["foreign-workspace", "foreign-pane"]) {
     const f = fixture({ mode });
@@ -247,6 +249,7 @@ test("worker spawn refuses a foreign workspace or pane before tab creation", asy
   }
 });
 
+// Why: A worker must not take over a coordinator pane.
 test("a worker cannot split the coordinator pane", async () => {
   const f = fixture({ placement: "right" });
   try {
@@ -256,10 +259,11 @@ test("a worker cannot split the coordinator pane", async () => {
   } finally { cleanup(f.root); }
 });
 
-test("authorized repo + active exact lease + confirmation spawns once at the exact target", async () => {
+// Why: An eligible worker must start with verified identity even when no UI or ledger grant is available.
+test("registered repo + active exact lease spawns once without a UI or grant", async () => {
   const f = fixture();
-  const confirmations = [];
-  f.context.ui.confirm = async (title, message) => { confirmations.push({ title, message }); return true; };
+  f.context.hasUI = false;
+  f.context.ui = { confirm: () => { throw new Error("spawn must not ask for confirmation"); } };
   try {
     process.env.HERDR_PANE_ID = "w1:p1";
     const result = await executeHerdrSpawnWorker(f.params, f.context, f.herdrOptions);
@@ -268,9 +272,7 @@ test("authorized repo + active exact lease + confirmation spawns once at the exa
     assert.equal(result.repository, realpathSync(f.workerRoot));
     assert.equal(result.worktreePath, realpathSync(f.worktree));
     assert.equal(result.leaseId, LEASE_ID);
-    assert.equal(confirmations.length, 1);
-    assert.ok(confirmations[0].message.includes(realpathSync(f.worktree)), "confirmation shows the exact target");
-    assert.ok(confirmations[0].message.includes(LEASE_ID), "confirmation shows the bound lease identity");
+    assert.equal(result.authorityCreated, false);
     const calls = readLog(f.log);
     assert.deepEqual(calls.map((entry) => entry.argv).filter((argv) => argv[0] === "tab" || argv[0] === "agent"), [
       ["agent", "list"],
@@ -289,6 +291,7 @@ test("authorized repo + active exact lease + confirmation spawns once at the exa
 // revocation may run after spawn but before the child executes its fake body.
 for (const boundary of ["tui", "attended"]) {
   for (const mutation of ["layout", "start"]) {
+    // Why: Revocation must not race between the last trust check and native dispatch.
     test(`${boundary}: ${mutation} dispatch has no owned await after the authority fence`, async () => {
       const f = fixture({ boundary });
       const originalSpawn = childProcess.spawn;
@@ -332,18 +335,20 @@ for (const boundary of ["tui", "attended"]) {
   }
 }
 
-test("a target denial mutates nothing and never spawns", async () => {
-  const f = fixture({ confirm: async () => false });
+// Why: A role collision must not create a layout or start a second worker.
+test("duplicate role mutates nothing and never starts", async () => {
+  const f = fixture({ mode: "duplicate", confirm: () => { throw new Error("no confirmation expected"); } });
   try {
     process.env.HERDR_PANE_ID = "w1:p1";
     const result = await executeHerdrSpawnWorker(f.params, f.context, f.herdrOptions);
-    assert.equal(result.code, "confirmation_denied");
+    assert.equal(result.code, "duplicate_worker_name");
     assert.deepEqual(readLog(f.log).map((entry) => entry.argv), [["agent", "list"]]);
   } finally {
     cleanup(f.root);
   }
 });
 
+// Why: Ordinary root spawns must not require a Treehouse lease.
 test("a missing target keeps the old behavior and never consults Treehouse", async () => {
   const f = fixture({ omitTarget: true });
   f.herdrOptions.treehouseStatus = () => { throw new Error("Treehouse must not be consulted without a target"); };
@@ -360,6 +365,7 @@ test("a missing target keeps the old behavior and never consults Treehouse", asy
   }
 });
 
+// Why: Supplied paths are untrusted and must not reach Herdr before Git identity checks.
 test("malformed, relative, noncanonical, and symlinked targets fail closed before mutation", async () => {
   const cases = [
     ["relative", () => "relative/slot"],
@@ -400,6 +406,7 @@ test("malformed, relative, noncanonical, and symlinked targets fail closed befor
   }
 });
 
+// Why: A worktree path alone cannot establish an active lease.
 test("unleased and missing-lease worktrees are refused", async () => {
   for (const leaseStatus of ["unleased", "missing"]) {
     const f = fixture({ leaseStatus });
@@ -416,13 +423,17 @@ test("unleased and missing-lease worktrees are refused", async () => {
   }
 });
 
-test("a lease change across the confirmation boundary fails closed with no mutation", async () => {
+// Why: Lease identity must remain stable after asynchronous observation.
+test("a lease change across the observation boundary fails closed with no mutation", async () => {
   const f = fixture();
-  f.context.ui.confirm = async () => {
-    const state = JSON.parse(readFileSync(f.statePath, "utf8"));
-    state[0].lease_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    writeFileSync(f.statePath, JSON.stringify(state));
-    return true;
+  f.herdrOptions.runProcess = (spec) => {
+    const output = execFileSync(spec.executable, spec.argv, { ...spec.spawnOptions, encoding: "utf8" });
+    if (spec.argv[0] === "agent" && spec.argv[1] === "list") {
+      const state = JSON.parse(readFileSync(f.statePath, "utf8"));
+      state[0].lease_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+      writeFileSync(f.statePath, JSON.stringify(state));
+    }
+    return { code: 0, stdout: output, stderr: "" };
   };
   try {
     process.env.HERDR_PANE_ID = "w1:p1";
@@ -435,6 +446,7 @@ test("a lease change across the confirmation boundary fails closed with no mutat
   }
 });
 
+// Why: A created tab is reported even when a later lease check blocks start.
 test("a lease change between mutations reports truthful partial tab state", async () => {
   const f = fixture({ mode: "mutate-lease" });
   try {
@@ -451,6 +463,7 @@ test("a lease change between mutations reports truthful partial tab state", asyn
   }
 });
 
+// Why: The distinct attended boundary must retain its target checks.
 test("the attended Electron boundary honors the same target and refusal rules", async () => {
   const ok = fixture({ boundary: "attended" });
   try {
@@ -478,6 +491,7 @@ test("the attended Electron boundary honors the same target and refusal rules", 
   }
 });
 
+// Why: A matching name cannot substitute for Git administrative identity.
 test("a copied independent repository with the same basename stays refused", async () => {
   const f = fixture();
   try {
@@ -515,12 +529,19 @@ function replaceRepoAndWorktree(f) {
   makeWorktree(f.workerRoot, f.worktree, "fix/replaced");
 }
 
-test("WT-01/STD-01/SPEC-003: repository+worktree replacement during confirmation is refused on both boundaries", async () => {
+// Why: A repository swap during asynchronous preflight must not authorize a tab in the replacement checkout.
+test("WT-01/STD-01/SPEC-003: repository+worktree replacement before mutation is refused on both boundaries", async () => {
   for (const boundary of ["tui", "attended"]) {
     const f = fixture({ boundary });
     const before = { ...snapshotGit(f.workerRoot), ...snapshotGit(f.worktree) };
-    f.context.ui.confirm = async () => { replaceRepoAndWorktree(f); return true; };
-    if (boundary === "tui") process.env.HERDR_PANE_ID = "synthetic-pane";
+    if (boundary === "tui") {
+      process.env.HERDR_PANE_ID = "synthetic-pane";
+      f.herdrOptions.runProcess = (spec) => {
+        const stdout = execFileSync(spec.executable, spec.argv, { ...spec.spawnOptions, encoding: "utf8" });
+        if (spec.argv[0] === "agent" && spec.argv[1] === "list") replaceRepoAndWorktree(f);
+        return { code: 0, stdout, stderr: "" };
+      };
+    } else f.context.ui.confirm = async () => { replaceRepoAndWorktree(f); return true; };
     try {
       const execute = boundary === "tui" ? executeHerdrSpawnWorker : executeHerdrSpawnWorkerAttendedElectron;
       const result = await execute(f.params, f.context, f.herdrOptions);
@@ -536,6 +557,7 @@ test("WT-01/STD-01/SPEC-003: repository+worktree replacement during confirmation
   }
 });
 
+// Why: Owner changes in an otherwise trusted lease must survive a spawn.
 test("WT-01: an ordinary dirty legitimate target is still accepted (dirty state is not identity)", async () => {
   const f = fixture();
   writeFileSync(join(f.worktree, "owner-instructed-edits.txt"), "preserved owner work");
@@ -549,6 +571,7 @@ test("WT-01: an ordinary dirty legitimate target is still accepted (dirty state 
   }
 });
 
+// Why: A disallowed pane placement must fail before lease observation.
 test("WT-02/STD-02: coordinator pane placements are denied before observing a lease", async () => {
   for (const placement of ["right", "below"]) {
     const f = fixture({ placement });
@@ -601,6 +624,7 @@ function revokeDuring(f, action, sub) {
   };
 }
 
+// Why: Revoked trust after start must not produce a false success receipt.
 test("WT-03/STD-03/SPEC-001: a lease change during agent-get or pane-get is refused after the final read-back", async () => {
   for (const boundary of ["tui", "attended"]) {
     for (const [action, sub] of [["agent", "get"], ["pane", "get"]]) {
@@ -623,6 +647,7 @@ test("WT-03/STD-03/SPEC-001: a lease change during agent-get or pane-get is refu
 });
 
 for (const revokedAuthority of ["lease", "registry"]) {
+  // Why: Registry and lease revocation during observation must precede any layout.
   test(`SPEC-02: preflight refuses ${revokedAuthority} revocation during agent-list`, async () => {
     const f = fixture({ boundary: "attended" });
     f.context.ui.confirm = () => { throw new Error("preflight must not request confirmation"); };
@@ -642,6 +667,7 @@ for (const revokedAuthority of ["lease", "registry"]) {
   });
 }
 
+// Why: Inherited Git selectors cannot redirect primary-clone identity.
 test("ST-01/SPEC-03: the mandatory primary-clone resolver ignores inherited Git selectors", () => {
   const f = fixture();
   const before = process.env.GIT_COMMON_DIR;
@@ -655,6 +681,7 @@ test("ST-01/SPEC-03: the mandatory primary-clone resolver ignores inherited Git 
   }
 });
 
+// Why: A stalled Git probe must fail within its bound.
 test("ST-01/SPEC-03: the mandatory primary-clone common-dir probe is bounded", () => {
   const f = fixture();
   const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
@@ -689,6 +716,7 @@ if (args.slice(-2).join(" ") === "rev-parse --git-common-dir") {
   }
 });
 
+// Why: Inherited Git environment cannot redirect a leased worktree.
 test("WT-04/STD-04: inherited Git repository-selection variables cannot redirect the association", async () => {
   const f = fixture();
   const foreign = gitRepo(join(f.root, "foreign-repo"));
@@ -714,6 +742,7 @@ test("WT-04/STD-04: inherited Git repository-selection variables cannot redirect
   }
 });
 
+// Why: The pane's observed cwd, not the requested path, decides success.
 test("WT-05/STD-05: read-back reports independently persisted pane cwd; a wrong target fails closed", async () => {
   const ok = fixture();
   process.env.HERDR_PANE_ID = "synthetic-pane";
@@ -735,6 +764,7 @@ test("WT-05/STD-05: read-back reports independently persisted pane cwd; a wrong 
   }
 });
 
+// Why: A worktree target does not permit coordinator pane placement.
 test("WT-05: a target-specific split is denied before creating a pane", async () => {
   const f = fixture({ placement: "right" });
   try {
@@ -744,6 +774,7 @@ test("WT-05: a target-specific split is denied before creating a pane", async ()
   } finally { cleanup(f.root); }
 });
 
+// Why: Blocking Git identity probes must not hang the worker start.
 test("WT-06/STD-06: Git probes are bounded and fail with a structured error", async () => {
   const f = fixture();
   const fakeGit = join(f.root, "git");
@@ -765,6 +796,7 @@ test("WT-06/STD-06: Git probes are bounded and fail with a structured error", as
   }
 });
 
+// Why: A copied pointer is not an active lease for the requested worktree.
 test("WT-07/SPEC-002: a copied .git pointer borrowing another slot's administration is refused", async () => {
   const f = fixture();
   const other = makeWorktree(f.workerRoot, join(f.root, "other-slot"), "fix/other-slot");
@@ -787,6 +819,7 @@ test("WT-07/SPEC-002: a copied .git pointer borrowing another slot's administrat
   }
 });
 
+// Why: Registry membership is required despite a borrowed Git pointer.
 test("WT-07: an unregistered directory with a copied pointer to a valid slot is refused", async () => {
   const f = fixture();
   const pointer = readFileSync(join(f.worktree, ".git"), "utf8");
@@ -825,6 +858,7 @@ function revokeRegistryDuring(f, action, sub) {
   };
 }
 
+// Why: Invalid placement cannot trigger registry observation.
 test("WT-08/STD-07/SPEC-005: coordinator pane placements are refused before any registry observation", async () => {
   for (const placement of ["right", "below"]) {
     const f = fixture({ placement });
@@ -853,6 +887,7 @@ test("WT-08/STD-07/SPEC-005: coordinator pane placements are refused before any 
   }
 });
 
+// Why: Registry revocation after start requires a live-agent partial, not success.
 test("WT-08/STD-07/SPEC-004: registry revocation during agent-get or pane-get keeps the agent_started partial and never reports spawned", async () => {
   for (const boundary of ["tui", "attended"]) {
     for (const [action, sub] of [["agent", "get"], ["pane", "get"]]) {

@@ -88,9 +88,11 @@ class PrWordingLint(unittest.TestCase):
 
     # ---- base rules, no personal config ---------------------------------
     def test_clean_message_passes_without_config(self) -> None:
+        """Why: tip-CI / release contract evidence for test_clean_message_passes_without_config."""
         self.assert_passes(GOOD_BODY)
 
     def test_base_rules_name_no_person_bot_or_model(self) -> None:
+        """Why: tip-CI / release contract evidence for test_base_rules_name_no_person_bot_or_model."""
         rules = json.loads((SKILL / "pr_wording_rules.json").read_text(encoding="utf-8"))
         self.assertEqual(rules["allowed_names"], [])
         reasons = [r["reason"] for r in rules["banned"]]
@@ -98,37 +100,46 @@ class PrWordingLint(unittest.TestCase):
         self.assertNotIn("model or provider name", reasons)
 
     def test_generic_third_person_phrases(self) -> None:
+        """Why: tip-CI / release contract evidence for test_generic_third_person_phrases."""
         for phrase in ("the owner decides", "The user asked for this", "the maintainer wants it", "the repo owner said so"):
             self.assert_rejects(GOOD_TITLE, with_line(phrase + "."), "third-person reference to the owner")
 
     def test_plural_users_is_not_an_owner_reference(self) -> None:
+        """Why: tip-CI / release contract evidence for test_plural_users_is_not_an_owner_reference."""
         self.assert_passes(with_line("It skips the users table."))
 
     def test_names_pass_when_no_config_names_them(self) -> None:
+        """Why: tip-CI / release contract evidence for test_names_pass_when_no_config_names_them."""
         self.assert_passes(with_line("Alex will review it. Botty and modelx helped."))
 
     def test_battle_story(self) -> None:
+        """Why: tip-CI / release contract evidence for test_battle_story."""
         self.assert_rejects(GOOD_TITLE, GOOD_BODY.replace("A loop", "After a frustrating night, a loop"), "battle story")
 
     def test_word_and_line_caps(self) -> None:
+        """Why: tip-CI / release contract evidence for test_word_and_line_caps."""
         long_body = GOOD_BODY.replace("A loop with", "A loop with " + "more words here. " * 110)
         self.assert_rejects(GOOD_TITLE, long_body, "words; cap is 300")
         tall_body = GOOD_BODY.replace("## Why", "\n" * 40 + "## Why")
         self.assert_rejects(GOOD_TITLE, tall_body, "lines; cap is 40")
 
     def test_long_sentence(self) -> None:
+        """Why: tip-CI / release contract evidence for test_long_sentence."""
         self.assert_rejects(GOOD_TITLE, GOOD_BODY.replace("A loop", "A " + "very " * 30 + "loop"), "sentence:")
 
     def test_sections_and_notes(self) -> None:
+        """Why: tip-CI / release contract evidence for test_sections_and_notes."""
         self.assert_rejects(GOOD_TITLE, GOOD_BODY.replace("## Why", "## Background"), "use exactly")
         many = GOOD_BODY + "".join(f"- Lesson {i}.\n" for i in range(5))
         self.assert_rejects(GOOD_TITLE, many, "Notes for agents: 6 bullets")
 
     def test_title_rules(self) -> None:
+        """Why: tip-CI / release contract evidence for test_title_rules."""
         self.assert_rejects("x" * 80, GOOD_BODY, "title: 80 chars")
         self.assert_rejects(GOOD_TITLE + ".", GOOD_BODY, "trailing period")
 
     def test_dash_emoji_path_clutter(self) -> None:
+        """Why: tip-CI / release contract evidence for test_dash_emoji_path_clutter."""
         local_path = "/".join(("", "Users", "someone", "repo"))
         self.assert_rejects(GOOD_TITLE, GOOD_BODY.replace("set time", "set time \u2014 or steps"), "dash")
         self.assert_rejects(GOOD_TITLE, GOOD_BODY.replace("passes", "passes \U0001F680"), "emoji")
@@ -136,41 +147,49 @@ class PrWordingLint(unittest.TestCase):
         self.assert_rejects(GOOD_TITLE, GOOD_BODY.replace("now stop", "now stop in order to"), "clutter")
 
     def test_code_block_cap(self) -> None:
+        """Why: tip-CI / release contract evidence for test_code_block_cap."""
         block = "```\n" + "line\n" * 9 + "```\n"
         self.assert_rejects(GOOD_TITLE, GOOD_BODY.replace("## Why", block + "## Why"), "code block of 9 lines")
 
     # ---- personal config merged over the base ---------------------------
     def test_config_flags_third_person_owner_names_and_handles(self) -> None:
+        """Why: tip-CI / release contract evidence for test_config_flags_third_person_owner_names_and_handles."""
         for phrase in ("Alex will review it", "Alex Doe asked for this", "Alex's call", "adoe will review",
                        "adoe wants this", "adoe's approval"):
             self.assert_rejects(GOOD_TITLE, with_line(phrase + "."), "third-person reference to the owner", FIXTURE)
 
     def test_config_allows_first_person_and_plain_handle_statements(self) -> None:
+        """Why: tip-CI / release contract evidence for test_config_allows_first_person_and_plain_handle_statements."""
         for line in ("I wrote this. Author: Alex Doe.", "Only adoe merges.", "Only adoe approves merges.",
                      "See adoe/some-repo for the source."):
             self.assert_passes(with_line(line), FIXTURE)
 
     def test_config_bans_bots_models_and_extra_patterns(self) -> None:
+        """Why: tip-CI / release contract evidence for test_config_bans_bots_models_and_extra_patterns."""
         self.assert_rejects(GOOD_TITLE, with_line("Botty approved it."), "internal bot or agent name", FIXTURE)
         self.assert_rejects(GOOD_TITLE, with_line("A modelx-2 review passed."), "model or provider name", FIXTURE)
         self.assert_rejects(GOOD_TITLE, with_line("Part of codename-z."), "internal project name", FIXTURE)
 
     def test_config_bot_names_are_whole_words(self) -> None:
+        """Why: tip-CI / release contract evidence for test_config_bot_names_are_whole_words."""
         self.assert_passes(with_line("The Bottyard job ran."), FIXTURE)
         self.assert_passes(with_line("A modelxyz table exists."), FIXTURE)
         self.assert_rejects(GOOD_TITLE, with_line("The modelx5.1 run passed."), "model or provider name", FIXTURE)
 
     def test_config_names_are_literal_not_regex(self) -> None:
+        """Why: tip-CI / release contract evidence for test_config_names_are_literal_not_regex."""
         cfg = {"bot_names": ["a.c"]}
         self.assert_passes(with_line("The abc job ran."), cfg)
         self.assert_rejects(GOOD_TITLE, with_line("The a.c job ran."), "internal bot or agent name", cfg)
 
     def test_config_from_env_var(self) -> None:
+        """Why: tip-CI / release contract evidence for test_config_from_env_var."""
         result = run(GOOD_TITLE, with_line("Botty approved it."), config=FIXTURE, env_config=True)
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("internal bot or agent name", result.stdout)
 
     def test_config_from_agent_dir(self) -> None:
+        """Why: tip-CI / release contract evidence for test_config_from_agent_dir."""
         with tempfile.TemporaryDirectory() as tmp:
             agent = Path(tmp) / "agent"
             (agent / "skills-config").mkdir(parents=True)
@@ -186,6 +205,7 @@ class PrWordingLint(unittest.TestCase):
         self.assertIn("internal bot or agent name", result.stdout)
 
     def test_missing_explicit_config_or_bad_config_exits_2(self) -> None:
+        """Why: tip-CI / release contract evidence for test_missing_explicit_config_or_bad_config_exits_2."""
         with tempfile.TemporaryDirectory() as tmp:
             env = clean_env(tmp)
             env["PR_WORDING_CONFIG"] = str(Path(tmp) / "missing.json")
@@ -226,6 +246,7 @@ class PrWordingLint(unittest.TestCase):
             self.assertNotIn("Traceback", result.stderr)
 
     def test_example_config_is_placeholders_only_and_loads(self) -> None:
+        """Why: tip-CI / release contract evidence for test_example_config_is_placeholders_only_and_loads."""
         example = json.loads((SKILL / "pr_wording_config.example.json").read_text(encoding="utf-8"))
         for key in ("owner_names", "handles", "bot_names", "model_names"):
             self.assertTrue(example[key], key)
@@ -235,6 +256,7 @@ class PrWordingLint(unittest.TestCase):
 
     # ---- inputs: only the PR title and body ------------------------------
     def test_event_payload(self) -> None:
+        """Why: tip-CI / release contract evidence for test_event_payload."""
         with tempfile.TemporaryDirectory() as tmp:
             event = Path(tmp) / "event.json"
             event.write_text(json.dumps({"pull_request": {"title": GOOD_TITLE, "body": GOOD_BODY}}))
@@ -244,6 +266,7 @@ class PrWordingLint(unittest.TestCase):
     def test_repo_files_are_never_linted(self) -> None:
         # Repo files full of banned text, including configured names, sit in the
         # working tree. The lint reads only the PR title and body, so it passes.
+        """Why: tip-CI / release contract evidence for test_repo_files_are_never_linted."""
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
             (work / "README.md").write_text("# Tool\n\nAlex finally got modelx working \u2014 a frustrating saga.\n" * 50)
@@ -256,14 +279,21 @@ class PrWordingLint(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_cli_accepts_no_file_or_glob_targets(self) -> None:
+        """Why: tip-CI / release contract evidence for test_cli_accepts_no_file_or_glob_targets."""
         result = subprocess.run([sys.executable, str(SCRIPT), "--help"], capture_output=True, text=True, check=True)
         self.assertNotRegex(result.stdout, r"--(?:path|paths|glob|files?|dir)\b")
 
-    def test_buildkite_runs_pr_wording_from_the_base(self) -> None:
+    def test_tip_ci_owns_gates_and_pr_checks_script_stays_base_trusted(self) -> None:
+        """Why: tip-CI / release contract evidence for test_tip_ci_owns_gates_and_pr_checks_script_stays_base_trusted."""
+        tip_path = ROOT / ".github" / "workflows" / "tip-ci.yml"
+        self.assertTrue(tip_path.is_file(), "tip-ci.yml must exist for tip CI gates")
+        tip = tip_path.read_text(encoding="utf-8")
         pipeline = (ROOT / ".buildkite" / "pipeline.yml").read_text(encoding="utf-8")
         checks = (ROOT / ".buildkite" / "pr-checks.sh").read_text(encoding="utf-8")
-        self.assertIn('label: "PR wording"', pipeline)
-        self.assertIn('command: ".buildkite/pr-checks.sh wording"', pipeline)
+        self.assertIn("name: Tip CI", tip)
+        self.assertIn("name: types / tests / gate", tip)
+        self.assertIn("Tip CI moved to GitHub Actions", pipeline)
+        self.assertNotIn('label: "PR wording"', pipeline)
         self.assertIn('pr="${BUILDKITE_PULL_REQUEST:-false}"', checks)
         self.assertIn('if [[ "$pr" == false || -z "$pr" ]]; then', checks)
         # Trusted code only: the lint and config come from the PR base.
@@ -273,12 +303,14 @@ class PrWordingLint(unittest.TestCase):
         self.assertIn('python3 "$scratch/pr-wording/pr_wording_lint.py" "${args[@]}"', checks)
 
     def test_no_personal_config_is_committed(self) -> None:
+        """Why: tip-CI / release contract evidence for test_no_personal_config_is_committed."""
         self.assertFalse((ROOT / ".github" / "pr-wording.json").exists())
         self.assertFalse((SKILL / "pr_wording_config.local.json").exists() and
                          subprocess.run(["git", "ls-files", "--error-unmatch", str(SKILL / "pr_wording_config.local.json")],
                                         cwd=ROOT, capture_output=True).returncode == 0)
 
     def test_unreadable_input_exits_2(self) -> None:
+        """Why: tip-CI / release contract evidence for test_unreadable_input_exits_2."""
         result = run(None, None, "--event", "/nonexistent.json")
         self.assertEqual(result.returncode, 2)
 

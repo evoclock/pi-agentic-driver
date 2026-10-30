@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDurableSeamStore } from "../scripts/enforcement/durable_assignment_pi.js";
@@ -33,6 +34,116 @@ const root = process.cwd();
 const roles = ["reviewer", "reviewer-foo", "foo-reviewer"];
 
 test.beforeEach(() => resetHerdrDeliveriesForTests());
+
+function leasedWorktreeFixture() {
+  mkdirSync(join(root, "scratch"), { recursive: true });
+  const directory = mkdtempSync(join(root, "scratch/herdr-communication-worktree-"));
+  const repository = join(directory, "trusted");
+  const worktree = join(directory, "pool", "trusted");
+  mkdirSync(repository);
+  const git = (cwd, args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+  git(repository, ["init", "-q"]);
+  git(repository, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+    "commit", "-q", "--allow-empty", "-m", "fixture"]);
+  git(repository, ["worktree", "add", "-q", "--detach", worktree, "HEAD"]);
+  const lease = { path: worktree, status: "leased", lease_id: "0123456789abcdef0123456789abcdef" };
+  return { directory, repository, worktree, lease };
+}
+
+// Why: a genuine leased linked worktree must be reachable by Herdr communication after spawn.
+test("communication accepts a leased worktree of the trusted repository", async () => {
+  const fixture = leasedWorktreeFixture();
+  const observed = await executeHerdrCommunication(
+    { action: "get", role: "worker" },
+    { cwd: fixture.repository },
+    {
+      treehouseStatus: JSON.stringify([fixture.lease]),
+      runProcess: async () => ({ code: 0, stdout: JSON.stringify({
+        type: "agent_info", agent: { name: "worker", agent: "pi", status: "idle",
+          repository: fixture.repository, cwd: fixture.worktree, foreground_cwd: fixture.worktree },
+      }) }),
+    },
+  );
+  assert.equal(observed.ok, true, JSON.stringify(observed));
+  assert.equal(observed.observation.repository, fixture.repository);
+  const calls = [];
+  const delivered = await executeHerdrCommunication(
+    { action: "prompt", role: "worker", prompt: "one bounded brief", timeoutMs: 1000 },
+    { cwd: fixture.repository },
+    { treehouseStatus: JSON.stringify([fixture.lease]),
+      runProcess: async ({ argv }) => {
+        calls.push(argv[1]);
+        if (argv[1] === "read") return { code: 0, stdout: "history" };
+        return { code: 0, stdout: JSON.stringify({ type: argv[1] === "get" ? "agent_info" : "agent_prompted",
+          agent: { name: "worker", agent: "pi", status: "idle", repository: fixture.repository, cwd: fixture.worktree } }) };
+      } },
+  );
+  assert.equal(delivered.ok, true, JSON.stringify(delivered));
+  assert.equal(delivered.promptSent, true);
+  assert.deepEqual(calls, ["get", "read", "prompt"]);
+});
+
+// Why: lease state, Git administrative identity, and canonical path must decide trust, not a worktree-looking name.
+test("communication rejects unleased, unrelated, and replaced worktree targets", async () => {
+  const f = leasedWorktreeFixture();
+  const unrelated = join(f.directory, "unrelated");
+  mkdirSync(unrelated);
+  for (const [name, cwd, status] of [
+    ["unleased", f.worktree, "available"],
+    ["unrelated", unrelated, "leased"],
+  ]) {
+    const result = await executeHerdrCommunication(
+      { action: "get", role: "worker" }, { cwd: f.repository },
+      { treehouseStatus: JSON.stringify([{ ...f.lease, status }]),
+        runProcess: async () => ({ code: 0, stdout: JSON.stringify({ type: "agent_info",
+          agent: { name: "worker", agent: "pi", status: "idle", cwd } }) }) },
+    );
+    assert.equal(result.code, "repository_mismatch", name);
+  }
+  writeFileSync(join(f.worktree, ".git"), "gitdir: /not/a/registered/admin\n");
+  const replaced = await executeHerdrCommunication(
+    { action: "get", role: "worker" }, { cwd: f.repository },
+    { treehouseStatus: JSON.stringify([f.lease]),
+      runProcess: async () => ({ code: 0, stdout: JSON.stringify({ type: "agent_info",
+        agent: { name: "worker", agent: "pi", status: "idle", cwd: f.worktree } }) }) },
+  );
+  assert.equal(replaced.code, "repository_mismatch");
+});
+
+// Why: two valid leases under one repository are different worker targets, not interchangeable cwd fields.
+test("communication refuses mismatched leased worktree targets", async () => {
+  const f = leasedWorktreeFixture();
+  const other = join(f.directory, "pool", "other");
+  execFileSync("git", ["-C", f.repository, "worktree", "add", "-q", "--detach", other, "HEAD"]);
+  const result = await executeHerdrCommunication(
+    { action: "get", role: "worker" }, { cwd: f.repository },
+    { treehouseStatus: JSON.stringify([f.lease, { ...f.lease, path: other, lease_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }]),
+      runProcess: async () => ({ code: 0, stdout: JSON.stringify({ type: "agent_info",
+        agent: { name: "worker", agent: "pi", status: "idle", repository: f.worktree, cwd: other } }) }) },
+  );
+  assert.equal(result.code, "repository_mismatch");
+});
+
+// Why: registered sibling repositories remain usable, but their worktrees cannot impersonate another root.
+test("communication preserves registered sibling checks with worktree targets", async () => {
+  const f = leasedWorktreeFixture();
+  const sibling = join(f.directory, "sibling");
+  mkdirSync(sibling);
+  execFileSync("git", ["-C", sibling, "init", "-q"]);
+  mkdirSync(join(f.repository, "config"));
+  writeFileSync(join(f.repository, "config", "herdr-worker-repositories.v1.json"), JSON.stringify({
+    schema: "agentic-driver.herdr-worker-repositories.v1", repositories: ["sibling"],
+  }));
+  const get = async (repository, cwd) => executeHerdrCommunication(
+    { action: "get", role: "worker" }, { cwd: f.repository },
+    { treehouseStatus: JSON.stringify([f.lease]),
+      runProcess: async () => ({ code: 0, stdout: JSON.stringify({ type: "agent_info",
+        agent: { name: "worker", agent: "pi", status: "idle", repository, cwd } }) }) },
+  );
+  assert.equal((await get(sibling, sibling)).ok, true);
+  assert.equal((await get(sibling, f.worktree)).code, "repository_mismatch");
+  assert.equal((await get(f.repository, f.worktree)).ok, true);
+});
 
 function markerPair(role) {
   if (role === "reviewer") return ["[REVIEW_REPORT_BEGIN]", "[REVIEW_REPORT_END]"];
@@ -81,6 +192,7 @@ function concurrentFixture() {
   return { calls, runProcess, get maximumActive() { return maximumActive; } };
 }
 
+// Why: concurrent exchanges must not mix a worker's reports.
 test("Herdr communication isolates concurrent marked exchanges", async () => {
   const fixture = concurrentFixture();
   const results = await Promise.all(roles.map((role) => executeHerdrPromptExchange(
@@ -159,6 +271,7 @@ test("Herdr communication isolates concurrent marked exchanges", async () => {
   assert.equal(failedRead.nonAuthorizing, true);
 });
 
+// Why: long reports must remain readable without redelivering the prompt.
 test("a valid report longer than 400 lines is recovered with one expanded read and no prompt resend", async () => {
   const role = "long-review";
   const [open, close] = markerPair(role);
@@ -194,6 +307,7 @@ test("a valid report longer than 400 lines is recovered with one expanded read a
   assert.ok(Number(calls.at(-1)[calls.at(-1).indexOf("--lines") + 1]) > 400);
 });
 
+// Why: a truncated tail must not hide a report that can be read once more.
 test("plain read expands once when the 400-line tail starts inside the latest report", async () => {
   const role = "long-review";
   const [open, close] = markerPair(role);
@@ -213,6 +327,7 @@ test("plain read expands once when the 400-line tail starts inside the latest re
   assert.equal(calls.length, 2);
 });
 
+// Why: an echoed contract is not a reply, and nested reports are ambiguous.
 test("Herdr extraction ignores echoed contract markers but rejects nested markers", () => {
   const earlier = "[REVIEW_REPORT_BEGIN]\nold report\n[REVIEW_REPORT_END]";
   const echoedContract = "Return exactly one complete role report, and no additional report, bounded by these literal markers: [REVIEW_REPORT_BEGIN] [REVIEW_REPORT_END]";
@@ -226,6 +341,7 @@ test("Herdr extraction ignores echoed contract markers but rejects nested marker
   );
 });
 
+// Why: terminal framing must not make a complete response disappear.
 test("Herdr boxed terminal padding does not hide a complete marked report", () => {
   const box = (line) => ` ${line}${" ".repeat(240 - line.length - 2)}│`;
   const echo = [
@@ -243,21 +359,25 @@ test("Herdr boxed terminal padding does not hide a complete marked report", () =
   );
 });
 
+// Why: stalled delivery must not be reported as a completed handoff.
 test("stalled-before-delivery", async () => {
   const f = exchangeFixture({ promptFailure: { code: 2, stdout: JSON.stringify({ error: { code: "agent_prompt_stalled" } }) } });
   const r = await executeHerdrPromptExchange({ action: "prompt", role: "reviewer", prompt: "x", timeoutMs: 100 }, { cwd: root }, { runProcess: f.runProcess });
 });
 
+// Why: a prompt must reach the transport at most once.
 test("exact-once-invocation", async () => {
   for (const failure of [{ code: 2, stdout: JSON.stringify({ error: { code: "agent_prompt_stalled" } }) }, { code: 2, stderr: "bad" }, { code: 0, stdout: "{" }]) { const f = exchangeFixture({ promptFailure: failure }); await executeHerdrPromptExchange({ action: "prompt", role: "reviewer", prompt: "x", timeoutMs: 100 }, { cwd: root }, { runProcess: f.runProcess }); assert.equal(f.calls.filter(c => c.action === "prompt").length, 1); }
 });
 
+// Why: a stalled transport boundary cannot prove whether a prompt landed.
 test("stalled-tocou-unknown", async () => {
   const f = exchangeFixture({ promptFailure: { code: 2, stdout: JSON.stringify({ error: { code: "agent_prompt_stalled" } }) }, recovery: info("reviewer", "idle", undefined) });
   const r = await executeHerdrPromptExchange({ action: "prompt", role: "reviewer", prompt: "x", timeoutMs: 100 }, { cwd: root }, { runProcess: f.runProcess });
   assert.equal(r.code, "prompt_delivery_unknown"); assert.doesNotMatch(r.reason, /undelivered/);
 });
 
+// Why: missing snapshots and changed targets must fail closed.
 test("snapshot-fail-closed-and-revalidation", async () => {
   let calls = [];
   let r = await executeHerdrPromptExchange({ action: "prompt", role: "reviewer", prompt: "x", timeoutMs: 100 }, { cwd: root }, { runProcess: async ({ argv }) => { calls.push(argv[1]); return argv[1] === "get" ? info("reviewer") : { code: 2, stderr: "read failed" }; } });
@@ -265,6 +385,7 @@ test("snapshot-fail-closed-and-revalidation", async () => {
   const f = exchangeFixture({ statuses: ["idle", "working"] }); r = await executeHerdrPromptExchange({ action: "prompt", role: "reviewer", prompt: "x", timeoutMs: 100 }, { cwd: root }, { runProcess: f.runProcess }); assert.equal(r.code, "role_not_promptable"); assert.equal(f.calls.filter(c => c.action === "prompt").length, 0);
 });
 
+// Why: bounded reads must honor the exchange's latency contract.
 test("two-read-latency-contract", async () => {
   const f = exchangeFixture(); const r = await executeHerdrPromptExchange({ action: "prompt", role: "reviewer", prompt: "x", timeoutMs: 100 }, { cwd: root }, { runProcess: f.runProcess });
   assert.equal(r.ok, true); assert.deepEqual(f.calls.map(c => c.action), ["get", "read", "get", "prompt", "read"]);
@@ -285,6 +406,7 @@ async function offlineStore(t) {
   return { store, directory };
 }
 
+// Why: reopening persisted delivery must keep its identity and never resend it.
 test("offline delivery identity survives reopen, lost attribution holds and repeats never resend", async (t) => {
   const { store, directory } = await offlineStore(t);
   const f = deliveryFixture();
@@ -311,6 +433,7 @@ test("offline delivery identity survives reopen, lost attribution holds and repe
   assert.equal(f.promptCount, 1);
 });
 
+// Why: an already proven report must remain available after reopening.
 test("offline proven report survives reopen without fresh terminal reads", async (t) => {
   const { store, directory } = await offlineStore(t);
   const f = deliveryFixture();
@@ -330,6 +453,7 @@ test("offline proven report survives reopen without fresh terminal reads", async
   assert.deepEqual(f.calls, []);
 });
 
+// Why: failed reservation or conflicting identity must stop before transport.
 test("offline delivery rejects missing fake adapter, failed reservation and conflicting request reuse before send", async (t) => {
   const { store } = await offlineStore(t);
   const request = { action: "submit", role: "worker", prompt: "bound brief", timeoutMs: 1000 };
@@ -381,6 +505,7 @@ function deliveryFixture({ status = "idle", report = "fresh worker findings", fa
       // Herdr's recent-unwrapped snapshot pads standalone marker lines to the
       // terminal width and can retain Pi's right-hand box border (see
       // MAX_MARKER_HORIZONTAL_WHITESPACE). padEcho simulates that rendering.
+      // Why: marker recognition must tolerate bounded box padding without accepting arbitrary lines.
       const echo = padWidth
         ? sent.split("\n").map((line) => (/^(?:\[[A-Z0-9_]+_REPORT_(?:BEGIN|END)\]|Delivery: dlv-[0-9a-f]{16}-[0-9a-z]+|Begin your report with the Delivery line above, exactly as written\.$)/.test(line) ? `${line}${" ".repeat(Math.max(0, padWidth - line.length - 1))}│` : line)).join("\n")
         : sent;
@@ -394,6 +519,7 @@ function deliveryFixture({ status = "idle", report = "fresh worker findings", fa
   return { calls, runProcess, setStatus: (value) => { currentStatus = value; }, markAnswered: () => { answered = true; }, get promptCount() { return promptCount; }, get echoedPrompt() { return echoedPrompt; } };
 }
 
+// Why: a busy worker must not receive a queued brief prematurely.
 test("persisted busy-worker brief stays queued until a delivery query observes idle", async (t) => {
   const { store } = await offlineStore(t);
   const f = deliveryFixture({ status: "working" });
@@ -413,6 +539,7 @@ test("persisted busy-worker brief stays queued until a delivery query observes i
   assert.equal(f.promptCount, 1);
 });
 
+// Why: offline role observations cannot invent live transport state.
 test("offline communication refuses every role-keyed observation without transport", async (t) => {
   const { store } = await offlineStore(t);
   const f = deliveryFixture();
@@ -426,6 +553,7 @@ test("offline communication refuses every role-keyed observation without transpo
   assert.deepEqual(f.calls, []);
 });
 
+// Why: a failed acknowledgment cannot erase a delivered intent or trigger resend.
 test("direct offline delivery failed ack commit retains intent and never resends", async (t) => {
   const { store } = await offlineStore(t);
   const f = deliveryFixture();
@@ -445,6 +573,7 @@ test("direct offline delivery failed ack commit retains intent and never resends
   assert.equal(f.promptCount, 1);
 });
 
+// Why: prompt submission acknowledges transport rather than model completion.
 test("prompt returns an immediate delivery receipt with no model round-trip", async () => {
   const f = deliveryFixture();
   const started = Date.now();
@@ -479,6 +608,7 @@ test("prompt returns an immediate delivery receipt with no model round-trip", as
 // Attribution must still find the handoff boundary and answer the delivery;
 // a byte-exact sentPrompt echo must not be required (task #31 symptom:
 // delivered + "no terminal echo" while plain read returns the report).
+// Why: padded terminal echoes must not corrupt answer attribution.
 test("delivery attribution survives a padded, box-bordered marker echo", async () => {
   const f = deliveryFixture({ padEcho: true });
   const receipt = await executeHerdrCommunication(
@@ -498,6 +628,7 @@ test("delivery attribution survives a padded, box-bordered marker echo", async (
   assert.equal(answered.report, "fresh worker findings");
 });
 
+// Why: partial echoes cannot establish a valid handoff boundary.
 test("a partial echo of contract and tail without the caller prompt mints no boundary", async () => {
   const f = partitionFixture();
   const receipt = await executeHerdrCommunication(
@@ -524,6 +655,7 @@ test("a partial echo of contract and tail without the caller prompt mints no bou
   assert.equal(query.report, undefined);
 });
 
+// Why: an embedded marker cannot substitute for the complete caller prompt.
 test("an embedded contract line cannot reduce caller-prompt echo validation to a prefix", async () => {
   const f = partitionFixture();
   const submittedPrompt = "safe submitted brief";
@@ -575,6 +707,7 @@ test("an embedded contract line cannot reduce caller-prompt echo validation to a
   assert.equal(whitespaceMismatch.deliveryState, "delivered", JSON.stringify(whitespaceMismatch));
 });
 
+// Why: bounded framing whitespace must not break a valid report.
 test("delivery attribution survives framing padded to the full marker whitespace budget", async () => {
   const f = deliveryFixture({ padEcho: 470 });
   const receipt = await executeHerdrCommunication(
@@ -598,6 +731,7 @@ test("delivery attribution survives framing padded to the full marker whitespace
   assert.ok(f.echoedPrompt.includes(`${instruction}${" ".repeat(470 - instruction.length - 1)}│`));
 });
 
+// Why: submit and prompt must share the transport receipt semantics.
 test("submit returns the same immediate receipt contract", async () => {
   const f = deliveryFixture();
   const receipt = await executeHerdrCommunication(
@@ -615,6 +749,7 @@ test("submit returns the same immediate receipt contract", async () => {
   assert.deepEqual(f.calls.map((call) => call.action), ["get", "read", "prompt"]);
 });
 
+// Why: a query must publish an answer only after observing its report.
 test("delivery query walks delivered to answered with report markers", async () => {
   const f = deliveryFixture();
   const receipt = await executeHerdrCommunication(
@@ -661,6 +796,7 @@ test("delivery query walks delivered to answered with report markers", async () 
   assert.equal(f.promptCount, 1);
 });
 
+// Why: denied prompts must return structured refusals to callers.
 test("prompt refusals are structured and never throw", async () => {
   const noTraffic = async () => { throw new Error("no Herdr traffic expected"); };
   const denied = await executeHerdrCommunication(
@@ -728,6 +864,7 @@ test("prompt refusals are structured and never throw", async () => {
   assert.equal(failedState.deliveryState, "failed");
 });
 
+// Why: uncertainty must be explicit and must not cause an automatic resend.
 test("an unconfirmed handoff is explicit and never ambiguous or resent", async () => {
   const f = deliveryFixture();
   let handoffs = 0;
@@ -754,6 +891,7 @@ test("an unconfirmed handoff is explicit and never ambiguous or resent", async (
   assert.equal(state.deliveryState, "unknown");
 });
 
+// Why: an unknown delivery cannot authorize transport traffic.
 test("an unknown deliveryId is refused without any Herdr traffic", async () => {
   const f = deliveryFixture();
   const unknown = await executeHerdrCommunication(
@@ -766,6 +904,7 @@ test("an unknown deliveryId is refused without any Herdr traffic", async () => {
   assert.deepEqual(f.calls, []);
 });
 
+// Why: a delivered prompt must remain exactly once across later calls.
 test("a delivered prompt is never resent by the adapter", async () => {
   const f = deliveryFixture();
   const first = await executeHerdrCommunication(
@@ -789,6 +928,7 @@ test("a delivered prompt is never resent by the adapter", async () => {
   assert.equal(f.promptCount, 2, "delivery queries never re-prompt");
 });
 
+// Why: existing checklist dispatch must keep the async receipt contract.
 test("the checklist-guard supply path stays compatible with the async contract", async () => {
   // The host guard appends the first TaskCreate checklist action to
   // input.prompt before this tool executes; the input shape
@@ -815,6 +955,7 @@ test("the checklist-guard supply path stays compatible with the async contract",
   assert.equal(f.promptCount, 1);
 });
 
+// Why: the new delivery route must not change existing observations.
 test("wait and read keep their existing contracts", async () => {
   const result = await executeHerdrCommunication(
     { action: "wait", role: "worker", timeoutMs: 1000 },
@@ -884,6 +1025,7 @@ function partitionFixture() {
   };
 }
 
+// Why: identical prompts must not steal each other's replies.
 test("two rapid identical prompts each attribute to their own answer", async () => {
   const f = partitionFixture();
   const brief = "identical bounded brief";
@@ -923,6 +1065,7 @@ test("two rapid identical prompts each attribute to their own answer", async () 
   assert.equal(qaAgain.report, "answer one", "delivery A keeps its own answer");
 });
 
+// Why: an out-of-order reply belongs only to its own handoff.
 test("out-of-order answers never cross-claim: B reports first, A keeps waiting for its own", async () => {
   const f = partitionFixture();
   const brief = "same brief for both";
@@ -948,6 +1091,7 @@ test("out-of-order answers never cross-claim: B reports first, A keeps waiting f
   assert.equal(qb2.report, "b was faster");
 });
 
+// Why: a fast report must still correlate to its own delivery.
 test("a report arriving between handoff and first query attributes by its own correlation line", async () => {
   const f = partitionFixture();
   const receipt = await executeHerdrCommunication(
@@ -964,6 +1108,7 @@ test("a report arriving between handoff and first query attributes by its own co
   assert.equal(query.report, "already there");
 });
 
+// Why: repeated observation cannot invent an answer without a report.
 test("a delivery with no report yet stays delivered across repeated queries", async () => {
   const f = partitionFixture();
   const receipt = await executeHerdrCommunication(
@@ -982,6 +1127,7 @@ test("a delivery with no report yet stays delivered across repeated queries", as
   }
 });
 
+// Why: malformed correlation must not publish a worker reply.
 test("indented and separated correlation lines stay delivered and never publish framing", async () => {
   for (const prefix of ["   Delivery: ", "\nDelivery: "]) {
     const f = partitionFixture();
@@ -1002,6 +1148,7 @@ test("indented and separated correlation lines stay delivered and never publish 
   }
 });
 
+// Why: invalid earlier reports must not suppress a later valid answer.
 test("a malformed matching report does not hide a later valid report", async () => {
   const f = partitionFixture();
   const receipt = await executeHerdrCommunication(
@@ -1018,6 +1165,7 @@ test("a malformed matching report does not hide a later valid report", async () 
   assert.equal(query.report, "actual findings");
 });
 
+// Why: a report without delivery identity cannot be attributed or cached.
 test("an answer without correlation stays delivered without caching", async () => {
   const f = partitionFixture();
   const receipt = await executeHerdrCommunication(
@@ -1036,6 +1184,7 @@ test("an answer without correlation stays delivered without caching", async () =
   }
 });
 
+// Why: text alone cannot mint a transport handoff boundary.
 test("a spoofed correlation line in live text mints no boundary and cannot displace attribution", async () => {
   const f = partitionFixture();
   const receipt = await executeHerdrCommunication(
@@ -1056,6 +1205,7 @@ test("a spoofed correlation line in live text mints no boundary and cannot displ
   assert.notEqual(query.report, "spoofed");
 });
 
+// Why: unrelated terminal content must not shift delivery windows.
 test("extra unrelated echo and report between boundaries do not shift attribution", async () => {
   const f = partitionFixture();
   const a = await executeHerdrCommunication({ action: "prompt", role: "worker", prompt: "brief a", timeoutMs: 1000 }, { cwd: root }, { runProcess: f.runProcess });
@@ -1075,6 +1225,7 @@ test("extra unrelated echo and report between boundaries do not shift attributio
   assert.equal(qb.report, "b own");
 });
 
+// Why: a pre-handoff report must not count as the new reply.
 test("a prior report plus identical echo between snapshot and handoff does not mislabel", async () => {
   const f = partitionFixture();
   let releaseHandoff;
@@ -1108,6 +1259,7 @@ test("a prior report plus identical echo between snapshot and handoff does not m
   assert.notEqual(query.report, "stale findings");
 });
 
+// Why: a missing pre-delivery snapshot cannot prove attribution.
 test("no pre-delivery snapshot means unattributed, never answered, nothing cached", async () => {
   const f = deliveryFixture({ failPreRead: true });
   const receipt = await executeHerdrCommunication(
@@ -1136,6 +1288,7 @@ test("no pre-delivery snapshot means unattributed, never answered, nothing cache
   assert.equal(again.report, undefined);
 });
 
+// Why: an in-flight duplicate must reuse the delivery without resending.
 test("a repeat call inside the deduplication window returns the in-flight delivery without a second handoff", async () => {
   const f = deliveryFixture();
   let release;
@@ -1167,6 +1320,7 @@ test("a repeat call inside the deduplication window returns the in-flight delive
   assert.equal(f.promptCount, 1, "no second handoff for the identical repeat");
 });
 
+// Why: unresolved handoffs cannot be retried as new work.
 test("a repeat call after an unconfirmed handoff is refused with the same deliveryId", async () => {
   const f = deliveryFixture();
   let handoffs = 0;
@@ -1198,6 +1352,7 @@ test("a repeat call after an unconfirmed handoff is refused with the same delive
   assert.equal(findUnconfirmedDelivery("worker", "retry me", Date.now() + 121_000), undefined);
 });
 
+// Why: a completed answer must not block a later explicit prompt.
 test("a repeat call after the prior delivery is confirmed answered is a new delivery", async () => {
   const f = deliveryFixture();
   const first = await executeHerdrCommunication(
@@ -1220,6 +1375,7 @@ test("a repeat call after the prior delivery is confirmed answered is a new deli
   assert.equal(f.promptCount, 2);
 });
 
+// Why: a zero-exit handoff with missing proof must remain uncertain.
 test("a handoff that fails after a zero exit is unknown, not failed", async () => {
   for (const [index, promptResult] of [
     { code: 0, stdout: "{" },

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import difflib
 import hashlib
 import io
 import json
@@ -221,12 +222,14 @@ def test_command_for_path(name: str, root: Path, gate_rules: dict) -> dict:
     if path.suffix.lower() == ".py":
         if name.startswith("skills/weekly-build-recap/"):
             return gate_check(gate_rules, "weekly-recap-tests")
+        if name.startswith("skills/public-pr-wording/"):
+            return gate_check(gate_rules, "public-pr-wording-tests")
         if name.startswith("tests/"):
             return gate_check(gate_rules, "python-tests")
     if name.startswith("janus/tests/"):
         return gate_check(gate_rules, "janus-tests")
     if name.startswith("tests/") and path.suffix.lower() in {".js", ".mjs", ".cjs", ".ts", ".tsx"}:
-        return {"id": "node-tests", "command": ["node", "--test", name], "cwd": "."}
+        return {"id": "node-tests", "command": ["node", "--test", "--test-reporter=tap", name], "cwd": "."}
     raise Blocked(f"no host test command is mapped for changed test {name}; add it beside the shared gate")
 
 
@@ -614,8 +617,31 @@ def verify_lock(root: Path, base_sha: str, tests: set[str], test_inputs: set[str
     return target
 
 
-def changed_code_mutation(root: Path, changed: set[str]) -> dict:
-    """Choose a changed Python return and replace its value in an isolated snapshot."""
+def changed_code_mutation(root: Path, changed: set[str], base_sha: str) -> dict:
+    """Choose a changed JS comparison, or retain the existing Python return mutant."""
+    for name in sorted(changed):
+        if not is_production_code_path(name) or not name.endswith((".js", ".mjs", ".cjs")):
+            continue
+        source = root / name
+        if source.is_symlink() or not source.is_file():
+            continue
+        current = source.read_text(encoding="utf-8").splitlines(keepends=True)
+        base = run_git(root, "show", f"{base_sha}:{name}")
+        previous = base.stdout.splitlines(keepends=True) if base.returncode == 0 else []
+        for kind, _, _, first, last in difflib.SequenceMatcher(a=previous, b=current, autojunk=False).get_opcodes():
+            if kind == "equal":
+                continue
+            for index in range(first, last):
+                line = current[index]
+                if line.lstrip().startswith(("//", "*", "/*")):
+                    continue
+                match = re.search(r"\s(!==|===)\s", line)
+                if match:
+                    start = len(line[:match.start(1)].encode("utf-8"))
+                    end = start + len(match.group(1))
+                    replacement = "===" if match.group(1) == "!==" else "!=="
+                    return {"path": name, "start": (index + 1, start),
+                            "end": (index + 1, end), "replacement": replacement}
     for name in sorted(changed):
         if not is_production_code_path(name) or not name.endswith(".py"):
             continue
@@ -637,13 +663,13 @@ def changed_code_mutation(root: Path, changed: set[str]) -> dict:
             if before and before != "None":
                 return {"path": name, "start": (node.value.lineno, node.value.col_offset),
                         "end": (node.value.end_lineno, node.value.end_col_offset), "replacement": "None"}
-    raise Blocked("no changed Python return can be mutated; add a focused mutation contract for this change")
+    raise Blocked("no changed JavaScript comparison or Python return can be mutated; add a focused mutation contract for this change")
 
 
 def mutation_observation(root: Path, gate_rules: dict, config: dict, changed: set[str], tests: set[str], commit_sha: str, base_sha: str) -> dict:
     configured = config.get("mutation")
     if not isinstance(configured, dict) or configured.get("path") not in changed:
-        target = changed_code_mutation(root, changed)
+        target = changed_code_mutation(root, changed, base_sha)
         name = target["path"]
         snapshot = prepare_base_snapshot(root, base_sha, tests)
         for path_name in sorted(changed):
@@ -672,6 +698,10 @@ def mutation_observation(root: Path, gate_rules: dict, config: dict, changed: se
             if counts["errors"]:
                 raise Blocked("mutation run had errors; a runner crash is not a caught mutant")
             if observation["exitCode"] and counts["failures"]:
+                if name.endswith((".js", ".mjs", ".cjs")) and not re.search(
+                    r"\b(?:ERR_ASSERTION|AssertionError)\b", observation["output"]
+                ):
+                    raise Blocked("JavaScript mutation failed without an observed assertion failure")
                 caught = True
                 break
         if not caught:

@@ -29,6 +29,12 @@ def current_branch():
     """Prefer the CI branch name, then the local checkout."""
     if 'BUILDKITE_BRANCH' in os.environ:
         return os.environ['BUILDKITE_BRANCH'].strip()
+    # GitHub Actions PR head ref (detached HEAD otherwise has no branch name).
+    if os.environ.get('GITHUB_HEAD_REF', '').strip():
+        return os.environ['GITHUB_HEAD_REF'].strip()
+    if os.environ.get('GITHUB_REF_NAME', '').strip() and not os.environ.get('GITHUB_HEAD_REF'):
+        # push events: branch or tag name
+        return os.environ['GITHUB_REF_NAME'].strip()
     try:
         return subprocess.run(
             ['git', 'branch', '--show-current'],

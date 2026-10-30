@@ -343,15 +343,16 @@ function checkedWorkerRepositoryPath(primary, name) {
   return candidate;
 }
 
-function trustedRepositories(primary) {
+function trustedRepositories(primary, options = {}) {
   const normalizedPrimary = normalizeRepository(primary);
   const repositories = new Set([normalizedPrimary]);
+  const trusted = { roots: repositories, treehouseStatus: options.treehouseStatus };
   const registryPath = checkedRegistryPath(normalizedPrimary);
   let raw;
   try {
     raw = readFileSync(registryPath, "utf8");
   } catch (error) {
-    if (error?.code === "ENOENT") return repositories;
+    if (error?.code === "ENOENT") return trusted;
     throw communicationError("worker_registry_invalid", "the Herdr worker repository registry could not be read");
   }
   let registry;
@@ -365,12 +366,38 @@ function trustedRepositories(primary) {
     const candidate = checkedWorkerRepositoryPath(normalizedPrimary, name);
     if (candidate) repositories.add(candidate);
   }
-  return repositories;
+  return trusted;
+}
+
+// Lifecycle imports this module for report markers. Load its resolver only at
+// the async entry point, after that cycle has initialized; no second trust rule.
+let resolveWorktreeSpawnTarget;
+async function loadWorktreeResolver() {
+  resolveWorktreeSpawnTarget ??= (await import("./herdr_lifecycle_pi.js")).resolveWorktreeSpawnTarget;
+}
+
+function worktreeRepository(value, repositories) {
+  for (const root of repositories.roots) {
+    try {
+      resolveWorktreeSpawnTarget(root, value, { treehouseStatus: repositories.treehouseStatus });
+      return root;
+    } catch { // An unleased, unrelated, replaced, or non-canonical target is not trusted.
+    }
+  }
+  return undefined;
 }
 
 function repositoryAllowed(value, repositories) {
   const observed = normalizeRepository(value);
-  return [...repositories].some((repository) => sameRepository(observed, repository));
+  return [...repositories.roots].some((repository) => sameRepository(observed, repository))
+    || worktreeRepository(observed, repositories) !== undefined;
+}
+
+function sameWorkerRepository(left, right, repositories) {
+  if (sameRepository(left, right)) return true;
+  return [...repositories.roots].some((root) =>
+    (sameRepository(left, root) && worktreeRepository(right, repositories) === root)
+    || (sameRepository(right, root) && worktreeRepository(left, repositories) === root));
 }
 
 function isCoordinatorRole(value) {
@@ -925,7 +952,7 @@ function publicAgentObservation(value, role, repositories, { requirePromptable =
   if (!repo || !repositoryAllowed(repo, repositories)) {
     throw communicationError("repository_mismatch", "the configured role is not in a trusted repository");
   }
-  if (explicitRepository && workingDirectories.some((candidate) => !sameRepository(candidate, repo))) {
+  if (explicitRepository && workingDirectories.some((candidate) => !sameWorkerRepository(candidate, repo, repositories))) {
     throw communicationError("repository_mismatch", "the configured role reported a different working repository");
   }
   if (value.interactive_ready !== undefined && typeof value.interactive_ready !== "boolean") {
@@ -1826,7 +1853,8 @@ export async function inspectHerdrJourneyMarker(role, requestId, context, option
   if (typeof requestId !== "string" || !/^[a-zA-Z0-9_-]{1,100}:[1-9][0-9]{0,2}$/.test(requestId)) {
     throw communicationError("journey-id-invalid", "bounded journey request ID required", "denied");
   }
-  const repositories = trustedRepositories(expectedRepository(context));
+  await loadWorktreeResolver();
+  const repositories = trustedRepositories(expectedRepository(context), options);
   const current = await invokeHerdr("get", { action: "get", role }, context, options, signal);
   publicAgentObservation(extractAgent(current, "agent_info"), role, repositories);
   const history = readText(await invokeHerdr("read", { action: "read", role, readLines: MAX_REPORT_READ_LINES }, context, options, signal));
@@ -1859,7 +1887,8 @@ export async function executeHerdrPromptExchange(params, context, options = {}, 
     if (request.action !== "prompt") {
       throw communicationError("unsupported_action", "the blocking exchange is prompt-only", "denied");
     }
-    const repositories = trustedRepositories(expectedRepository(context));
+    await loadWorktreeResolver();
+    const repositories = trustedRepositories(expectedRepository(context), options);
     const role = request.role;
     // This is one complete, non-retriable exchange. A replaced or stale role
     // therefore cannot be silently repaired by falling back to another
@@ -1953,8 +1982,9 @@ export async function executeHerdrCommunication(params, context, options = {}, s
     if (options.offlinePersistence && !["prompt", "submit", "delivery"].includes(operation)) {
       throw communicationError("offline_delivery_required", "offline persistence requires a delivery-bound operation; role-keyed fallback is refused", "denied");
     }
+    await loadWorktreeResolver();
     const repository = expectedRepository(context);
-    const repositories = trustedRepositories(repository);
+    const repositories = trustedRepositories(repository, options);
     if (operation === "list") {
       const raw = await invokeHerdr(operation, request, context, options, signal);
       return successResult(operation, { roles: resolveConfiguredRoles(listAgents(raw), repositories) });

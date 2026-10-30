@@ -54,7 +54,7 @@ proofs for agentic workflows.
 
 - Pi tabs/panes: **only** `agentic_herdr_spawn_worker` / Pi **herdr** spawn (spelling **herdr**).
 - Never raw Herdr CLI from a bot shell, including agent start, prompt, read, wait, and pane send-keys. The attended-authority guard refuses those bash forms fail-closed. Use `agentic_herdr_communication` for bounded exchanges.
-- Unattended spawns pass `authority.ledgerId` for a covering Tier 1 ledger grant. Without one, the tool opens the native Spawn confirmation and waits on the operator.
+- A registered-repository worker tab needs no per-spawn grant or dialog. Start a fresh Pi process after installation to load the updated tool.
 - Default Pi model: the operator-named default until the operator names another.
 - Details for agents: [AGENTS.md](./AGENTS.md).
 
@@ -69,7 +69,7 @@ proofs for agentic workflows.
 | `agentic_relay_check_request` | Checks whether a recorded, scoped relay covers each requested private action; read-only preflight, with authority checked again at the action boundary. | shipped |
 | `agentic_merge_review_record` | Records independent Standards and Spec verdicts for an exact PR head; read only when the merge policy is `agents-after-checks-and-review`, and it merges nothing. | shipped |
 | `agentic_herdr_communication` | Submits one prompt and observes delivery and marked reports; never grants authority. | shipped |
-| `agentic_herdr_spawn_worker` | Starts one Pi worker in its repository's own labeled workspace, in a pane or tab, with native confirmation. | shipped |
+| `agentic_herdr_spawn_worker` | Starts and verifies one Pi worker tab in a trusted repository, reporting partial failures without an automatic retry. | shipped |
 | `agentic_aidr` | A remedy for AI;DR. Reviews writing for clarity, simplicity, brevity, and humanity. | shipped |
 | `agentic_linux_microvm_cutover` | Runs one job in a throwaway QEMU/KVM virtual machine on a Linux host, with a severity-tiered killswitch that stops escape attempts. | user-enabled, native confirmation |
 | `agentic_worker_dispatch` | Runs bounded worker journeys and observes worker liveness. Each iteration is a durable checkpoint, so an interrupted journey resumes without resending an uncertain prompt; the `journeys` action lists the records. | shipped |
@@ -378,11 +378,10 @@ across versions rather than pinning one).
 <summary><strong>herdr-lifecycle, role-labelled worker dispatch</strong> <em>(released, 0.2.1)</em></summary>
 
 The `agentic_herdr_spawn_worker` tool turns one natural-language request into Herdr's
-native lifecycle. Choose a placement (`right`, `below`, or `tab`), a safe role
-label, a model from the active Pi model roster, and a trusted repository. The
-extension:
+native lifecycle. Choose tab placement, a safe role label, a model from the
+active Pi model roster, and a trusted repository. The extension:
 
-- creates the split pane or labelled tab;
+- creates a labelled tab (coordinator pane splits are refused);
 - starts exactly one Pi agent in it;
 - verifies the role, model arguments, pane identity, and canonical repository;
 - resolves the model against the installed Pi roster and the active profile's
@@ -390,14 +389,13 @@ extension:
   ambiguous, forbidden, or unbudgeted routes fail closed;
 - optionally accepts one explicit worktree target: it must be the canonical Git
   worktree root of that same registered repository and carry an active
-  Treehouse lease observed read-only, and it is revalidated after confirmation
+  Treehouse lease observed read-only, and it is revalidated after preflight
   and between mutations;
-- requires native confirmation or a covering existing ledger grant before
-  changing layout or starting a process; native confirmation shows the exact
-  worktree target and lease identity when one is used;
-- never treats a repository-only approval grant as covering a worktree target:
-  a ledger grant must cover the repository, action, model, role and exact target
-  path; a new target without that coverage requires native confirmation;
+- starts ordinary guarded workers without a per-spawn grant or native dialog;
+  an explicitly supplied legacy ledger grant is still validated;
+- when a legacy grant is supplied, requires it to cover the repository, action,
+  model, role and exact worktree path; ordinary spawns instead rely on registry
+  trust and active lease identity;
 - treats an explicit empty `models` or `roles` list on a ledger grant as any
   model or role; a missing list still fails closed;
 - uses fixed argv with `shell: false` and no arbitrary Herdr or shell surface;
@@ -405,15 +403,7 @@ extension:
   states when only part of the operation succeeds; and
 - never retries, moves, closes, or deletes created state automatically.
 
-![A role-labelled worker spawned in a right-hand pane](assets/spawn-right-pane.png)
-
-The same request can place a worker below the coordinator or keep it in an
-individual tab:
-
-<p>
-  <img src="assets/spawn-below-pane.png" alt="A role-labelled worker spawned below the coordinator" width="49%">
-  <img src="assets/spawn-worker-tab.png" alt="A role-labelled worker spawned in an individual tab" width="49%">
-</p>
+![A role-labelled worker spawned in an individual tab](assets/spawn-worker-tab.png)
 
 See [Dispatching a Multi-Model Workforce from Anywhere](https://evoclock.github.io/fieldnotes/articles/herdr-natural-language-agent-automation.html)
 for the wider task and model-routing workflow.
