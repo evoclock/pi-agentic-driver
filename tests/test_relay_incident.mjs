@@ -46,6 +46,7 @@ function setup() {
   return { root, profile, log, context, options, approval };
 }
 const params = (name, ledgerId) => ({ placement: "tab", role: name, model, repository: name, ...(ledgerId ? { authority: { ledgerId } } : {}) });
+// Why: missing relay coverage must produce a usable owner request.
 test("relay preflight is registered and returns per-action owner requests", async () => {
   const f = setup(); const tools = new Map();
   registerHerdrLifecycleInterface({ registerTool(tool) { tools.set(tool.name, tool); } });
@@ -53,6 +54,7 @@ test("relay preflight is registered and returns per-action owner requests", asyn
   const result = await tools.get("agentic_relay_check_request").execute("fixture", { header: "no header", requests: [{ tier: 1, repository: "alpha", action: "spawn" }] });
   assert.match(JSON.stringify(result), /needs-owner/);
 });
+// Why: missing approvals must refuse all mutations.
 test("incident A: missing approvals yield four relayable refusals without Herdr mutation", async () => {
   const f = setup();
   const request = readFileSync(join(fixtureDir, "request.txt"), "utf8");
@@ -62,6 +64,7 @@ test("incident A: missing approvals yield four relayable refusals without Herdr 
   assert.ok(results.every((result) => result.status === "needs-owner" && result.relayablePhrase));
   assert.equal(existsSync(f.log) ? readFileSync(f.log, "utf8").includes('"tab","create"') : false, false);
 });
+// Why: scoped grants keep registration and spawn on their guarded paths.
 test("incident B: four scoped approvals and Tier 2 registry onboarding permit four tabs", async () => {
   const f = setup(); const approvals = [];
   const registry = await recordApproval(f.profile, f.approval("agent-skill-vault", 2, "register"));
@@ -88,6 +91,7 @@ test("incident B: four scoped approvals and Tier 2 registry onboarding permit fo
   const lint = spawnSync("python3", [join(process.cwd(), "skills/public-pr-wording/pr_wording_lint.py"), "--title", "Improve the private review flow", "--body-file", body], { encoding: "utf8" });
   assert.equal(lint.status, 0, lint.stdout + lint.stderr);
 });
+// Why: a covering grant should not ask for a second confirmation.
 test("scoped approval passes through to the worker without a second confirmation", async () => {
   const f = setup();
   const entry = await recordApproval(f.profile, f.approval("alpha"));
@@ -99,12 +103,17 @@ test("scoped approval passes through to the worker without a second confirmation
   assert.equal(JSON.parse(readFileSync(f.log, "utf8").split("\n").find((line) => line.includes('"tab","create"')))[2], "--workspace");
   assert.match(readFileSync(join(f.profile, "approvals/uses.v1.jsonl"), "utf8"), /"result":"spawned"/);
 });
-test("headless spawn without authority keeps native confirmation refusal", async () => {
+// Why: a registered worker needs neither UI nor a ledger grant and must still have a verified read-back.
+test("headless spawn without approval starts and reads back one worker", async () => {
   const f = setup();
   const result = await executeHerdrSpawnWorker(params("alpha"), f.context, f.options);
-  assert.equal(result.code, "native_confirmation_required");
-  assert.equal(existsSync(f.log), false);
+  assert.equal(result.status, "spawned", JSON.stringify(result));
+  const calls = readFileSync(f.log, "utf8").split("\n").filter(Boolean).map(JSON.parse);
+  assert.equal(calls.filter((argv) => argv[0] === "agent" && argv[1] === "start").length, 1);
+  assert.equal(calls.filter((argv) => argv[0] === "agent" && argv[1] === "get").length, 1);
+  assert.equal(existsSync(join(f.profile, "approvals/uses.v1.jsonl")), false);
 });
+// Why: approvals cannot override checkout and registry identity.
 test("valid authority does not bypass registry, realpath, worktree or Git common-dir checks", async () => {
   for (const kind of ["unregistered", "symlink", "worktree", "external-common"]) {
     const f = setup();
@@ -137,6 +146,7 @@ test("valid authority does not bypass registry, realpath, worktree or Git common
     assert.equal(existsSync(uses), false, `${kind}: no use or reservation is recorded`);
   }
 });
+// Why: a grant is restricted to the approved role, model, and repository.
 test("spawn scope mismatch refuses without layout mutation", async () => {
   const f = setup();
   const entry = await recordApproval(f.profile, f.approval("alpha"));
@@ -146,6 +156,7 @@ test("spawn scope mismatch refuses without layout mutation", async () => {
   }
   assert.equal(existsSync(f.log) ? readFileSync(f.log, "utf8").includes('"tab","create"') : false, false);
 });
+// Why: relay authority cannot approve merges.
 test("incident C: merge remains Tier 3 despite relay", async () => {
   const f = setup();
   const entry = await recordApproval(f.profile, f.approval("agent-skill-vault"));
@@ -153,6 +164,67 @@ test("incident C: merge remains Tier 3 despite relay", async () => {
   assert.equal(result.status, "needs-owner"); assert.equal(result.tier, 3);
   assert.equal(existsSync(f.log), false);
 });
+test("interactive registration needs native confirmation and never accepts headless or a decline", async () => {
+  // Why: a missing ledger may use only the owner-controlled Pi TUI confirmation, never a headless stand-in.
+  const f = setup();
+  const name = "agent-skill-vault";
+  const registryPath = join(f.profile, "config/herdr-worker-repositories.v1.json");
+  const before = readFileSync(registryPath, "utf8");
+  const options = { runGh: () => ({ status: 0, stdout: JSON.stringify({ nameWithOwner: `${owner}/${name}`, visibility: "PRIVATE" }) }) };
+  assert.equal((await executeHerdrRegisterRepository({ name }, f.context, options)).code, "native_confirmation_required");
+  f.context.hasUI = true;
+  f.context.ui = { confirm: () => true };
+  assert.equal((await executeHerdrRegisterRepository({ name }, f.context, options)).code, "native_confirmation_required");
+  f.context.mode = "tui";
+  let prompts = 0;
+  f.context.ui.confirm = (title, body) => { prompts++; assert.match(title, /Register/); assert.match(body, /agent-skill-vault/); return false; };
+  const declined = await executeHerdrRegisterRepository({ name }, f.context, options);
+  assert.equal(declined.ok, false);
+  assert.equal(prompts, 1);
+  assert.equal(readFileSync(registryPath, "utf8"), before);
+  assert.equal(existsSync(join(f.profile, "approvals/uses.v1.jsonl")), false);
+});
+test("interactive registration verifies private clone and revalidates after the owner confirms", async () => {
+  // Why: a changed Git origin or private visibility during confirmation must not become trusted.
+  for (const drift of ["origin", "visibility", "none"]) {
+    const f = setup();
+    const name = "agent-skill-vault";
+    const registryPath = join(f.profile, "config/herdr-worker-repositories.v1.json");
+    const before = readFileSync(registryPath, "utf8");
+    let calls = 0;
+    const options = { runGh: () => ({ status: 0, stdout: JSON.stringify({
+      nameWithOwner: `${owner}/${name}`, visibility: drift === "visibility" && ++calls > 1 ? "PUBLIC" : "PRIVATE",
+    }) }) };
+    f.context.mode = "tui"; f.context.hasUI = true;
+    let prompts = 0;
+    f.context.ui = { confirm: () => {
+      prompts++;
+      assert.equal(readFileSync(registryPath, "utf8"), before);
+      if (drift === "origin") execFileSync("git", ["-C", join(f.root, name), "remote", "set-url", "origin", "https://github.com/foreign/wrong.git"]);
+      return true;
+    } };
+    const result = await executeHerdrRegisterRepository({ name }, f.context, options);
+    assert.equal(prompts, 1);
+    assert.equal(result.status, drift === "none" ? "registered" : "needs-owner", JSON.stringify(result));
+    assert.equal(JSON.parse(readFileSync(registryPath, "utf8")).repositories.includes(name), drift === "none");
+    assert.equal(existsSync(join(f.profile, "approvals/uses.v1.jsonl")), false);
+  }
+});
+test("interactive registration rejects a public repository before confirmation", async () => {
+  // Why: owner confirmation never overrides the private-repository boundary.
+  const f = setup();
+  f.context.mode = "tui"; f.context.hasUI = true;
+  let prompts = 0;
+  f.context.ui = { confirm: () => { prompts++; return true; } };
+  const result = await executeHerdrRegisterRepository({ name: "agent-skill-vault" }, f.context, {
+    runGh: () => ({ status: 0, stdout: JSON.stringify({ nameWithOwner: `${owner}/agent-skill-vault`, visibility: "PUBLIC" }) }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.tier, 3);
+  assert.equal(prompts, 0);
+  assert.equal(JSON.parse(readFileSync(join(f.profile, "config/herdr-worker-repositories.v1.json"), "utf8")).repositories.includes("agent-skill-vault"), false);
+});
+// Why: relayed registration must honor private origin and deny rules.
 test("registration rejects missing authority, denied names, foreign ownership and public visibility", async () => {
   const f = setup();
   const register = (name, ledgerId, response) => executeHerdrRegisterRepository({ name, ledgerId }, f.context, { runGh: () => ({ status: 0, stdout: JSON.stringify(response) }) });
@@ -164,6 +236,7 @@ test("registration rejects missing authority, denied names, foreign ownership an
   assert.equal((await register("Vogelkop-test", entry.id, { nameWithOwner: `${owner}/Vogelkop-test`, visibility: "PRIVATE" })).status, "needs-owner");
   assert.equal((await register("vogelkop-test", entry.id, { nameWithOwner: `${owner}/vogelkop-test`, visibility: "PRIVATE" })).tier, 3);
 });
+// Why: absent configured ownership cannot establish trust.
 test("registration refuses a missing configured GitHub owner before mutation", async () => {
   const f = setup();
   const file = join(f.profile, "config/relay-authority.v1.json");
@@ -177,6 +250,7 @@ test("registration refuses a missing configured GitHub owner before mutation", a
   assert.equal(existsSync(join(f.profile, "approvals/uses.v1.jsonl")), false);
   assert.equal(existsSync(f.log), false);
 });
+// Why: worktrees and mismatched grants cannot register a clone.
 test("registration rejects a worktree and an out-of-scope approval", async () => {
   const f = setup();
   const detached = join(f.root, "detached");
@@ -188,6 +262,7 @@ test("registration rejects a worktree and an out-of-scope approval", async () =>
   const wrong = await recordApproval(f.profile, f.approval("alpha", 2, "register"));
   assert.equal((await executeHerdrRegisterRepository({ name: "beta", ledgerId: wrong.id }, f.context, response)).status, "needs-owner");
 });
+// Why: concurrent granted calls cannot duplicate registry membership.
 test("concurrent registration keeps one registry entry", async () => {
   const f = setup();
   const entry = await recordApproval(f.profile, f.approval("agent-skill-vault", 2, "register"));
@@ -200,12 +275,14 @@ test("concurrent registration keeps one registry entry", async () => {
   const registry = JSON.parse(readFileSync(join(f.profile, "config/herdr-worker-repositories.v1.json"), "utf8"));
   assert.equal(registry.repositories.filter((name) => name === "agent-skill-vault").length, 1);
 });
+// Why: a linked sibling is not a canonical private clone.
 test("registration rejects a symlinked sibling", async () => {
   const f = setup();
   symlinkSync(join(f.root, "alpha"), join(f.root, "linked"));
   const entry = await recordApproval(f.profile, f.approval("linked", 2, "register"));
   assert.equal((await executeHerdrRegisterRepository({ name: "linked", ledgerId: entry.id }, f.context)).status, "needs-owner");
 });
+// Why: denial explains the missing coverage without inventing authority.
 test("refusals remain relayable without directing the owner to a machine", async () => {
   const f = setup();
   const spawn = await executeHerdrSpawnWorker(params("alpha", "missing"), f.context, f.options);
@@ -218,6 +295,7 @@ test("refusals remain relayable without directing the owner to a machine", async
   }
   assert.match(bash.reason, /agentic_relay_check_request/);
 });
+// Why: repository coverage alone cannot authorize a worktree target.
 test("a repository-only ledger grant does not cover a new worktree target", async () => {
   const f = setup();
   const repo = join(f.root, "alpha");
@@ -248,6 +326,7 @@ test("a repository-only ledger grant does not cover a new worktree target", asyn
   assert.equal(accepted.leaseId, leaseId);
 });
 for (const revokedAuthority of ["lease", "registry"]) {
+  // Why: revocation after spawn must preserve the true partial state.
   test(`${revokedAuthority} revocation during final approval writer-lock wait preserves agent_started partial`, async () => {
     const f = setup();
     const repo = join(f.root, "alpha");
@@ -311,6 +390,7 @@ for (const revokedAuthority of ["lease", "registry"]) {
 }
 
 for (const observation of ["common-dir", "origin"]) {
+  // Why: inherited Git configuration must not change repository identity.
   test(`registration ${observation} observation ignores inherited Git configuration`, async () => {
     const f = setup();
     const name = "agent-skill-vault";
@@ -338,6 +418,7 @@ for (const observation of ["common-dir", "origin"]) {
     assert.equal(existsSync(f.log), false);
   });
 
+  // Why: a hung Git probe cannot mutate the trust registry.
   test(`registration ${observation} observation is bounded and refuses before mutation`, async () => {
     const f = setup();
     const name = "agent-skill-vault";
@@ -385,6 +466,7 @@ if (args.slice(2).join(" ") === ${JSON.stringify(blockedArgs)}) {
 }
 
 for (const drift of ["origin", "clone", "git-directory", "owner", "excluded", "visibility", "none"]) {
+  // Why: any trust drift while reserving must block registration.
   test(`registration reservation wait revalidates ${drift} before registry mutation`, async () => {
     const f = setup();
     const name = "agent-skill-vault";
@@ -442,6 +524,7 @@ for (const drift of ["origin", "clone", "git-directory", "owner", "excluded", "v
   });
 }
 
+// Why: agents cannot manufacture approval records through the UI.
 test("agent write to approvals is blocked even with a native UI", async () => {
   const result = await guardToolCall({ toolName: "write", input: { path: "approvals/head.v1.json" } }, { hasUI: true, ui: { confirm: () => true } });
   assert.equal(result.block, true);

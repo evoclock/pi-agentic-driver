@@ -12,6 +12,7 @@ const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // Unlike the tarball inventory test, this exercises npm's dependency placement
 // and Pi's resource loader against a fresh installed consumer. Socket Firewall
 // is mandatory; missing offline cache or missing sfw fails rather than skips.
+// Why: the published archive must install in a clean consumer using only the locked offline dependency graph.
 test("fresh offline packed install loads all configured skills and imports", async () => {
   const scratch = mkdtempSync(join(repo, ".fresh-pack-install-"));
   try {
@@ -21,6 +22,21 @@ test("fresh offline packed install loads all configured skills and imports", asy
     mkdirSync(home);
     mkdirSync(packs);
     mkdirSync(consumer);
+    // A fresh consumer still needs a reproducible dependency graph. Without
+    // the lock npm resolves newer transitive ranges that an offline cache
+    // cannot promise to contain (even when this package pins pi-durable).
+    const sourceManifest = JSON.parse(readFileSync(join(repo, "package.json"), "utf8"));
+    const lock = JSON.parse(readFileSync(join(repo, "package-lock.json"), "utf8"));
+    const consumerManifest = {
+      name: "packed-driver-consumer", version: "1.0.0", private: true,
+      dependencies: sourceManifest.dependencies, devDependencies: sourceManifest.devDependencies,
+    };
+    lock.name = consumerManifest.name;
+    lock.version = consumerManifest.version;
+    lock.packages[""].name = consumerManifest.name;
+    lock.packages[""].version = consumerManifest.version;
+    writeFileSync(join(consumer, "package.json"), JSON.stringify(consumerManifest));
+    writeFileSync(join(consumer, "package-lock.json"), JSON.stringify(lock));
     const userConfig = join(scratch, "user-npmrc");
     const globalConfig = join(scratch, "global-npmrc");
     writeFileSync(userConfig, "");
@@ -45,7 +61,6 @@ test("fresh offline packed install loads all configured skills and imports", asy
     const installed = join(consumer, "node_modules/@evoclock/pi-agentic-driver");
     const manifest = JSON.parse(readFileSync(join(installed, "package.json"), "utf8"));
     const expected = manifest.pi.skills.map((entry) => entry.split("/").at(-1));
-    const sourceManifest = JSON.parse(readFileSync(join(repo, "package.json"), "utf8"));
     const sourceSkills = sourceManifest.pi.skills.map((entry) => entry.split("/").at(-1));
     assert.deepEqual([...expected].sort(), sourceSkills.sort(), "the packed manifest must preserve package.json skill registration");
     assert.deepEqual(expected.filter((name) => name.endsWith("-pi")), ["correct-pi"], "only the native correction skill ships");
@@ -78,13 +93,27 @@ test("fresh offline packed install loads all configured skills and imports", asy
     assert.equal(native.isNativeTuiContext(undefined), false);
     const durable = await import(pathToFileURL(join(installed, "scripts/enforcement/durable_assignment_pi.js")).href);
     assert.equal(typeof durable.openDurableAssignmentFixture, "function");
+    const ledger = await import(pathToFileURL(join(installed, "scripts/enforcement/approval_ledger_pi.js")).href);
+    const profile = join(scratch, "profile");
+    mkdirSync(join(profile, "config"), { recursive: true });
+    writeFileSync(join(profile, "config/relay-authority.v1.json"), JSON.stringify({ relayers: [{ relayer: "fixture", channel: "test", maxTier: 1 }] }));
+    writeFileSync(join(profile, "config/herdr-worker-repositories.v1.json"), JSON.stringify({ schema: "agentic-driver.herdr-worker-repositories.v1", repositories: ["example"] }));
+    await assert.doesNotReject(async () => {
+      const grant = await ledger.recordApproval(profile, {
+        kind: "standing", relayer: "fixture", channel: "test", sourceMessageId: "fixture",
+        quote: "Approve example spawn", quotedQuestion: "May workers start?",
+        givenAt: new Date(Date.now() - 1000).toISOString(), tier: 1,
+        scope: { repo: "*", repositories: ["example"], actions: ["spawn"], models: [], roles: [] },
+      });
+      assert.equal(ledger.authorizeApproval(profile, grant.id, { tier: 1, repository: "example", action: "spawn", model: "fixture/model", role: "worker" }).id, grant.id);
+    }, "the packed grant verifier must support registered repository snapshots");
     assert.ok(existsSync(join(installed, "skills/decision-to-spec/SKILL.md")));
     const skillFile = join(installed, "skills/decision-to-spec/SKILL.md");
     writeFileSync(skillFile, readFileSync(skillFile, "utf8").replace(/^description:.*\r?\n/m, ""));
     await loader.reload();
     const refused = loader.getSkills();
     assert.ok(!refused.skills.some((skill) => skill.name === "decision-to-spec" && skill.filePath?.startsWith(installed + "/")));
-    assert.ok(refused.diagnostics.some((d) => d.path?.startsWith(installed + "/") && /description is required/.test(d.message)));
+    assert.ok(refused.diagnostics.some((d) => d.path?.startsWith(installed + "/") && d.message.includes("description is required")));
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }

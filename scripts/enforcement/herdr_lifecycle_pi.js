@@ -1259,20 +1259,13 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
       throw lifecycleError("current_pane_unavailable", "HERDR_PANE_ID is not set; no current pane to resolve", "denied");
     }
 
-    // Native confirmation is required before any mutation; the cheap local
-    // gate comes before any Herdr observation call.
-    if (!request.authority && !isNativeTuiContext(context)) {
-      throw lifecycleError("native_confirmation_required", "spawn_worker requires the interactive Pi TUI", "blocked");
-    }
-
     // Duplicate live names are denied at spawn (read-only observation).
     const listed = await invokeHerdr(agentListArgv(), canonicalRoot, options, signal);
     if (duplicateRoleExists(listed, role)) {
       throw lifecycleError("duplicate_worker_name", "a live agent already holds this name", "denied");
     }
     const workspaceId = await workerWorkspace(canonicalRoot, repository, options, signal);
-    let confirmed;
-    if (request.authority) {
+    if (request.authority !== undefined) {
       try {
         // A ledger grant is bound to the exact target when a worktree is
         // requested: a repository-only grant never covers an unrecorded path.
@@ -1280,36 +1273,14 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
           tier: 1, repository, action: "spawn", model, role,
           ...(worktreeTarget ? { path: worktreeTarget.worktreePath } : {}),
         });
-        confirmed = true;
       } catch (error) {
         return errorResult(lifecycleError("approval_missing", error.message, "needs-owner"), needsOwner(1, ["spawn approval covering repository, model and role"], repository));
       }
-    } else confirmed = await context.ui.confirm(
-      "Spawn Herdr worker",
-      [
-        "One guarded composite spawn: create the requested layout, then start and verify one Pi agent.",
-        `Role: ${role}`,
-        placement === "tab"
-          ? "Placement: individual tab"
-          : `Placement: ${placement} (Herdr split: ${HERDR_DIRECTIONS[placement]})`,
-        `Model: ${modelArgv[1]} (argv: ${modelArgv.join(" ")})`,
-        `Repository: ${canonicalRoot}`,
-        ...(worktreeTarget
-          ? [
-            `Worktree target: ${worktreeTarget.worktreePath}`,
-            `Treehouse lease: ${worktreeTarget.leaseId}${worktreeTarget.leaseHolder ? ` (holder: ${worktreeTarget.leaseHolder})` : ""}`,
-          ]
-          : []),
-        "No rollback is automatic; a failed step leaves the created state for human cleanup.",
-      ].join("\n"),
-    );
-    if (confirmed !== true) {
-      return errorResult(lifecycleError("confirmation_denied", "native confirmation was not granted", "stopped"));
     }
 
-    // Revalidation point after confirmation, before the first mutation.
+    // Revalidation point after the asynchronous preflight, before the first mutation.
     canonicalRoot = revalidateSpawnAuthority(
-      context?.cwd, repository, canonicalRoot, request, worktreeTarget, options, "after confirmation",
+      context?.cwd, repository, canonicalRoot, request, worktreeTarget, options, "after preflight",
     );
     if (request.worktreePath) spawnCwd = worktreeTarget.worktreePath;
 
@@ -1727,7 +1698,8 @@ export async function executeHerdrSpawnWorkerAttendedElectron(params, context, o
 
 export async function executeHerdrRegisterRepository({ name, ledgerId }, context, options = {}) {
   const refusal = (reason, tier = 2) => ({ schema: HERDR_LIFECYCLE_SCHEMA, ok: false, code: "registration_refused", reason, ...needsOwner(tier, [reason], name), nonAuthorizing: true });
-  if (typeof name !== "string" || !SAFE_NAME_REGEXP.test(name) || name.length > 64 || !ledgerId || typeof ledgerId !== "string") return refusal("valid repository name and ledger id");
+  if (typeof name !== "string" || !SAFE_NAME_REGEXP.test(name) || name.length > 64 || (ledgerId !== undefined && (typeof ledgerId !== "string" || !ledgerId))) return refusal("valid repository name and optional ledger id");
+  if (ledgerId === undefined && !isNativeTuiContext(context)) return { ...refusal("native owner confirmation required"), code: "native_confirmation_required" };
   const profile = resolveProfileConfigPath(".").base;
   let config;
   try { config = JSON.parse(readFileSync(resolve(profile, "config/relay-authority.v1.json"), "utf8")); }
@@ -1757,10 +1729,10 @@ export async function executeHerdrRegisterRepository({ name, ledgerId }, context
     if (gh.status !== 0 || repo.nameWithOwner !== `${owner}/${name}` || repo.visibility !== "PRIVATE") return refusal("verified private repository", 3);
     const registryPath = resolve(profile, WORKER_REPOSITORY_REGISTRY);
     const repositories = validateRegistry(registryPath);
-    authorizeApproval(profile, ledgerId, { tier: 2, repository: name, action: "register" });
+    if (ledgerId !== undefined) authorizeApproval(profile, ledgerId, { tier: 2, repository: name, action: "register" });
     if (repositories.includes(name)) return { schema: HERDR_LIFECYCLE_SCHEMA, ok: true, status: "already-registered", name };
     if (repositories.length >= 32) return refusal("registry capacity");
-    const result = await reserveApprovalUse(profile, ledgerId, { tier: 2, repository: name, action: "register" }, () => {
+    const commit = () => {
       const current = validateRegistry(registryPath);
       if (current.includes(name)) return { schema: HERDR_LIFECYCLE_SCHEMA, ok: true, status: "already-registered", name };
       if (current.length >= 32) throw lifecycleError("registry_capacity", "registry capacity reached");
@@ -1783,8 +1755,21 @@ export async function executeHerdrRegisterRepository({ name, ledgerId }, context
       writeFileSync(registryPath, JSON.stringify({ schema: WORKER_REPOSITORY_SCHEMA, repositories: [...current, name] }, null, 2) + "\n");
       registryWritten = true;
       return { schema: HERDR_LIFECYCLE_SCHEMA, ok: true, status: "registered", name };
-    });
-    if (result.status === "registered") await recordApprovalUse(profile, ledgerId, "register", name, "registered");
+    };
+    let result;
+    if (ledgerId !== undefined) {
+      result = await reserveApprovalUse(profile, ledgerId, { tier: 2, repository: name, action: "register" }, commit);
+      if (result.status === "registered") await recordApprovalUse(profile, ledgerId, "register", name, "registered");
+    } else {
+      // The native Pi TUI owns this confirmation; no ledger grant is inferred or manufactured.
+      const confirmed = await context.ui.confirm("Register Herdr worker repository", [
+        `Register the private repository ${owner}/${name} for Herdr workers?`,
+        `Verified checkout: ${root}`,
+        "This changes the trusted worker repository registry. Only confirm if you requested this registration.",
+      ].join("\n"));
+      if (confirmed !== true) return refusal("owner declined repository registration");
+      result = commit();
+    }
     return result;
   } catch (error) { return registryWritten ? { schema: HERDR_LIFECYCLE_SCHEMA, ok: false, status: "partial", reason: error.message, name } : refusal(error.message); }
 }
@@ -1807,15 +1792,15 @@ export function registerHerdrLifecycleInterface(pi, options = {}) {
   pi.registerTool({
     name: "agentic_herdr_register_repository",
     label: "Herdr Register Repository",
-    description: "Register a verified private sibling clone with a covering Tier 2 approval.",
-    parameters: { type: "object", additionalProperties: false, properties: { name: { type: "string" }, ledgerId: { type: "string" } }, required: ["name", "ledgerId"] },
+    description: "Register a verified private sibling clone with a covering Tier 2 approval or native owner confirmation in the Pi TUI.",
+    parameters: { type: "object", additionalProperties: false, properties: { name: { type: "string" }, ledgerId: { type: "string" } }, required: ["name"] },
     async execute(_id, params, _signal, _update, context) { return toolResult(await executeHerdrRegisterRepository(params, context, options)); },
   });
   pi.registerTool({
     name: HERDR_SPAWN_WORKER_TOOL,
     label: "Herdr Spawn Worker",
-    description: "One guarded composite spawn into the caller's Herdr session: create either a right/below split pane or an individual tab in a trusted repository, then start and verify one Pi agent there. Includes native confirmation and bounded read-back.",
-    promptSnippet: "Use agentic_herdr_spawn_worker only to spawn one confirmed worker as its own tab or as a right/below pane in a trusted registry repository; it exposes no raw Herdr management verbs and no terminal remote control.",
+    description: "One guarded composite spawn into the caller's Herdr session: create one worker tab in a trusted repository, then start and verify one Pi agent there. No spawn confirmation is required; bounded read-back and partial-failure reporting remain.",
+    promptSnippet: "Use agentic_herdr_spawn_worker to start one guarded worker tab in a trusted registry repository; it exposes no raw Herdr management verbs and no terminal remote control.",
     promptGuidelines: [
       "Roles are free-form safe names except the coordinator class; models must resolve against the installed Pi model roll.",
       "A failed start leaves the created tab for human cleanup; no automatic close is performed.",

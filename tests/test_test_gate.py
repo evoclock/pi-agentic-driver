@@ -171,6 +171,86 @@ class TestGateWorkflow(unittest.TestCase):
         self.assertTrue(result["mutationCaught"])
 
     @unittest.skipUnless(RUNNER.is_file(), "test-gate runner is not implemented yet")
+    def test_changed_javascript_comparison_is_caught_in_snapshot(self):
+        """Why: changed JS must get an isolated mutant caught by a real Node assertion, not a runner crash."""
+        rules_path = self.repo / ".driver/gate-rules.json"
+        rules = json.loads(rules_path.read_text(encoding="utf-8"))
+        rules["checks"].append({
+            "id": "node-tests", "kind": "command",
+            "command": ["node", "--test", "--test-reporter=tap", "tests/test_contract.mjs"],
+        })
+        rules_path.write_text(json.dumps(rules), encoding="utf-8")
+        config_path = self.repo / ".driver/test-gate.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["testCountRationales"]["node-tests"] = "The Node TAP summary reports the actual test total."
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        self.write("app.mjs", "export function value() { return 1 !== 1; }\n")
+        self.git("add", ".")
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                 "commit", "-qm", "node fixture base")
+        self.write("app.mjs", "export function value() { return 1 !== 2; }\n")
+        self.write("tests/test_contract.mjs", "\n".join([
+            '// Why: changed comparisons must keep the new behavior.',
+            'import test from "node:test";',
+            'import assert from "node:assert/strict";',
+            'import { value } from "../app.mjs";',
+            'test("value changed", () => assert.equal(value(), true));',
+            '',
+        ]))
+        baseline = self.run_gate("baseline")
+        self.assertEqual(self.result(baseline)["status"], "pass", baseline.stdout + baseline.stderr)
+        completed = self.run_gate("check")
+        result = self.result(completed)
+        self.assertEqual(completed.returncode, 0, result["reason"])
+        self.assertEqual(result["mutationPath"], "app.mjs")
+        self.assertTrue(result["mutationCaught"])
+        records = [json.loads(line) for line in
+                   (self.repo / ".driver/test-gate-evidence/checks.jsonl").read_text(encoding="utf-8").splitlines()]
+        mutant = next(record for record in records if record["phase"] == "mutation-spot-check")
+        self.assertGreater(mutant["testCounts"]["tests"], 0)
+        self.assertGreater(mutant["testCounts"]["failures"], 0)
+        self.assertEqual(mutant["testCounts"]["errors"], 0)
+        self.assertEqual(self.repo.joinpath("app.mjs").read_text(encoding="utf-8"),
+                         "export function value() { return 1 !== 2; }\n")
+
+    @unittest.skipUnless(RUNNER.is_file(), "test-gate runner is not implemented yet")
+    def test_changed_typescript_slice_bound_is_caught_in_snapshot(self):
+        """Why: a changed TS widget limit must fail a Node assertion when its bound grows."""
+        rules_path = self.repo / ".driver/gate-rules.json"
+        rules = json.loads(rules_path.read_text(encoding="utf-8"))
+        rules["checks"].append({
+            "id": "node-tests", "kind": "command",
+            "command": ["node", "--test", "--test-reporter=tap", "tests/test_contract.mjs"],
+        })
+        rules_path.write_text(json.dumps(rules), encoding="utf-8")
+        config_path = self.repo / ".driver/test-gate.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["testCountRationales"]["node-tests"] = "Node TAP reports the observed test count."
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        self.write("app.ts", "export const visible = [1,2,3,4,5,6].slice(0, 6);\n")
+        self.git("add", ".")
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                 "commit", "-qm", "TypeScript fixture base")
+        self.write("app.ts", "export const visible = [1,2,3,4,5,6].slice(0, 5);\n")
+        self.write("tests/test_contract.mjs", "\n".join([
+            '// Why: the compact task list must contain exactly five rows.',
+            'import test from "node:test";',
+            'import assert from "node:assert/strict";',
+            'import { visible } from "../app.ts";',
+            'test("five visible", () => assert.deepEqual(visible, [1,2,3,4,5]));',
+            '',
+        ]))
+        baseline = self.run_gate("baseline")
+        self.assertEqual(self.result(baseline)["status"], "pass", baseline.stdout + baseline.stderr)
+        checked = self.run_gate("check")
+        result = self.result(checked)
+        self.assertEqual(checked.returncode, 0, result["reason"])
+        self.assertEqual(result["mutationPath"], "app.ts")
+        self.assertTrue(result["mutationCaught"])
+        self.assertEqual(self.repo.joinpath("app.ts").read_text(encoding="utf-8"),
+                         "export const visible = [1,2,3,4,5,6].slice(0, 5);\n")
+
+    @unittest.skipUnless(RUNNER.is_file(), "test-gate runner is not implemented yet")
     def test_zero_observed_tests_is_blocked_with_host_evidence(self):
         """Why: the denominator must come from a host-observed nonzero test count."""
         self.put_test(self.fixture_text("meaningful.py"))

@@ -161,7 +161,7 @@ export default async function tasksPi(pi) {
           const header = `Tasks  ${counts.pending} pending · ${counts.in_progress} in progress · ${counts.completed} done`;
           const unresolved = unresolvedTaskIds();
           const theme = uiHost.ui.theme;
-          const rows = visible.map((task) => renderWidgetTaskLine(theme, task, unresolved));
+          const rows = visible.slice(0, 5).map((task) => renderWidgetTaskLine(theme, task, unresolved));
           uiHost.ui.setWidget(WIDGET_KEY, [themed(theme, "fg", ["dim", header], header), ...rows], { placement: "aboveEditor" });
         }
       }

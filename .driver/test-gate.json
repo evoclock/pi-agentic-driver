@@ -8,16 +8,7 @@
     "python-tests": "Use the unittest discovery form from python-tests in .driver/gate-rules.json, narrowed to each changed test file; the host-observed Ran N total is the denominator.",
     "node-tests": "Use Node's native --test runner on each changed file; the host-observed # tests total is the denominator.",
     "janus-tests": "Reuse the janus-tests command in .driver/gate-rules.json; the Node test runner's # tests total is the host-observed denominator.",
-    "weekly-recap-tests": "Reuse weekly-recap-tests in .driver/gate-rules.json; unittest's host-observed Ran N total is the denominator."
-  },
-  "mutation": {
-    "id": "empty-test-assertion-guard",
-    "path": "scripts/test_gate_runner.py",
-    "before": "if _python_assertions(node) == 0:",
-    "after": "if False and _python_assertions(node) == 0:",
-    "testCheckId": "python-tests",
-    "testPaths": ["tests/test_test_gate.py"],
-    "scriptEnv": "TEST_GATE_SCRIPT",
-    "reason": "Disabling the empty-assertion rejection must make the seeded empty-test fixture fail its contract test."
+    "weekly-recap-tests": "Reuse weekly-recap-tests in .driver/gate-rules.json; unittest's host-observed Ran N total is the denominator.",
+    "public-pr-wording-tests": "Reuse public-pr-wording-tests in .driver/gate-rules.json; unittest's host-observed Ran N total is the denominator."
   }
 }

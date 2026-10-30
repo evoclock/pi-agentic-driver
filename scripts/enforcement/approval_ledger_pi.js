@@ -77,9 +77,19 @@ export async function recordApproval(profile, input) {
   if (!Number.isInteger(input.tier) || input.tier < 1 || input.tier > 2 || !config.relayers?.some((r) => r.relayer === input.relayer && r.channel === input.channel && r.maxTier >= input.tier)) throw new Error("untrusted relayer or tier");
   if (!["relay", "direct", "standing"].includes(input.kind) || !input.quote?.trim() || !input.quotedQuestion?.trim() || !input.sourceMessageId?.trim() || !validDate(input.givenAt) || !input.scope?.repo || !Array.isArray(input.scope.actions)) throw new Error("incomplete approval");
   const scope = input.scope;
-  if (typeof scope.repo !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(scope.repo)
-      || Object.keys(scope).some((key) => !["repo", "actions", "paths", "prs", "branches", "models", "roles"].includes(key))
-      || ["actions", "paths", "prs", "branches", "models", "roles"].some((key) => scope[key] !== undefined && (!Array.isArray(scope[key]) || scope[key].some((value) => typeof value !== "string" || !value.trim())))) throw new Error("invalid approval scope");
+  if (typeof scope.repo !== "string" || (scope.repo !== "*" && !/^[a-z][a-z0-9-]{0,63}$/.test(scope.repo))
+      || Object.keys(scope).some((key) => !["repo", "repositories", "actions", "paths", "prs", "branches", "models", "roles"].includes(key))
+      || ["repositories", "actions", "paths", "prs", "branches", "models", "roles"].some((key) => scope[key] !== undefined && (!Array.isArray(scope[key]) || scope[key].some((value) => typeof value !== "string" || !value.trim())))) throw new Error("invalid approval scope");
+  // '*' is only a selector for an explicit, bounded repository snapshot.
+  if (scope.repo === "*") {
+    if (input.kind !== "standing" || input.tier !== 1 || !Array.isArray(scope.repositories)
+        || scope.repositories.length === 0 || new Set(scope.repositories).size !== scope.repositories.length
+        || scope.actions.length !== 1 || scope.actions[0] !== "spawn"
+        || !Array.isArray(scope.models) || !Array.isArray(scope.roles)) throw new Error("invalid grouped spawn scope");
+    const registry = JSON.parse(readFileSync(join(profile, "config/herdr-worker-repositories.v1.json"), "utf8"));
+    if (registry.schema !== "agentic-driver.herdr-worker-repositories.v1" || !Array.isArray(registry.repositories)
+        || scope.repositories.some((repo) => !/^[a-z][a-z0-9-]{0,63}$/.test(repo) || !registry.repositories.includes(repo))) throw new Error("unregistered grouped spawn repository");
+  } else if (scope.repositories !== undefined) throw new Error("repositories require a grouped standing grant");
   const now = new Date();
   if (Date.parse(input.givenAt) > now.getTime() || (input.expiresAt && (!validDate(input.expiresAt) || Date.parse(input.expiresAt) <= now.getTime()))) throw new Error("invalid approval time");
   const expiresAt = input.expiresAt ?? (input.kind === "standing" ? new Date(now.getTime() + 7 * 86400000).toISOString() : null);
@@ -109,7 +119,7 @@ export function authorizeApproval(profile, id, { tier, repository, action, model
   const trusted = config.relayers?.some((r) => r.relayer === entry?.relayer && r.channel === entry?.channel && r.maxTier >= tier);
   const scope = entry?.scope;
   const used = (() => { try { return readFileSync(paths.uses, "utf8").split("\n").filter(Boolean).map(JSON.parse).filter((use) => use.ledgerId === id && use.result === "reserved").length; } catch (error) { if (error.code === "ENOENT") return 0; throw error; } })();
-  if (!entry || config.revokedIds?.includes(id) || tier > 2 || entry.tier < tier || !trusted || !scope || scope.repo !== repository || (tier === 2 && !entry.quote.includes(repository)) || !scope.actions?.includes(action) || (model && !scopeListCovers(scope.models, model)) || (role && !scopeListCovers(scope.roles, role)) || (path && !scope.paths?.includes(path)) || (pr && !scope.prs?.includes(pr)) || (branch && !scope.branches?.includes(branch)) || (entry.expiresAt && Date.parse(entry.expiresAt) <= now.getTime()) || (entry.maxUses != null && used >= entry.maxUses)) throw new Error("approval does not cover action");
+  if (!entry || config.revokedIds?.includes(id) || tier > 2 || entry.tier < tier || !trusted || !scope || !(scope.repo === repository || (tier === 1 && entry.kind === "standing" && scope.repo === "*" && Array.isArray(scope.repositories) && scope.repositories.includes(repository))) || (tier === 2 && !entry.quote.includes(repository)) || !scope.actions?.includes(action) || (model && !scopeListCovers(scope.models, model)) || (role && !scopeListCovers(scope.roles, role)) || (path && !scope.paths?.includes(path)) || (pr && !scope.prs?.includes(pr)) || (branch && !scope.branches?.includes(branch)) || (entry.expiresAt && Date.parse(entry.expiresAt) <= now.getTime()) || (entry.maxUses != null && used >= entry.maxUses)) throw new Error("approval does not cover action");
   return entry;
 }
 // The header names candidate records only. Each requested action is checked
