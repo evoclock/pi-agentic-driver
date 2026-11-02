@@ -10,5 +10,15 @@
     "janus-tests": "Reuse the janus-tests command in .driver/gate-rules.json; the Node test runner's # tests total is the host-observed denominator.",
     "weekly-recap-tests": "Reuse weekly-recap-tests in .driver/gate-rules.json; unittest's host-observed Ran N total is the denominator.",
     "public-pr-wording-tests": "Reuse public-pr-wording-tests in .driver/gate-rules.json; unittest's host-observed Ran N total is the denominator."
+  },
+  "mutation": {
+    "id": "model-fixture-scope",
+    "path": "scripts/public_sync.py",
+    "before": "if label == 'model or provider' and path.startswith('tests/') and '..' not in Path(path).parts:",
+    "after": "if False:",
+    "testCheckId": "python-tests",
+    "scriptEnv": "PUBLIC_SYNC_POLICY_SCRIPT",
+    "testPaths": ["tests/test_public_sync.py"],
+    "reason": "Removing the tests-only model/provider exemption must fail the fixture acceptance assertions while production, secret and private-content checks stay strict."
   }
 }

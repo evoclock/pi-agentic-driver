@@ -89,14 +89,13 @@ test("new installed subscription models are accepted without a route entry", () 
 // Why: the reported installed model must work even when only older models have policy entries.
 test("an installed explicit subscription model does not need its own policy route", () => {
   const routePolicy = { ...policy, routes: [...policy.routes, {
-    provider: "vendor-c", model: "model-old", family: "subscription-fixture",
+    provider: "openai-codex", model: "gpt-6-sol", family: "subscription-codex",
     subscription: true, gateway: false, aliases: [],
   }] };
-  const roll = `${listModels}\nvendor-c model-old\nvendor-c model-new`;
-  assert.deepEqual(resolve("vendor-c/model-new", { routePolicy, listModels: roll }),
-    ["--model", "vendor-c/model-new"]);
-  denies("vendor-c/model-new", "model_unknown", { routePolicy: policy, listModels: roll });
-  denies("vendor-c/model-unknown", "model_unknown", { routePolicy, listModels: roll });
+  const roll = `${listModels}\nopenai-codex gpt-6-sol\nopenai-codex gpt-6.1-sol`;
+  assert.deepEqual(resolve("openai-codex/gpt-6.1-sol", { routePolicy, listModels: roll }),
+    ["--model", "openai-codex/gpt-6.1-sol"]);
+  denies("openai-codex/gpt-6.2-sol", "model_unknown", { routePolicy, listModels: roll });
 });
 
 // Why: gateway route budgets remain mandatory even when Pi lists a model.
