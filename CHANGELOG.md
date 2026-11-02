@@ -1,3 +1,7 @@
+## 3.1.1
+
+- Strip remaining Herdr spawn registration and workspace friction so canonical trusted repos start guarded workers without registry or per-spawn ceremony.
+
 ## 3.1.0
 
 - Registered workers start without repeated prompts, and the task panel shows five items while the full task list stays available.

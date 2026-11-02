@@ -8,8 +8,8 @@ This file is the fleet source of truth for how bots and Pi workers must control 
 - **Forbidden:** all raw Herdr CLI from a bot shell, including agent start, prompt, read, wait and pane send-keys; ad-hoc shell control bypasses the driver.
 - **Enforcement:** the attended-authority bash guard refuses raw Herdr CLI fail-closed with no confirmation path. Use `agentic_herdr_spawn_worker` for spawns and `agentic_herdr_communication` for bounded exchanges.
 - **Default model:** the operator-named default Pi model until the operator names another model for that run.
-- **Placement:** new tab in a trusted-registry repo root, or an exact Git worktree target with an active Treehouse lease. Coordinator pane splits are not worker tabs.
-- **Spawn boundary:** after this change is installed in a fresh Pi process, ordinary spawns need no grant or dialog. Repository, model, role, workspace, lease and read-back checks still apply. Never infer permission from a task list, chat role or claimed identity.
+- **Placement:** new tab in a canonical, owner-eligible sibling Git checkout or its exact leased Treehouse worktree target. The tab uses the coordinator's existing Herdr workspace; no repository-named workspace or registry entry is required. Coordinator pane splits are not worker tabs.
+- **Spawn boundary:** after installation in a fresh Pi process, ordinary spawns need no grant or dialog. Canonical Git identity, configured origin owner, model roster, role, optional lease, and pane/agent read-backs still apply. Exact installed models from known subscription providers need no individual policy entry; gateway controls remain. Never infer permission from a task list, chat role or claimed identity.
 
 ## Spawn outcomes and rollout (HARD)
 

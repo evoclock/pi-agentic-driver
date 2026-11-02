@@ -470,15 +470,7 @@ function gitRoot(path) {
   return resolve(gitProbe(path, ["rev-parse", "--show-toplevel"]));
 }
 
-// Resolves the requested registry name BEFORE any mutation and re-checks it
-// between the two mutations. Physical identity (realpath + Git root) decides;
-// lexical names never do.
-// Registry lookup order (coordinator decision): the session repository's
-// own config/herdr-worker-repositories.v1.json first; when missing (ENOENT
-// only) the active Pi profile's shared config under
-// {PI_CODING_AGENT_DIR}/config/ (fallback to the installed agent config directory). A malformed
-// registry at either level is a stop, never a silent fallthrough; only a
-// missing one falls back.
+// Profile configuration is read only; repository names are checked at use.
 function resolveProfileConfigPath(relative) {
   const profileDir = process.env.PI_CODING_AGENT_DIR;
   const base = typeof profileDir === "string" && profileDir.trim()
@@ -487,47 +479,16 @@ function resolveProfileConfigPath(relative) {
   return { base, path: resolve(base, relative) };
 }
 
-function resolveRegistryPathChecked(coordinatorReal) {
-  const localPath = resolve(coordinatorReal, WORKER_REPOSITORY_REGISTRY);
-  try {
-    if (realpathSync(localPath) !== localPath) {
-      throw lifecycleError("worker_registry_invalid", "the Herdr worker repository registry escapes the configured repository");
-    }
-    return localPath;
-  } catch (error) {
-    if (error && error.name === "HerdrLifecycleError") throw error;
-    if (error?.code !== "ENOENT") {
-      throw lifecycleError("worker_registry_invalid", "the Herdr worker repository registry could not be canonicalized");
-    }
-  }
-  const shared = resolveProfileConfigPath(WORKER_REPOSITORY_REGISTRY);
-  try {
-    const baseReal = realpathSync(shared.base);
-    if (realpathSync(shared.path) !== resolve(baseReal, WORKER_REPOSITORY_REGISTRY)) {
-      throw lifecycleError("worker_registry_invalid", "the Herdr worker repository registry escapes the profile configuration");
-    }
-    return shared.path;
-  } catch (error) {
-    if (error && error.name === "HerdrLifecycleError") throw error;
-    if (error?.code === "ENOENT") {
-      throw lifecycleError("worker_registry_invalid", "the Herdr worker repository registry is unavailable");
-    }
-    throw lifecycleError("worker_registry_invalid", "the Herdr worker repository registry could not be canonicalized");
-  }
-}
-
 export function resolveTrustedSpawnRepository(coordinatorCwd, requestedName) {
   const coordinator = resolve(coordinatorCwd);
   let coordinatorReal;
   try {
     coordinatorReal = realpathSync(coordinator);
   } catch {
-    throw lifecycleError("worker_registry_invalid", "the Herdr worker repository registry is unavailable");
+    throw lifecycleError("repository_unavailable", "the coordinator repository is unavailable");
   }
-  const registryPath = resolveRegistryPathChecked(coordinatorReal);
-  const listed = validateRegistry(registryPath);
-  if (!listed.includes(requestedName)) {
-    throw lifecycleError("repository_untrusted", "the requested repository is not in the trusted registry", "denied");
+  if (typeof requestedName !== "string" || !SAFE_NAME_REGEXP.test(requestedName)) {
+    throw lifecycleError("repository_untrusted", "the requested repository name is invalid", "denied");
   }
   const candidate = resolve(coordinatorReal, "..", requestedName);
   let candidateReal;
@@ -559,6 +520,40 @@ export function resolveTrustedSpawnRepository(coordinatorCwd, requestedName) {
         || resolve(candidateReal, common) !== dotGit) throw new Error("non-primary Git directory");
   } catch {
     throw lifecycleError("repository_not_git_root", "the requested repository is not a primary clone", "denied");
+  }
+  // The configured owner is a policy predicate, not a list of names. Do not
+  // infer ownership from a directory name or from a model-provided remote.
+  let policy;
+  try {
+    const path = resolveProfileConfigPath("config/relay-authority.v1.json").path;
+    if (realpathSync(path) !== path || !lstatSync(path).isFile()) throw new Error("non-canonical policy");
+    policy = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    throw lifecycleError("repository_policy_unavailable", "the configured repository owner could not be verified", "denied");
+  }
+  const owner = policy?.githubOwner;
+  if (policy?.schema !== "relay-authority.v1" || typeof owner !== "string"
+      || !/^[a-zA-Z0-9-]{1,39}$/.test(owner)
+      || !Array.isArray(policy.denyRepositories)
+      || policy.denyRepositories.some((pattern) => typeof pattern !== "string" || !/^[a-z0-9*-]{1,64}$/.test(pattern))) {
+    throw lifecycleError("repository_policy_invalid", "the configured repository owner policy is invalid", "denied");
+  }
+  if (policy.denyRepositories.some((pattern) => pattern === requestedName
+      || (pattern.endsWith("*") && requestedName.startsWith(pattern.slice(0, -1))))) {
+    throw lifecycleError("repository_denied", "the requested repository is excluded by policy", "denied");
+  }
+  let origin;
+  try { origin = gitProbe(candidateReal, ["config", "--local", "--get", "remote.origin.url"]); }
+  catch { throw lifecycleError("repository_origin_untrusted", "the repository origin could not be verified", "denied"); }
+  // Private-first checkouts can be named for the public project while their
+  // origin is the owner's private development repository. Compare the owner,
+  // not the checkout basename; the remote repo name must still be bounded.
+  const ssh = new RegExp(`^git@github\\.com:${owner}/([a-z0-9][a-z0-9-]{0,63})(?:\\.git)?$`);
+  const https = new RegExp(`^https://github\\.com/${owner}/([a-z0-9][a-z0-9-]{0,63})(?:\\.git)?$`);
+  const remoteName = origin.match(ssh)?.[1] ?? origin.match(https)?.[1];
+  if (!remoteName || policy.denyRepositories.some((pattern) => pattern === remoteName
+      || (pattern.endsWith("*") && remoteName.startsWith(pattern.slice(0, -1))))) {
+    throw lifecycleError("repository_origin_untrusted", "the repository origin is not eligible under the configured owner", "denied");
   }
   return candidateReal;
 }
@@ -889,12 +884,8 @@ function revalidateWorktreeTarget(canonicalRoot, request, bound, options) {
   return observed;
 }
 
-// Registry membership is authority for the whole spawn, not only for the
-// pre-mutation resolve. Every boundary that already re-observes the bound
-// target and lease also re-resolves the CURRENT registry, so a membership
-// revocation during an asynchronous observation fails closed at that boundary
-// instead of at a later one (or after a success report). This composes the
-// existing resolvers; it is not a second validation owner.
+// Re-check canonical Git root, origin owner and worktree lease at each
+// asynchronous boundary; an observed remote or identity change fails closed.
 function revalidateSpawnAuthority(coordinatorCwd, requestedName, canonicalRoot, request, bound, options, boundary) {
   const currentRoot = resolveTrustedSpawnRepository(coordinatorCwd, requestedName);
   if (currentRoot !== canonicalRoot) {
@@ -1039,7 +1030,21 @@ export function resolveInstalledModel(requested, options = {}) {
     return pairs.has(pair) && (explicit ? pair === requested
       : [route.model, ...route.aliases].some((alias) => normalize(alias) === normalize(requested)));
   });
-  if (!matching.length) throw lifecycleError("model_unknown", "requested model has no installed policy route", "denied");
+  if (!matching.length) {
+    // The installed Pi roll is authoritative for an explicit model. New models
+    // from a provider already classified solely as subscription do not need a
+    // separate route entry; unknown providers and gateway models still do.
+    const provider = explicit ? requested.split("/", 1)[0] : null;
+    const known = provider ? policy.routes.filter((route) => route.provider === provider) : [];
+    if (pairs.has(requested) && known.length && known.every((route) => route.subscription)
+        && !known.some((route) => policy.bannedPairs.some((pair) => pair.provider === provider && pair.family === route.family))) {
+      if (options.isRouteAvailable?.(requested) === false) {
+        throw lifecycleError("model_unavailable", `subscription route ${requested} is unavailable`, "denied");
+      }
+      return Object.freeze(["--model", requested]);
+    }
+    throw lifecycleError("model_unknown", "requested model is not an installed subscription route", "denied");
+  }
   const family = matching[0].family;
   if (matching.some((route) => route.family !== family)) {
     throw lifecycleError("model_ambiguous", "the name matches multiple model families; specify a provider", "denied");
@@ -1097,20 +1102,16 @@ export function tabCreateArgv(canonicalRoot, role, workspaceId) {
   ]);
 }
 
-async function workerWorkspace(canonicalRoot, repository, options, signal) {
+// Attended Electron has no coordinator pane. Use an existing workspace for
+// layout only; the requested cwd is independently checked on the new pane.
+async function availableWorkspace(canonicalRoot, options, signal) {
   const listed = parseJsonEnvelope(await invokeHerdr(["workspace", "list"], canonicalRoot, options, signal), "workspace list");
   if (!Array.isArray(listed.workspaces) || listed.workspaces.length > 128) {
-    throw lifecycleError("workspace_untrusted", "workspace list is invalid", "denied");
+    throw lifecycleError("workspace_unavailable", "workspace list is invalid", "denied");
   }
-  const matches = listed.workspaces.filter((item) => item?.label === repository &&
-    typeof item.workspace_id === "string" && /^w[A-Za-z0-9]+$/.test(item.workspace_id));
-  if (matches.length !== 1) throw lifecycleError("workspace_untrusted", "the repository needs one matching workspace", "denied");
-  const workspaceId = matches[0].workspace_id;
-  const panes = parseJsonEnvelope(await invokeHerdr(["pane", "list", "--workspace", workspaceId], canonicalRoot, options, signal), "pane list");
-  if (!Array.isArray(panes.panes) || panes.panes.length > 128 ||
-      !panes.panes.some((pane) => pane?.workspace_id === workspaceId && sameRealPath(pane.cwd, canonicalRoot))) {
-    throw lifecycleError("workspace_untrusted", "the workspace has no pane in the trusted repository", "denied");
-  }
+  const workspaceId = listed.workspaces.find((item) => typeof item?.workspace_id === "string"
+    && /^w[A-Za-z0-9]+$/.test(item.workspace_id))?.workspace_id;
+  if (!workspaceId) throw lifecycleError("workspace_unavailable", "no existing workspace is available", "denied");
   return workspaceId;
 }
 
@@ -1264,7 +1265,11 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
     if (duplicateRoleExists(listed, role)) {
       throw lifecycleError("duplicate_worker_name", "a live agent already holds this name", "denied");
     }
-    const workspaceId = await workerWorkspace(canonicalRoot, repository, options, signal);
+    const coordinator = parseCurrentPane(await invokeHerdr(currentPaneArgv(), spawnCwd, options, signal));
+    const workspaceId = coordinator.paneId.split(":")[0];
+    if (!/^w[A-Za-z0-9]+$/.test(workspaceId) || !coordinator.tabId.startsWith(`${workspaceId}:`)) {
+      throw lifecycleError("current_pane_unavailable", "the coordinator workspace could not be identified", "denied");
+    }
     if (request.authority !== undefined) {
       try {
         // A ledger grant is bound to the exact target when a worktree is
@@ -1284,19 +1289,8 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
     );
     if (request.worktreePath) spawnCwd = worktreeTarget.worktreePath;
 
-    // Herdr owns new-shell readiness. Follow its documented topology:
-    // split directly for pane placement, or create a tab for tab placement.
-    let coordinator = null;
-    if (placement !== "tab") {
-      const currentRaw = await invokeHerdr(currentPaneArgv(), spawnCwd, options, signal);
-      coordinator = parseCurrentPane(currentRaw);
-      // The coordinator observation is asynchronous; a registry, lease, or
-      // association change during it must fail closed before the split.
-      canonicalRoot = revalidateSpawnAuthority(
-        context?.cwd, repository, canonicalRoot, request, worktreeTarget, options,
-        "during the coordinator pane observation",
-      );
-    }
+    // Use the coordinator's existing workspace, never a repository-named one.
+    // The preceding authority fence also covers the pane observation.
 
     const layoutPartial = placement === "tab" ? "tab_created" : "pane_created";
     let layoutRaw;
@@ -1516,7 +1510,7 @@ export async function preflightAttendedElectronSpawn(params, context, options = 
     assertHerdrExecutableAvailable(options);
     const { canonicalRoot, modelArgv, worktreeTarget } = resolveAttendedElectronPrerequisites(request, context, options);
     await observeDuplicateRole(worktreeTarget ? worktreeTarget.worktreePath : canonicalRoot, request.role, options, null);
-    await workerWorkspace(canonicalRoot, request.repository, options, null);
+    await availableWorkspace(canonicalRoot, options, null);
     revalidateSpawnAuthority(
       context.cwd, request.repository, canonicalRoot, request, worktreeTarget, options,
       "during the preflight agent-list observation",
@@ -1574,7 +1568,7 @@ export async function executeHerdrSpawnWorkerAttendedElectron(params, context, o
       : null;
     let spawnCwd = worktreeTarget ? worktreeTarget.worktreePath : canonicalRoot;
     await observeDuplicateRole(spawnCwd, role, options, signal);
-    const workspaceId = await workerWorkspace(canonicalRoot, repository, options, signal);
+    const workspaceId = await availableWorkspace(canonicalRoot, options, signal);
 
     // ONE native owner confirmation from the attended host. A denial is a
     // stop; a throw is a structured refusal. Never re-asked, never retried.
