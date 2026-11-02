@@ -124,25 +124,39 @@ test("communication refuses mismatched leased worktree targets", async () => {
   assert.equal(result.code, "repository_mismatch");
 });
 
-// Why: registered sibling repositories remain usable, but their worktrees cannot impersonate another root.
-test("communication preserves registered sibling checks with worktree targets", async () => {
+// Why: a new owned sibling and leased worktree need no registry entry, but cannot impersonate another root.
+test("communication accepts dynamically eligible siblings and their leased worktrees", async () => {
   const f = leasedWorktreeFixture();
   const sibling = join(f.directory, "sibling");
   mkdirSync(sibling);
   execFileSync("git", ["-C", sibling, "init", "-q"]);
-  mkdirSync(join(f.repository, "config"));
-  writeFileSync(join(f.repository, "config", "herdr-worker-repositories.v1.json"), JSON.stringify({
-    schema: "agentic-driver.herdr-worker-repositories.v1", repositories: ["sibling"],
+  execFileSync("git", ["-C", sibling, "remote", "add", "origin", "git@github.com:evoclock/sibling.git"]);
+  execFileSync("git", ["-C", sibling, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+    "commit", "-q", "--allow-empty", "-m", "fixture"]);
+  const siblingWorktree = join(f.directory, "pool", "sibling");
+  execFileSync("git", ["-C", sibling, "worktree", "add", "-q", "--detach", siblingWorktree, "HEAD"]);
+  const beforeProfile = process.env.PI_CODING_AGENT_DIR;
+  const profile = join(f.directory, "profile");
+  mkdirSync(join(profile, "config"), { recursive: true });
+  writeFileSync(join(profile, "config", "relay-authority.v1.json"), JSON.stringify({
+    schema: "relay-authority.v1", githubOwner: "evoclock", denyRepositories: [],
   }));
+  process.env.PI_CODING_AGENT_DIR = profile;
   const get = async (repository, cwd) => executeHerdrCommunication(
     { action: "get", role: "worker" }, { cwd: f.repository },
-    { treehouseStatus: JSON.stringify([f.lease]),
+    { treehouseStatus: JSON.stringify([f.lease, {
+        path: siblingWorktree, status: "leased", lease_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      }]),
       runProcess: async () => ({ code: 0, stdout: JSON.stringify({ type: "agent_info",
         agent: { name: "worker", agent: "pi", status: "idle", repository, cwd } }) }) },
   );
   assert.equal((await get(sibling, sibling)).ok, true);
+  assert.equal((await get(sibling, siblingWorktree)).ok, true);
+  assert.equal((await get(siblingWorktree, siblingWorktree)).ok, true);
   assert.equal((await get(sibling, f.worktree)).code, "repository_mismatch");
   assert.equal((await get(f.repository, f.worktree)).ok, true);
+  if (beforeProfile === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = beforeProfile;
 });
 
 function markerPair(role) {
@@ -192,7 +206,7 @@ function concurrentFixture() {
   return { calls, runProcess, get maximumActive() { return maximumActive; } };
 }
 
-// Why: concurrent exchanges must not mix a worker's reports.
+// Why: concurrent worker exchanges must keep their reports and roles separate.
 test("Herdr communication isolates concurrent marked exchanges", async () => {
   const fixture = concurrentFixture();
   const results = await Promise.all(roles.map((role) => executeHerdrPromptExchange(
@@ -271,7 +285,7 @@ test("Herdr communication isolates concurrent marked exchanges", async () => {
   assert.equal(failedRead.nonAuthorizing, true);
 });
 
-// Why: long reports must remain readable without redelivering the prompt.
+// Why: a long marked report must be recovered without resending its brief.
 test("a valid report longer than 400 lines is recovered with one expanded read and no prompt resend", async () => {
   const role = "long-review";
   const [open, close] = markerPair(role);
@@ -307,7 +321,7 @@ test("a valid report longer than 400 lines is recovered with one expanded read a
   assert.ok(Number(calls.at(-1)[calls.at(-1).indexOf("--lines") + 1]) > 400);
 });
 
-// Why: a truncated tail must not hide a report that can be read once more.
+// Why: a truncated terminal tail must not hide a recoverable report.
 test("plain read expands once when the 400-line tail starts inside the latest report", async () => {
   const role = "long-review";
   const [open, close] = markerPair(role);
@@ -327,7 +341,7 @@ test("plain read expands once when the 400-line tail starts inside the latest re
   assert.equal(calls.length, 2);
 });
 
-// Why: an echoed contract is not a reply, and nested reports are ambiguous.
+// Why: echoed instructions are not answers and nested report markers are ambiguous.
 test("Herdr extraction ignores echoed contract markers but rejects nested markers", () => {
   const earlier = "[REVIEW_REPORT_BEGIN]\nold report\n[REVIEW_REPORT_END]";
   const echoedContract = "Return exactly one complete role report, and no additional report, bounded by these literal markers: [REVIEW_REPORT_BEGIN] [REVIEW_REPORT_END]";
@@ -341,7 +355,7 @@ test("Herdr extraction ignores echoed contract markers but rejects nested marker
   );
 });
 
-// Why: terminal framing must not make a complete response disappear.
+// Why: terminal box padding must not conceal a complete marked report.
 test("Herdr boxed terminal padding does not hide a complete marked report", () => {
   const box = (line) => ` ${line}${" ".repeat(240 - line.length - 2)}│`;
   const echo = [
@@ -359,25 +373,25 @@ test("Herdr boxed terminal padding does not hide a complete marked report", () =
   );
 });
 
-// Why: stalled delivery must not be reported as a completed handoff.
+// Why: a stalled transport cannot be treated as successful delivery.
 test("stalled-before-delivery", async () => {
   const f = exchangeFixture({ promptFailure: { code: 2, stdout: JSON.stringify({ error: { code: "agent_prompt_stalled" } }) } });
   const r = await executeHerdrPromptExchange({ action: "prompt", role: "reviewer", prompt: "x", timeoutMs: 100 }, { cwd: root }, { runProcess: f.runProcess });
 });
 
-// Why: a prompt must reach the transport at most once.
+// Why: a failed prompt attempt must never trigger a second handoff.
 test("exact-once-invocation", async () => {
   for (const failure of [{ code: 2, stdout: JSON.stringify({ error: { code: "agent_prompt_stalled" } }) }, { code: 2, stderr: "bad" }, { code: 0, stdout: "{" }]) { const f = exchangeFixture({ promptFailure: failure }); await executeHerdrPromptExchange({ action: "prompt", role: "reviewer", prompt: "x", timeoutMs: 100 }, { cwd: root }, { runProcess: f.runProcess }); assert.equal(f.calls.filter(c => c.action === "prompt").length, 1); }
 });
 
-// Why: a stalled transport boundary cannot prove whether a prompt landed.
+// Why: uncertain transport cannot prove that a stalled prompt was not delivered.
 test("stalled-tocou-unknown", async () => {
   const f = exchangeFixture({ promptFailure: { code: 2, stdout: JSON.stringify({ error: { code: "agent_prompt_stalled" } }) }, recovery: info("reviewer", "idle", undefined) });
   const r = await executeHerdrPromptExchange({ action: "prompt", role: "reviewer", prompt: "x", timeoutMs: 100 }, { cwd: root }, { runProcess: f.runProcess });
   assert.equal(r.code, "prompt_delivery_unknown"); assert.doesNotMatch(r.reason, /undelivered/);
 });
 
-// Why: missing snapshots and changed targets must fail closed.
+// Why: missing snapshots and changed worker state must stop a fresh prompt.
 test("snapshot-fail-closed-and-revalidation", async () => {
   let calls = [];
   let r = await executeHerdrPromptExchange({ action: "prompt", role: "reviewer", prompt: "x", timeoutMs: 100 }, { cwd: root }, { runProcess: async ({ argv }) => { calls.push(argv[1]); return argv[1] === "get" ? info("reviewer") : { code: 2, stderr: "read failed" }; } });
@@ -385,7 +399,7 @@ test("snapshot-fail-closed-and-revalidation", async () => {
   const f = exchangeFixture({ statuses: ["idle", "working"] }); r = await executeHerdrPromptExchange({ action: "prompt", role: "reviewer", prompt: "x", timeoutMs: 100 }, { cwd: root }, { runProcess: f.runProcess }); assert.equal(r.code, "role_not_promptable"); assert.equal(f.calls.filter(c => c.action === "prompt").length, 0);
 });
 
-// Why: bounded reads must honor the exchange's latency contract.
+// Why: bounded report observation must not add unbounded reads.
 test("two-read-latency-contract", async () => {
   const f = exchangeFixture(); const r = await executeHerdrPromptExchange({ action: "prompt", role: "reviewer", prompt: "x", timeoutMs: 100 }, { cwd: root }, { runProcess: f.runProcess });
   assert.equal(r.ok, true); assert.deepEqual(f.calls.map(c => c.action), ["get", "read", "get", "prompt", "read"]);
@@ -406,7 +420,7 @@ async function offlineStore(t) {
   return { store, directory };
 }
 
-// Why: reopening persisted delivery must keep its identity and never resend it.
+// Why: a reopened delivery must retain identity without another prompt.
 test("offline delivery identity survives reopen, lost attribution holds and repeats never resend", async (t) => {
   const { store, directory } = await offlineStore(t);
   const f = deliveryFixture();
@@ -453,7 +467,7 @@ test("offline proven report survives reopen without fresh terminal reads", async
   assert.deepEqual(f.calls, []);
 });
 
-// Why: failed reservation or conflicting identity must stop before transport.
+// Why: invalid persistence and conflicting requests must fail before transport.
 test("offline delivery rejects missing fake adapter, failed reservation and conflicting request reuse before send", async (t) => {
   const { store } = await offlineStore(t);
   const request = { action: "submit", role: "worker", prompt: "bound brief", timeoutMs: 1000 };
@@ -505,7 +519,7 @@ function deliveryFixture({ status = "idle", report = "fresh worker findings", fa
       // Herdr's recent-unwrapped snapshot pads standalone marker lines to the
       // terminal width and can retain Pi's right-hand box border (see
       // MAX_MARKER_HORIZONTAL_WHITESPACE). padEcho simulates that rendering.
-      // Why: marker recognition must tolerate bounded box padding without accepting arbitrary lines.
+      // Why: marker recognition tolerates bounded box padding without accepting arbitrary lines.
       const echo = padWidth
         ? sent.split("\n").map((line) => (/^(?:\[[A-Z0-9_]+_REPORT_(?:BEGIN|END)\]|Delivery: dlv-[0-9a-f]{16}-[0-9a-z]+|Begin your report with the Delivery line above, exactly as written\.$)/.test(line) ? `${line}${" ".repeat(Math.max(0, padWidth - line.length - 1))}│` : line)).join("\n")
         : sent;
@@ -539,7 +553,7 @@ test("persisted busy-worker brief stays queued until a delivery query observes i
   assert.equal(f.promptCount, 1);
 });
 
-// Why: offline role observations cannot invent live transport state.
+// Why: offline role observations cannot manufacture live transport state.
 test("offline communication refuses every role-keyed observation without transport", async (t) => {
   const { store } = await offlineStore(t);
   const f = deliveryFixture();
@@ -553,7 +567,7 @@ test("offline communication refuses every role-keyed observation without transpo
   assert.deepEqual(f.calls, []);
 });
 
-// Why: a failed acknowledgment cannot erase a delivered intent or trigger resend.
+// Why: a failed acknowledgment cannot erase handoff intent or cause a resend.
 test("direct offline delivery failed ack commit retains intent and never resends", async (t) => {
   const { store } = await offlineStore(t);
   const f = deliveryFixture();
@@ -573,7 +587,7 @@ test("direct offline delivery failed ack commit retains intent and never resends
   assert.equal(f.promptCount, 1);
 });
 
-// Why: prompt submission acknowledges transport rather than model completion.
+// Why: prompt returns transport acceptance without waiting for model work.
 test("prompt returns an immediate delivery receipt with no model round-trip", async () => {
   const f = deliveryFixture();
   const started = Date.now();
@@ -608,7 +622,7 @@ test("prompt returns an immediate delivery receipt with no model round-trip", as
 // Attribution must still find the handoff boundary and answer the delivery;
 // a byte-exact sentPrompt echo must not be required (task #31 symptom:
 // delivered + "no terminal echo" while plain read returns the report).
-// Why: padded terminal echoes must not corrupt answer attribution.
+// Why: a padded terminal echo must retain its report boundary.
 test("delivery attribution survives a padded, box-bordered marker echo", async () => {
   const f = deliveryFixture({ padEcho: true });
   const receipt = await executeHerdrCommunication(
@@ -628,7 +642,7 @@ test("delivery attribution survives a padded, box-bordered marker echo", async (
   assert.equal(answered.report, "fresh worker findings");
 });
 
-// Why: partial echoes cannot establish a valid handoff boundary.
+// Why: a partial contract echo cannot establish a valid handoff boundary.
 test("a partial echo of contract and tail without the caller prompt mints no boundary", async () => {
   const f = partitionFixture();
   const receipt = await executeHerdrCommunication(
@@ -655,7 +669,7 @@ test("a partial echo of contract and tail without the caller prompt mints no bou
   assert.equal(query.report, undefined);
 });
 
-// Why: an embedded marker cannot substitute for the complete caller prompt.
+// Why: a caller-prefix echo cannot stand in for the complete submitted prompt.
 test("an embedded contract line cannot reduce caller-prompt echo validation to a prefix", async () => {
   const f = partitionFixture();
   const submittedPrompt = "safe submitted brief";
@@ -707,7 +721,7 @@ test("an embedded contract line cannot reduce caller-prompt echo validation to a
   assert.equal(whitespaceMismatch.deliveryState, "delivered", JSON.stringify(whitespaceMismatch));
 });
 
-// Why: bounded framing whitespace must not break a valid report.
+// Why: bounded marker padding must not break a valid report.
 test("delivery attribution survives framing padded to the full marker whitespace budget", async () => {
   const f = deliveryFixture({ padEcho: 470 });
   const receipt = await executeHerdrCommunication(
@@ -731,7 +745,7 @@ test("delivery attribution survives framing padded to the full marker whitespace
   assert.ok(f.echoedPrompt.includes(`${instruction}${" ".repeat(470 - instruction.length - 1)}│`));
 });
 
-// Why: submit and prompt must share the transport receipt semantics.
+// Why: submit must provide the same immediate non-authorizing receipt as prompt.
 test("submit returns the same immediate receipt contract", async () => {
   const f = deliveryFixture();
   const receipt = await executeHerdrCommunication(
@@ -749,7 +763,7 @@ test("submit returns the same immediate receipt contract", async () => {
   assert.deepEqual(f.calls.map((call) => call.action), ["get", "read", "prompt"]);
 });
 
-// Why: a query must publish an answer only after observing its report.
+// Why: only a correlated marked report can advance a delivered brief to answered.
 test("delivery query walks delivered to answered with report markers", async () => {
   const f = deliveryFixture();
   const receipt = await executeHerdrCommunication(
@@ -796,7 +810,7 @@ test("delivery query walks delivered to answered with report markers", async () 
   assert.equal(f.promptCount, 1);
 });
 
-// Why: denied prompts must return structured refusals to callers.
+// Why: invalid or unavailable targets need structured refusals without throws.
 test("prompt refusals are structured and never throw", async () => {
   const noTraffic = async () => { throw new Error("no Herdr traffic expected"); };
   const denied = await executeHerdrCommunication(
@@ -864,7 +878,7 @@ test("prompt refusals are structured and never throw", async () => {
   assert.equal(failedState.deliveryState, "failed");
 });
 
-// Why: uncertainty must be explicit and must not cause an automatic resend.
+// Why: unknown delivery must remain explicit and must never be resent.
 test("an unconfirmed handoff is explicit and never ambiguous or resent", async () => {
   const f = deliveryFixture();
   let handoffs = 0;
@@ -891,7 +905,7 @@ test("an unconfirmed handoff is explicit and never ambiguous or resent", async (
   assert.equal(state.deliveryState, "unknown");
 });
 
-// Why: an unknown delivery cannot authorize transport traffic.
+// Why: unknown receipts cannot trigger terminal traffic.
 test("an unknown deliveryId is refused without any Herdr traffic", async () => {
   const f = deliveryFixture();
   const unknown = await executeHerdrCommunication(
@@ -904,7 +918,7 @@ test("an unknown deliveryId is refused without any Herdr traffic", async () => {
   assert.deepEqual(f.calls, []);
 });
 
-// Why: a delivered prompt must remain exactly once across later calls.
+// Why: repeated delivery queries cannot replay a confirmed prompt.
 test("a delivered prompt is never resent by the adapter", async () => {
   const f = deliveryFixture();
   const first = await executeHerdrCommunication(
@@ -928,7 +942,7 @@ test("a delivered prompt is never resent by the adapter", async () => {
   assert.equal(f.promptCount, 2, "delivery queries never re-prompt");
 });
 
-// Why: existing checklist dispatch must keep the async receipt contract.
+// Why: guard-appended text must stay within the same bounded handoff.
 test("the checklist-guard supply path stays compatible with the async contract", async () => {
   // The host guard appends the first TaskCreate checklist action to
   // input.prompt before this tool executes; the input shape
@@ -955,7 +969,7 @@ test("the checklist-guard supply path stays compatible with the async contract",
   assert.equal(f.promptCount, 1);
 });
 
-// Why: the new delivery route must not change existing observations.
+// Why: observation actions retain their read-only contract.
 test("wait and read keep their existing contracts", async () => {
   const result = await executeHerdrCommunication(
     { action: "wait", role: "worker", timeoutMs: 1000 },
@@ -1025,7 +1039,7 @@ function partitionFixture() {
   };
 }
 
-// Why: identical prompts must not steal each other's replies.
+// Why: identical briefs must attribute answers by delivery identity, not text.
 test("two rapid identical prompts each attribute to their own answer", async () => {
   const f = partitionFixture();
   const brief = "identical bounded brief";
@@ -1065,7 +1079,7 @@ test("two rapid identical prompts each attribute to their own answer", async () 
   assert.equal(qaAgain.report, "answer one", "delivery A keeps its own answer");
 });
 
-// Why: an out-of-order reply belongs only to its own handoff.
+// Why: a later handoff cannot claim another delivery's earlier answer.
 test("out-of-order answers never cross-claim: B reports first, A keeps waiting for its own", async () => {
   const f = partitionFixture();
   const brief = "same brief for both";
@@ -1091,7 +1105,7 @@ test("out-of-order answers never cross-claim: B reports first, A keeps waiting f
   assert.equal(qb2.report, "b was faster");
 });
 
-// Why: a fast report must still correlate to its own delivery.
+// Why: a report before the first query still belongs to its delivery.
 test("a report arriving between handoff and first query attributes by its own correlation line", async () => {
   const f = partitionFixture();
   const receipt = await executeHerdrCommunication(
@@ -1108,7 +1122,7 @@ test("a report arriving between handoff and first query attributes by its own co
   assert.equal(query.report, "already there");
 });
 
-// Why: repeated observation cannot invent an answer without a report.
+// Why: unrelated activity cannot settle an unanswered delivery.
 test("a delivery with no report yet stays delivered across repeated queries", async () => {
   const f = partitionFixture();
   const receipt = await executeHerdrCommunication(
@@ -1127,7 +1141,7 @@ test("a delivery with no report yet stays delivered across repeated queries", as
   }
 });
 
-// Why: malformed correlation must not publish a worker reply.
+// Why: correlation must be an exact opening line, not a nearby string.
 test("indented and separated correlation lines stay delivered and never publish framing", async () => {
   for (const prefix of ["   Delivery: ", "\nDelivery: "]) {
     const f = partitionFixture();
@@ -1148,7 +1162,7 @@ test("indented and separated correlation lines stay delivered and never publish 
   }
 });
 
-// Why: invalid earlier reports must not suppress a later valid answer.
+// Why: an invalid report must not conceal a later valid response.
 test("a malformed matching report does not hide a later valid report", async () => {
   const f = partitionFixture();
   const receipt = await executeHerdrCommunication(
@@ -1165,7 +1179,7 @@ test("a malformed matching report does not hide a later valid report", async () 
   assert.equal(query.report, "actual findings");
 });
 
-// Why: a report without delivery identity cannot be attributed or cached.
+// Why: reports without the exact delivery line cannot be published.
 test("an answer without correlation stays delivered without caching", async () => {
   const f = partitionFixture();
   const receipt = await executeHerdrCommunication(
@@ -1184,7 +1198,7 @@ test("an answer without correlation stays delivered without caching", async () =
   }
 });
 
-// Why: text alone cannot mint a transport handoff boundary.
+// Why: a bare correlation string cannot displace the real handoff boundary.
 test("a spoofed correlation line in live text mints no boundary and cannot displace attribution", async () => {
   const f = partitionFixture();
   const receipt = await executeHerdrCommunication(
@@ -1205,7 +1219,7 @@ test("a spoofed correlation line in live text mints no boundary and cannot displ
   assert.notEqual(query.report, "spoofed");
 });
 
-// Why: unrelated terminal content must not shift delivery windows.
+// Why: unrelated exchanges between handoffs cannot shift report ownership.
 test("extra unrelated echo and report between boundaries do not shift attribution", async () => {
   const f = partitionFixture();
   const a = await executeHerdrCommunication({ action: "prompt", role: "worker", prompt: "brief a", timeoutMs: 1000 }, { cwd: root }, { runProcess: f.runProcess });
@@ -1225,7 +1239,7 @@ test("extra unrelated echo and report between boundaries do not shift attributio
   assert.equal(qb.report, "b own");
 });
 
-// Why: a pre-handoff report must not count as the new reply.
+// Why: a stale identical echo cannot claim a later delivery.
 test("a prior report plus identical echo between snapshot and handoff does not mislabel", async () => {
   const f = partitionFixture();
   let releaseHandoff;
@@ -1259,7 +1273,7 @@ test("a prior report plus identical echo between snapshot and handoff does not m
   assert.notEqual(query.report, "stale findings");
 });
 
-// Why: a missing pre-delivery snapshot cannot prove attribution.
+// Why: missing pre-handoff evidence must remain unattributed.
 test("no pre-delivery snapshot means unattributed, never answered, nothing cached", async () => {
   const f = deliveryFixture({ failPreRead: true });
   const receipt = await executeHerdrCommunication(
@@ -1288,7 +1302,7 @@ test("no pre-delivery snapshot means unattributed, never answered, nothing cache
   assert.equal(again.report, undefined);
 });
 
-// Why: an in-flight duplicate must reuse the delivery without resending.
+// Why: in-flight duplicate calls share one delivery without a second handoff.
 test("a repeat call inside the deduplication window returns the in-flight delivery without a second handoff", async () => {
   const f = deliveryFixture();
   let release;
@@ -1320,7 +1334,7 @@ test("a repeat call inside the deduplication window returns the in-flight delive
   assert.equal(f.promptCount, 1, "no second handoff for the identical repeat");
 });
 
-// Why: unresolved handoffs cannot be retried as new work.
+// Why: an uncertain prompt cannot be replayed during the bounded window.
 test("a repeat call after an unconfirmed handoff is refused with the same deliveryId", async () => {
   const f = deliveryFixture();
   let handoffs = 0;
@@ -1352,7 +1366,7 @@ test("a repeat call after an unconfirmed handoff is refused with the same delive
   assert.equal(findUnconfirmedDelivery("worker", "retry me", Date.now() + 121_000), undefined);
 });
 
-// Why: a completed answer must not block a later explicit prompt.
+// Why: a settled delivery can be followed by an intentional new prompt.
 test("a repeat call after the prior delivery is confirmed answered is a new delivery", async () => {
   const f = deliveryFixture();
   const first = await executeHerdrCommunication(
@@ -1375,7 +1389,7 @@ test("a repeat call after the prior delivery is confirmed answered is a new deli
   assert.equal(f.promptCount, 2);
 });
 
-// Why: a zero-exit handoff with missing proof must remain uncertain.
+// Why: a zero-exit malformed response is uncertain, not proof of failure.
 test("a handoff that fails after a zero exit is unknown, not failed", async () => {
   for (const [index, promptResult] of [
     { code: 0, stdout: "{" },

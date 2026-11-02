@@ -116,7 +116,7 @@ if (command === "pane" && argv[1] === "get") {
   process.exit(0);
 }
 if (command === "pane" && argv[1] === "current") {
-  emit({ result: { pane_id: "w1:p1", tab_id: "w1:t1" } });
+  emit({ result: { pane_id: "w7:p1", tab_id: "w7:t1" } });
   process.exit(0);
 }
 fail("unknown_command", JSON.stringify(argv));
@@ -144,6 +144,12 @@ function fixture(options = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "worktree-spawn-")));
   const coordinator = gitRepo(join(root, "coordinator"));
   const workerRoot = gitRepo(join(root, WORKER_REPO));
+  git(workerRoot, ["remote", "add", "origin", `git@github.com:evoclock/${WORKER_REPO}.git`]);
+  const policyDir = join(root, "profile", "config");
+  mkdirSync(policyDir, { recursive: true });
+  writeFileSync(join(policyDir, "relay-authority.v1.json"), JSON.stringify({
+    schema: "relay-authority.v1", githubOwner: "evoclock", denyRepositories: [],
+  }));
   const registryDir = join(coordinator, "config");
   mkdirSync(registryDir, { recursive: true });
   writeFileSync(
@@ -236,15 +242,57 @@ test("a parameterized target is optional and bounded: old four-key calls stay va
     (error) => error.code === "closed_parameters");
 });
 
-// Why: Workspace association must be checked before layout mutation.
-test("worker spawn refuses a foreign workspace or pane before tab creation", async () => {
+// Why: A new owned checkout needs no prior registry entry or registration prompt.
+test("guarded start accepts a verified sibling even when absent from the registry", async () => {
+  const f = fixture({ registryNames: ["another-repo"], omitTarget: true });
+  process.env.HERDR_PANE_ID = "synthetic-pane";
+  try {
+    assert.equal(resolveTrustedSpawnRepository(f.coordinator, WORKER_REPO), f.workerRoot);
+    f.context.ui.confirm = () => { throw new Error("no registration or spawn prompt expected"); };
+    const result = await executeHerdrSpawnWorker(f.params, f.context, f.herdrOptions);
+    assert.equal(result.status, "spawned", JSON.stringify(result));
+  } finally { cleanup(f.root); }
+});
+
+// Why: a public-named checkout may track the configured owner's private development repository.
+test("guarded start accepts a private-first origin with a different repository name", async () => {
+  const f = fixture({ registryNames: ["another-repo"], omitTarget: true });
+  process.env.HERDR_PANE_ID = "synthetic-pane";
+  try {
+    git(f.workerRoot, ["remote", "set-url", "origin", "git@github.com:evoclock/agents-work-agents.git"]);
+    const result = await executeHerdrSpawnWorker(f.params, f.context, f.herdrOptions);
+    assert.equal(result.status, "spawned", JSON.stringify(result));
+  } finally { cleanup(f.root); }
+});
+
+// Why: a foreign or excluded remote must fail before layout even if the checkout exists.
+test("guarded start refuses a foreign origin or denied name before creating a tab", async () => {
+  for (const denied of ["origin", "policy"]) {
+    const f = fixture({ omitTarget: true });
+    process.env.HERDR_PANE_ID = "synthetic-pane";
+    try {
+      if (denied === "origin") git(f.workerRoot, ["remote", "set-url", "origin", "git@github.com:elsewhere/agents-work.git"]);
+      else writeFileSync(join(f.root, "profile", "config", "relay-authority.v1.json"), JSON.stringify({
+        schema: "relay-authority.v1", githubOwner: "evoclock", denyRepositories: [WORKER_REPO],
+      }));
+      const result = await executeHerdrSpawnWorker(f.params, f.context, f.herdrOptions);
+      assert.equal(result.code, denied === "origin" ? "repository_origin_untrusted" : "repository_denied");
+      assert.deepEqual(readLog(f.log), []);
+    } finally { cleanup(f.root); }
+  }
+});
+
+// Why: a trusted checkout can spawn in the coordinator workspace regardless of unrelated workspace labels or pane cwd.
+test("worker spawn uses coordinator workspace without matching repository label", async () => {
   for (const mode of ["foreign-workspace", "foreign-pane"]) {
     const f = fixture({ mode });
     try {
-      process.env.HERDR_PANE_ID = "w1:p1";
+      process.env.HERDR_PANE_ID = "w7:p1";
       const result = await executeHerdrSpawnWorker(f.params, f.context, f.herdrOptions);
-      assert.equal(result.code, "workspace_untrusted", JSON.stringify(result));
-      assert.equal(readLog(f.log).some(({ argv }) => argv[0] === "tab"), false);
+      assert.equal(result.status, "spawned", JSON.stringify(result));
+      const rawCalls = readFileSync(f.log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      assert.equal(rawCalls.some(({ argv }) => argv[0] === "workspace"), false);
+      assert.equal(readLog(f.log).some(({ argv }) => argv[0] === "tab" && argv.includes("w7")), true);
     } finally { cleanup(f.root); }
   }
 });
@@ -318,9 +366,11 @@ for (const boundary of ["tui", "attended"]) {
         assert.equal(revoked, true);
         const commands = [["agent", "list"], ["tab", "create"], ...(mutation === "start" ? [["agent", "start"]] : [])];
         console.log("dispatch timing", JSON.stringify({ boundary, mutation, dispatches, result }));
-        assert.deepEqual(dispatches.map((entry) => entry.command), [["agent", "list"], ["workspace", "list"], ["pane", "list"], ...commands.slice(1)]);
+        assert.deepEqual(dispatches.map((entry) => entry.command), [["agent", "list"], ...(boundary === "tui" ? [["pane", "current"]] : [["workspace", "list"]]), ...commands.slice(1)]);
         assert.ok(dispatches.every((entry) => !entry.revoked && entry.leases === 1), "every actual dispatch precedes revocation, without an owned yield");
-        assert.deepEqual(readLog(f.log).map((entry) => entry.argv.slice(0, 2)), commands, "one actual effect per dispatch, no retry");
+        assert.deepEqual(readLog(f.log).map((entry) => entry.argv.slice(0, 2)),
+          [["agent", "list"], ...(boundary === "tui" ? [["pane", "current"]] : []), ...commands.slice(1)],
+          "one actual effect per dispatch, no retry");
         assert.equal(result.ok, false);
         assert.equal(result.code, "worktree_target_changed");
         assert.equal(result.partial, mutation === "layout" ? "tab_created" : "agent_started", "revocation AFTER dispatch must preserve the real partial effect");
@@ -440,7 +490,7 @@ test("a lease change across the observation boundary fails closed with no mutati
     const result = await executeHerdrSpawnWorker(f.params, f.context, f.herdrOptions);
     assert.equal(result.ok, false);
     assert.equal(result.code, "worktree_target_changed");
-    assert.deepEqual(readLog(f.log).map((entry) => entry.argv), [["agent", "list"]]);
+    assert.deepEqual(readLog(f.log).map((entry) => entry.argv), [["agent", "list"], ["pane", "current", "--current"]]);
   } finally {
     cleanup(f.root);
   }
@@ -525,6 +575,7 @@ function replaceRepoAndWorktree(f) {
   renameSync(f.workerRoot, join(f.root, "original-repo"));
   renameSync(f.worktree, join(f.root, "original-worktree"));
   gitRepo(f.workerRoot);
+  git(f.workerRoot, ["remote", "add", "origin", `git@github.com:evoclock/${WORKER_REPO}.git`]);
   git(f.workerRoot, ["commit", "-q", "--allow-empty", "-m", "replacement-repository"]);
   makeWorktree(f.workerRoot, f.worktree, "fix/replaced");
 }
@@ -646,17 +697,17 @@ test("WT-03/STD-03/SPEC-001: a lease change during agent-get or pane-get is refu
   }
 });
 
-for (const revokedAuthority of ["lease", "registry"]) {
-  // Why: Registry and lease revocation during observation must precede any layout.
+for (const revokedAuthority of ["lease", "origin"]) {
+  // Why: Git origin and lease changes during observation must precede any layout.
   test(`SPEC-02: preflight refuses ${revokedAuthority} revocation during agent-list`, async () => {
     const f = fixture({ boundary: "attended" });
     f.context.ui.confirm = () => { throw new Error("preflight must not request confirmation"); };
-    const revoke = revokedAuthority === "lease" ? revokeDuring : revokeRegistryDuring;
+    const revoke = revokedAuthority === "lease" ? revokeDuring : revokeOriginDuring;
     revoke(f, "agent", "list");
     try {
       const result = await preflightAttendedElectronSpawn(f.params, f.context, f.herdrOptions);
       assert.equal(result.ok, false, JSON.stringify(result));
-      assert.equal(result.code, revokedAuthority === "lease" ? "worktree_target_changed" : "repository_untrusted");
+      assert.equal(result.code, revokedAuthority === "lease" ? "worktree_target_changed" : "repository_origin_untrusted");
       assert.equal(result.status, revokedAuthority === "lease" ? "blocked" : "denied");
       assert.equal(result.leaseId, undefined, "no stale lease is certified");
       assert.equal(result.partial, undefined, "preflight has not mutated layout or started an agent");
@@ -837,22 +888,15 @@ test("WT-07: an unregistered directory with a copied pointer to a valid slot is 
   }
 });
 
-// WT-08: registry membership is authority for the whole spawn, not only for the
-// pre-mutation resolve. A revocation during an asynchronous observation must be
-// observed at that same boundary, before the next mutation or the success report.
-function revokeRegistryDuring(f, action, sub) {
+// WT-08: Verified Git origin is checked throughout the spawn. A remote change
+// during an asynchronous observation must be seen before success or mutation.
+function revokeOriginDuring(f, action, sub) {
   f.herdrOptions.runProcess = (spec) => {
     const stdout = execFileSync(f.herdrOptions.testExecutablePath, spec.argv, {
       ...spec.spawnOptions, encoding: "utf8",
     });
     if (spec.argv[0] === action && spec.argv[1] === sub) {
-      writeFileSync(
-        join(f.coordinator, "config", "herdr-worker-repositories.v1.json"),
-        JSON.stringify({
-          schema: "agentic-driver.herdr-worker-repositories.v1",
-          repositories: ["now-denied"],
-        }),
-      );
+      git(f.workerRoot, ["remote", "set-url", "origin", "git@github.com:elsewhere/agents-work.git"]);
     }
     return { code: 0, stdout, stderr: "" };
   };
@@ -863,7 +907,7 @@ test("WT-08/STD-07/SPEC-005: coordinator pane placements are refused before any 
   for (const placement of ["right", "below"]) {
     const f = fixture({ placement });
     process.env.HERDR_PANE_ID = "synthetic-pane";
-    revokeRegistryDuring(f, "pane", "current");
+    revokeOriginDuring(f, "pane", "current");
     try {
       const result = await executeHerdrSpawnWorker(f.params, f.context, f.herdrOptions);
       assert.equal(result.ok, false, `${placement}: ${JSON.stringify(result)}`);
@@ -893,12 +937,12 @@ test("WT-08/STD-07/SPEC-004: registry revocation during agent-get or pane-get ke
     for (const [action, sub] of [["agent", "get"], ["pane", "get"]]) {
       const f = fixture({ boundary });
       if (boundary === "tui") process.env.HERDR_PANE_ID = "synthetic-pane";
-      revokeRegistryDuring(f, action, sub);
+      revokeOriginDuring(f, action, sub);
       try {
         const execute = boundary === "tui" ? executeHerdrSpawnWorker : executeHerdrSpawnWorkerAttendedElectron;
         const result = await execute(f.params, f.context, f.herdrOptions);
         assert.equal(result.ok, false, `${boundary}/${action} ${sub}: ${JSON.stringify(result)}`);
-        assert.equal(result.code, "repository_untrusted", `${boundary}/${action}`);
+        assert.equal(result.code, "repository_origin_untrusted", `${boundary}/${action}`);
         assert.equal(result.status, "partial", `${boundary}/${action}: the start mutation is not erased`);
         assert.equal(result.partial, "agent_started", `${boundary}/${action}`);
         assert.equal(result.leaseId, undefined, `${boundary}/${action}: no obsolete lease id is reported`);

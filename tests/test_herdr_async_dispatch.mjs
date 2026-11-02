@@ -69,12 +69,14 @@ function harness() {
   return tools;
 }
 
+// Why: continuous mode remains the default without an extra owner choice.
 test("continuous is the default dispatch mode and turn-by-turn is explicit", () => {
   assert.equal(DEFAULT_MODE, "continuous");
   assert.deepEqual([...WORKER_DISPATCH_MODES], ["continuous", "turn-by-turn"]);
   assert.deepEqual(harness(), ["agentic_worker_dispatch"]);
 });
 
+// Why: liveness observation must not grant a worker control of tasks.
 test("pulse observes liveness, state, and eligibility without authority", async () => {
   const fixture = herdrFixture({ statuses: { worker: "idle" } });
   const pulse = await workerPulse("worker", { cwd: root }, { runProcess: fixture.runProcess });
@@ -98,6 +100,7 @@ test("pulse observes liveness, state, and eligibility without authority", async 
   );
 });
 
+// Why: task selection must skip blocked items without creating or mutating cards.
 test("queue progression observes the next dispatchable item without creating cards", () => {
   const store = taskStore([
     { id: "1", status: "completed" },
@@ -115,6 +118,7 @@ test("queue progression observes the next dispatchable item without creating car
   assert.throws(() => nextDispatchableTask({ list: () => "nope" }), (error) => error.code === "task-store-invalid");
 });
 
+// Why: completed exchanges need one attributable report and a bounded stop.
 test("continuous journey collates one marked report and stops when the queue is exhausted", async () => {
   const fixture = herdrFixture();
   const tasks = [
@@ -140,6 +144,7 @@ test("continuous journey collates one marked report and stops when the queue is 
   assert.equal(journey.persisted, false);
 });
 
+// Why: dispatch cannot mint cards, impersonate a coordinator, or resend failures.
 test("prohibited effects: no card creation, no coordinator role, headless denied, no retries", async () => {
   // Card creation is not in the surface: the journey only reads the store.
   const store = taskStore([{ id: "1", status: "pending" }]);
@@ -210,6 +215,7 @@ test("prohibited effects: no card creation, no coordinator role, headless denied
   assert.equal(cancelled.stepCount, 0);
 });
 
+// Why: a turn-by-turn journey must stop after one exchange.
 test("turn-by-turn is explicit opt-in and stops after the first step", async () => {
   const fixture = herdrFixture();
   const journey = await runWorkerJourney(
@@ -224,6 +230,7 @@ test("turn-by-turn is explicit opt-in and stops after the first step", async () 
   assert.equal(fixture.calls.filter((call) => call.action === "prompt").length, 1);
 });
 
+// Why: unavailable workers need an explicit terminal status rather than a prompt.
 test("role-blocked and non-eligible workers end the journey explicitly", async () => {
   const blocked = await runWorkerJourney(
     { action: "dispatch", role: "worker", stepPrompt: "x" },
@@ -255,6 +262,7 @@ test("role-blocked and non-eligible workers end the journey explicitly", async (
   assert.equal(working.handoff.attempted, false, "no spawn seam configured, no handoff attempted");
 });
 
+// Why: the journey must stop at its declared exchange limit.
 test("journeys are bounded by maxSteps, not a wall-clock timeout", async () => {
   const fixture = herdrFixture();
   const journey = await runWorkerJourney(
@@ -270,6 +278,7 @@ test("journeys are bounded by maxSteps, not a wall-clock timeout", async () => {
   assert.equal(journey.schema, WORKER_DISPATCH_SCHEMA);
 });
 
+// Why: exchange bounds must reject invalid counts and honor the default cap.
 test("maxSteps defaults to 50, accepts up to 200, and rejects out-of-bound values", async () => {
   const overBound = await runWorkerJourney(
     { action: "dispatch", role: "worker", maxSteps: 201, stepPrompt: "x" },
@@ -300,6 +309,7 @@ test("maxSteps defaults to 50, accepts up to 200, and rejects out-of-bound value
   assert.equal(fixture.calls.filter((call) => call.action === "prompt").length, 50);
 });
 
+// Why: a pre-task busy worker must be classified without a handoff.
 test("a worker not idle across observed exchange cycles is unresponsive and ends explicitly", async () => {
   const journey = await runWorkerJourney(
     { action: "dispatch", role: "worker", stepPrompt: "x" },
@@ -319,6 +329,7 @@ test("a worker not idle across observed exchange cycles is unresponsive and ends
   assert.match(journey.handoff.reason, /no task selected/);
 });
 
+// Why: no selected task means no replacement confirmation or spawn.
 test("confirmed replacement before task selection never confirms or spawns", async () => {
   for (const status of ["working"]) {
     let confirmations = 0;
@@ -342,6 +353,7 @@ test("confirmed replacement before task selection never confirms or spawns", asy
   }
 });
 
+// Why: only a stuck exchange with a selected task can attempt a handoff.
 test("unresponsive-session replacement handoff records the handoff and reuses task cards", async () => {
   const spawned = [];
   const fixture = herdrFixture();
@@ -399,6 +411,7 @@ test("unresponsive-session replacement handoff records the handoff and reuses ta
   assert.equal(stalled.stepCount, 0, "the stuck exchange is never retried on the same worker");
 });
 
+// Why: a frozen cast can authorize an in-scope replacement without a new dialog.
 test("autonomous in-cast replacement skips interactive confirmation", async () => {
   let confirmations = 0;
   let replacement;
@@ -432,6 +445,7 @@ test("autonomous in-cast replacement skips interactive confirmation", async () =
   assert.equal(Object.isFrozen(journey.cast.models.worker), true);
 });
 
+// Why: an out-of-cast candidate must be reported without starting an agent.
 test("autonomous out-of-cast replacement is recorded and refused without spawning", async () => {
   let spawnAttempts = 0;
   const journey = await runWorkerJourney(
@@ -468,6 +482,7 @@ test("autonomous out-of-cast replacement is recorded and refused without spawnin
   assert.match(journey.report, /handoff: attempted=true ok=false role=reviewer reason=outside-cast/);
 });
 
+// Why: dispatch cannot gain a direct pane-management surface.
 test("prohibited effects unchanged: handoff spawns through the lifecycle boundary only", () => {
   // The dispatch module exposes no pane/agent management commands: its only
   // registration is the single dispatch/pulse tool.
@@ -477,29 +492,39 @@ test("prohibited effects unchanged: handoff spawns through the lifecycle boundar
   assert.deepEqual(tools, ["agentic_worker_dispatch"]);
 });
 
+// Why: a trusted but unresponsive worker without a selected task cannot initiate a replacement spawn.
 test("production wiring: pre-task unresponsive worker cannot trigger lifecycle spawn", async (t) => {
   const { executeHerdrSpawnWorker } = await import("../scripts/enforcement/herdr_lifecycle_pi.js");
   const lifecycleCalls = [];
-  // Hermetic trusted-repository setup: the lifecycle resolves the worker
-  // registry from the coordinator cwd (repo-local first, then the Pi profile
-  // config), and the worker repository must be a Git root sibling. Build a
-  // throwaway coordinator + git-rooted worker repo and chdir into the
-  // coordinator for the duration of the test.
-  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+  // Hermetic trusted-repository setup: communication checks the canonical
+  // sibling Git root and its configured origin owner before classifying the
+  // worker. Give the fixture that identity without granting a spawn.
+  const { mkdtempSync, mkdirSync, writeFileSync, realpathSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const { execFileSync } = await import("node:child_process");
-  const tempBase = mkdtempSync(join(tmpdir(), "herdr-handoff-"));
+  const tempBase = realpathSync(mkdtempSync(join(tmpdir(), "herdr-handoff-")));
   const coordinator = join(tempBase, "coordinator");
   const workerRepo = join(tempBase, "worker-repo");
-  mkdirSync(join(coordinator, "config"), { recursive: true });
+  const profile = join(tempBase, "profile");
+  const previousProfile = process.env.PI_CODING_AGENT_DIR;
+  mkdirSync(coordinator, { recursive: true });
   mkdirSync(workerRepo, { recursive: true });
-  writeFileSync(join(coordinator, "config", "herdr-worker-repositories.v1.json"),
-    JSON.stringify({ schema: "agentic-driver.herdr-worker-repositories.v1", repositories: ["worker-repo"] }));
   execFileSync("git", ["-C", workerRepo, "init"]); // git root check
+  execFileSync("git", ["-C", workerRepo, "remote", "add", "origin", "git@github.com:evoclock/worker-repo.git"]);
+  mkdirSync(join(profile, "config"), { recursive: true });
+  writeFileSync(join(profile, "config", "relay-authority.v1.json"), JSON.stringify({
+    schema: "relay-authority.v1", githubOwner: "evoclock", denyRepositories: [],
+  }));
   const originalCwd = process.cwd();
+  process.env.PI_CODING_AGENT_DIR = profile;
   process.chdir(coordinator);
-  t.after(() => { process.chdir(originalCwd); rmSync(tempBase, { recursive: true, force: true }); });
+  t.after(() => {
+    process.chdir(originalCwd);
+    if (previousProfile === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousProfile;
+    rmSync(tempBase, { recursive: true, force: true });
+  });
 
   const root = workerRepo;
   const model = "ds4/deepseek-v4-flash";
@@ -545,12 +570,13 @@ test("production wiring: pre-task unresponsive worker cannot trigger lifecycle s
       spawnReplacement: spawnSeam,
     },
   );
-  assert.equal(journey.status, "worker-unresponsive");
+  assert.equal(journey.status, "worker-unresponsive", JSON.stringify(journey));
   assert.equal(journey.handoff.attempted, false);
   assert.match(journey.handoff.reason, /no task selected/);
   assert.deepEqual(lifecycleCalls, [], "the lifecycle boundary must not be called without a selected task");
 });
 
+// Why: replacements must record the exchange gap before continuing.
 test("AJ-4: autonomous replacement spawn with gap analysis", async () => {
   const spawned = [];
   const fixture = herdrFixture({ statuses: { worker: "idle" } });
@@ -571,6 +597,7 @@ test("AJ-4: autonomous replacement spawn with gap analysis", async () => {
   assert.ok(journey.steps.some(s => s.status === "replaced"), "the replacement exchange completed with a gap analysis");
 });
 
+// Why: repeated replacement without progress must end the bounded journey.
 test("AJ-4: forward-progress judgment exhausts after no progress", async () => {
   const fixture = herdrFixture({ statuses: { worker: "idle" } });
   let promptCount = 0;
@@ -591,6 +618,7 @@ test("AJ-4: forward-progress judgment exhausts after no progress", async () => {
   assert.equal(journey.status, "worker-unresponsive-exhausted");
 });
 
+// Why: the confirmed-default handoff must preserve its prior behavior.
 test("AJ-4: confirmed-default keeps the existing handoff path", async () => {
   const fixture = herdrFixture({ statuses: { worker: "idle" } });
   const runProcess = async ({ argv }) => {
@@ -606,6 +634,7 @@ test("AJ-4: confirmed-default keeps the existing handoff path", async () => {
   assert.equal(journey.status, "worker-unresponsive");
 });
 
+// Why: the cast must be materialized and frozen before autonomous use.
 test("AJ-cast: cast parameter validates and materializes the frozen cast", async () => {
   const fixture = herdrFixture({ statuses: { worker: "idle" } });
   const journey = await runWorkerJourney(
@@ -619,6 +648,7 @@ test("AJ-cast: cast parameter validates and materializes the frozen cast", async
   assert.deepEqual(journey.cast.models.reviewer, ["review-model"]);
 });
 
+// Why: invalid role names must not become cast identities.
 test("AJ-cast: invalid role names in the cast are rejected", async () => {
   const journey = await runWorkerJourney(
     { action: "dispatch", role: "worker", stepPrompt: "x", autonomy: "autonomous",
@@ -629,6 +659,7 @@ test("AJ-cast: invalid role names in the cast are rejected", async () => {
   assert.equal(journey.ok, false); assert.equal(journey.code, "cast-invalid");
 });
 
+// Why: absent cast data defaults to the assigned role only.
 test("AJ-cast: cast-less dispatch defaults to the dispatched role", async () => {
   const fixture = herdrFixture({ statuses: { worker: "idle" } });
   const journey = await runWorkerJourney(
@@ -640,6 +671,7 @@ test("AJ-cast: cast-less dispatch defaults to the dispatched role", async () => 
   assert.deepEqual(journey.cast.roles, ["worker"]);
 });
 
+// Why: a review marker must end the journey at the handoff point.
 test("review_requested: a report carrying the review marker terminates the journey as review_requested", async () => {
   const fixture = herdrFixture({ reportFor: () => "implementation complete [REVIEW_REQUESTED] for handoff" });
   const journey = await runWorkerJourney(
@@ -653,6 +685,7 @@ test("review_requested: a report carrying the review marker terminates the journ
   assert.match(journey.report, /status: review_requested/);
 });
 
+// Why: journey observations must not expose unrelated repositories.
 test("journeys lists repository records across roles and filters by journey ID", async () => {
   const tools = [];
   registerWorkerDispatchInterface({ registerTool: (tool) => tools.push(tool) }, {
@@ -669,6 +702,7 @@ test("journeys lists repository records across roles and filters by journey ID",
   assert.deepEqual(filtered.details.journeys.map((entry) => entry.journeyId), ["second"]);
 });
 
+// Why: progress evidence must stay compact and non-authorizing.
 test("progress snapshot: each completed step carries a compact observation, not authority", async () => {
   const fixture = herdrFixture();
   const journey = await runWorkerJourney(

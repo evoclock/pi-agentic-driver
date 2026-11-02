@@ -54,7 +54,7 @@ proofs for agentic workflows.
 
 - Pi tabs/panes: **only** `agentic_herdr_spawn_worker` / Pi **herdr** spawn (spelling **herdr**).
 - Never raw Herdr CLI from a bot shell, including agent start, prompt, read, wait, and pane send-keys. The attended-authority guard refuses those bash forms fail-closed. Use `agentic_herdr_communication` for bounded exchanges.
-- A registered-repository worker tab needs no per-spawn grant or dialog. Start a fresh Pi process after installation to load the updated tool.
+- A canonical owner-eligible repository needs no registry entry, repository-named workspace, per-spawn grant, or dialog. Start a fresh Pi process after installation to load the updated tool.
 - Default Pi model: the operator-named default until the operator names another.
 - Details for agents: [AGENTS.md](./AGENTS.md).
 
@@ -349,12 +349,10 @@ configured Pi worker roles running under [Herdr](https://herdr.dev/) (validated
 against Herdr 0.9.1; the trust seam accepts the Homebrew-managed herdr binary
 across versions rather than pinning one).
 
-- **List and observe.** The integration checks a repository-local
-  `config/herdr-worker-repositories.v1.json` first, then the same file in the
-  active Pi profile under `PI_CODING_AGENT_DIR` (the installed agent profile directory). If no
-  registry is available, spawning is refused and communication trusts only
-  the current repository; malformed registries are rejected. Canonical path
-  checks reject unlisted or symlink-escaped repositories.
+- **List and observe.** The integration checks each observed sibling checkout's
+  canonical Git identity and configured origin owner. It does not require a
+  registry entry. Worktree targets require a matching Treehouse lease; a
+  symlink-escaped checkout is refused.
 - **Submit once and observe separately.** A prompt returns an immediate,
   non-authorizing delivery receipt. The `delivery` action can report queued,
   delivered, answered, failed, unknown, or unattributed. A marked answer is
@@ -367,10 +365,9 @@ across versions rather than pinning one).
 - **Grant nothing.** Fixed argv, `shell: false`, a pinned executable, the
   coordinator role class denied. Results come back as untrusted evidence. The
   tool cannot control panes, start agents, run shells, or create authority.
-- **Scale to many workers.** The trusted registry accepts up to 32 worker
-  repositories, and any dynamic non-coordinator role within them is eligible.
-  Fan-out is sequential by design: one role per prompt, one complete
-  exchange, no broadcast primitive.
+- **Scale to many workers.** Eligible sibling repositories can use dynamic
+  non-coordinator roles. Fan-out is sequential by design: one role per
+  prompt, one complete exchange, no broadcast primitive.
 
 </details>
 
@@ -381,21 +378,22 @@ The `agentic_herdr_spawn_worker` tool turns one natural-language request into He
 native lifecycle. Choose tab placement, a safe role label, a model from the
 active Pi model roster, and a trusted repository. The extension:
 
-- creates a labelled tab (coordinator pane splits are refused);
+- creates a labelled tab in the coordinator's existing workspace (coordinator pane splits are refused);
 - starts exactly one Pi agent in it;
 - verifies the role, model arguments, pane identity, and canonical repository;
-- resolves the model against the installed Pi roster and the active profile's
-  `config/model-route-policy.v1.local.json` before spawning; missing, invalid,
-  ambiguous, forbidden, or unbudgeted routes fail closed;
+- resolves the model against the installed Pi roster; exact installed models
+  from known subscription providers need no individual route entry in
+  `config/model-route-policy.v1.local.json`, while unknown providers,
+  forbidden routes, ambiguous names, and unbudgeted gateways still fail closed;
 - optionally accepts one explicit worktree target: it must be the canonical Git
-  worktree root of that same registered repository and carry an active
+  worktree root of that same eligible repository and carry an active
   Treehouse lease observed read-only, and it is revalidated after preflight
   and between mutations;
 - starts ordinary guarded workers without a per-spawn grant or native dialog;
   an explicitly supplied legacy ledger grant is still validated;
 - when a legacy grant is supplied, requires it to cover the repository, action,
-  model, role and exact worktree path; ordinary spawns instead rely on registry
-  trust and active lease identity;
+  model, role and exact worktree path; ordinary spawns instead verify Git
+  identity, origin owner, and active lease identity;
 - treats an explicit empty `models` or `roles` list on a ledger grant as any
   model or role; a missing list still fails closed;
 - uses fixed argv with `shell: false` and no arbitrary Herdr or shell surface;

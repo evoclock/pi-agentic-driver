@@ -19,7 +19,13 @@ repo=evoclock/pi-agentic-driver
 scratch="$PWD/.ci-buildkite/${BUILDKITE_BUILD_ID:-local}-${mode}"
 test ! -e "$scratch"
 mkdir -p "$scratch"
-gh api "repos/$repo/pulls/$pr" > "$scratch/pr.json"
+curl --fail --silent --show-error \
+  --connect-timeout 10 --max-time 30 \
+  --header "Authorization: Bearer $GH_TOKEN" \
+  --header 'Accept: application/vnd.github+json' \
+  --header 'X-GitHub-Api-Version: 2022-11-28' \
+  --output "$scratch/pr.json" \
+  "https://api.github.com/repos/$repo/pulls/$pr"
 base_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["base"]["sha"])' "$scratch/pr.json")"
 git fetch --quiet origin "$base_sha"
 case "$mode" in

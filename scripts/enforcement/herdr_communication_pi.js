@@ -8,10 +8,10 @@ import {
   readFileSync,
   realpathSync,
   statSync,
+  lstatSync,
 } from "node:fs";
 import { spawn } from "node:child_process";
-import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 export const HERDR_COMMUNICATION_TOOL = "agentic_herdr_communication";
 export const HERDR_COMMUNICATION_SCHEMA = "agentic-driver.herdr-communication.v1";
@@ -50,9 +50,6 @@ const IDEMPOTENCY_WINDOW_MS = 120_000;
 // configured production path in this package.
 export const TRUSTED_HERDR_EXECUTABLE = "/opt/homebrew/bin/herdr";
 const TRUSTED_HERDR_REALPATH_PATTERN = /\/Cellar\/herdr\/[0-9]+\.[0-9]+\.[0-9]+\/bin\/herdr$/;
-const WORKER_REPOSITORY_REGISTRY = "config/herdr-worker-repositories.v1.json";
-const WORKER_REPOSITORY_SCHEMA = "agentic-driver.herdr-worker-repositories.v1";
-const WORKER_REPOSITORY_FIELDS = new Set(["schema", "repositories"]);
 const MAX_PROMPT_BYTES = 32 * 1024;
 const MAX_PROCESS_OUTPUT_BYTES = 128 * 1024;
 const MAX_FAILURE_DIAGNOSTIC_BYTES = 4 * 1024;
@@ -265,115 +262,45 @@ function sameRepository(left, right) {
   return observed.real === trusted.real;
 }
 
-function validateWorkerRepositoryRegistry(registry) {
-  const names = registry?.repositories;
-  const keys = isPlainObject(registry) ? Object.keys(registry) : [];
-  if (!isPlainObject(registry)
-      || keys.length !== WORKER_REPOSITORY_FIELDS.size
-      || keys.some((key) => !WORKER_REPOSITORY_FIELDS.has(key))
-      || registry.schema !== WORKER_REPOSITORY_SCHEMA
-      || !Array.isArray(names)
-      || names.length < 1
-      || names.length > 32
-      || new Set(names).size !== names.length
-      || names.some((name) => typeof name !== "string"
-        || name.length < 1
-        || name.length > 64
-        || !HERDR_ROLE_REGEXP.test(name))) {
-    throw communicationError("worker_registry_invalid", "the Herdr worker repository registry is not trusted");
-  }
-  return names;
-}
-
-function checkedRegistryPath(primary) {
-  const registryPath = resolve(primary, WORKER_REPOSITORY_REGISTRY);
-  try {
-    const primaryReal = realpathSync(primary);
-    const registryReal = realpathSync(registryPath);
-    if (registryReal !== resolve(primaryReal, WORKER_REPOSITORY_REGISTRY)) {
-      throw communicationError("worker_registry_invalid", "the Herdr worker repository registry escapes the configured repository");
-    }
-    return registryPath;
-  } catch (error) {
-    if (error instanceof HerdrCommunicationError) throw error;
-    if (error?.code !== "ENOENT") {
-      throw communicationError("worker_registry_invalid", "the Herdr worker repository registry could not be canonicalized");
-    }
-  }
-  // Registry lookup order (coordinator decision): the session repository's
-  // own config first; when missing (ENOENT only) the active Pi profile's
-  // shared config under {PI_CODING_AGENT_DIR}/config/ (fallback
-  // the installed agent config directory). When neither exists, return the repo-local path so
-  // the caller's primary-only fallback applies exactly as before.
-  const profileDir = process.env.PI_CODING_AGENT_DIR;
-  const base = typeof profileDir === "string" && profileDir.trim()
-    ? resolve(profileDir.trim())
-    : resolve(homedir(), ".pi", "agent");
-  const sharedPath = resolve(base, WORKER_REPOSITORY_REGISTRY);
-  try {
-    const baseReal = realpathSync(base);
-    const sharedReal = realpathSync(sharedPath);
-    if (sharedReal !== resolve(baseReal, WORKER_REPOSITORY_REGISTRY)) {
-      throw communicationError("worker_registry_invalid", "the Herdr worker repository registry escapes the profile configuration");
-    }
-    return sharedPath;
-  } catch (error) {
-    if (error instanceof HerdrCommunicationError) throw error;
-    if (error?.code === "ENOENT") return registryPath;
-    throw communicationError("worker_registry_invalid", "the Herdr worker repository registry could not be canonicalized");
-  }
-}
-
-function checkedWorkerRepositoryPath(primary, name) {
-  const parent = resolve(primary, "..");
-  const candidate = resolve(parent, name);
-  try {
-    const parentReal = realpathSync(parent);
-    const candidateReal = realpathSync(candidate);
-    // Registry names are direct sibling names. A symlink at that entry is not
-    // a canonical sibling, even when it points at another readable directory.
-    if (candidateReal !== resolve(parentReal, name)) {
-      throw communicationError("worker_registry_invalid", "the Herdr worker repository registry contains a symlink escape");
-    }
-  } catch (error) {
-    if (error instanceof HerdrCommunicationError) throw error;
-    if (error?.code === "ENOENT") return undefined;
-    throw communicationError("worker_registry_invalid", "a configured Herdr worker repository could not be canonicalized");
-  }
-  return candidate;
-}
-
 function trustedRepositories(primary, options = {}) {
   const normalizedPrimary = normalizeRepository(primary);
   const repositories = new Set([normalizedPrimary]);
-  const trusted = { roots: repositories, treehouseStatus: options.treehouseStatus };
-  const registryPath = checkedRegistryPath(normalizedPrimary);
-  let raw;
-  try {
-    raw = readFileSync(registryPath, "utf8");
-  } catch (error) {
-    if (error?.code === "ENOENT") return trusted;
-    throw communicationError("worker_registry_invalid", "the Herdr worker repository registry could not be read");
-  }
-  let registry;
-  try {
-    registry = JSON.parse(raw);
-  } catch {
-    throw communicationError("worker_registry_invalid", "the Herdr worker repository registry is invalid");
-  }
-  const names = validateWorkerRepositoryRegistry(registry);
-  for (const name of names) {
-    const candidate = checkedWorkerRepositoryPath(normalizedPrimary, name);
-    if (candidate) repositories.add(candidate);
-  }
-  return trusted;
+  // Each observed non-primary repository is verified at its own first use.
+  return { roots: repositories, treehouseStatus: options.treehouseStatus };
 }
 
 // Lifecycle imports this module for report markers. Load its resolver only at
 // the async entry point, after that cycle has initialized; no second trust rule.
 let resolveWorktreeSpawnTarget;
+let resolveTrustedSpawnRepository;
 async function loadWorktreeResolver() {
-  resolveWorktreeSpawnTarget ??= (await import("./herdr_lifecycle_pi.js")).resolveWorktreeSpawnTarget;
+  const lifecycle = await import("./herdr_lifecycle_pi.js");
+  resolveWorktreeSpawnTarget ??= lifecycle.resolveWorktreeSpawnTarget;
+  resolveTrustedSpawnRepository ??= lifecycle.resolveTrustedSpawnRepository;
+}
+
+// Resolve only the observed checkout, not an open-ended list of directories.
+// The lifecycle resolver verifies its canonical sibling and configured origin;
+// the worktree resolver then verifies Git administration and the live lease.
+function observedWorkerRoot(value, repositories) {
+  const primary = [...repositories.roots][0];
+  if (typeof resolveTrustedSpawnRepository !== "function") return undefined;
+  let name = basename(value);
+  try {
+    const dotGit = join(value, ".git");
+    if (lstatSync(dotGit).isFile()) {
+      const pointer = readFileSync(dotGit, "utf8");
+      if (pointer.length > 2048 || !pointer.startsWith("gitdir: ")) return undefined;
+      const admin = resolve(value, pointer.slice(8).trim());
+      name = basename(dirname(dirname(dirname(admin))));
+    }
+    const root = resolveTrustedSpawnRepository(primary, name);
+    if (!sameRepository(value, root)) {
+      resolveWorktreeSpawnTarget(root, value, { treehouseStatus: repositories.treehouseStatus });
+    }
+    repositories.roots.add(root);
+    return root;
+  } catch { return undefined; }
 }
 
 function worktreeRepository(value, repositories) {
@@ -384,7 +311,7 @@ function worktreeRepository(value, repositories) {
     } catch { // An unleased, unrelated, replaced, or non-canonical target is not trusted.
     }
   }
-  return undefined;
+  return observedWorkerRoot(value, repositories);
 }
 
 function repositoryAllowed(value, repositories) {

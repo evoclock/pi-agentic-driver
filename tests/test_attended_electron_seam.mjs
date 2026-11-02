@@ -94,9 +94,10 @@ function gitRepo(dir) {
 }
 
 function fixture(options = {}) {
-  const root = mkdtempSync(join(tmpdir(), "attended-electron-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "attended-electron-")));
   const coordinator = gitRepo(join(root, "coordinator"));
   const workerRoot = gitRepo(join(root, WORKER_REPO));
+  execFileSync("git", ["-C", workerRoot, "remote", "add", "origin", `git@github.com:evoclock/${WORKER_REPO}.git`]);
   const registryDir = join(coordinator, "config");
   mkdirSync(registryDir, { recursive: true });
   if (!options.noRegistry) {
@@ -112,6 +113,10 @@ function fixture(options = {}) {
   // an empty per-fixture profile so the shared config on the host machine can
   // never leak into the offline test decision.
   process.env.PI_CODING_AGENT_DIR = join(root, "profile");
+  mkdirSync(join(root, "profile", "config"), { recursive: true });
+  writeFileSync(join(root, "profile", "config", "relay-authority.v1.json"), JSON.stringify({
+    schema: "relay-authority.v1", githubOwner: "evoclock", denyRepositories: [],
+  }));
   const log = join(root, "herdr-log.jsonl");
   const fake = join(root, "fake-herdr.mjs");
   writeFileSync(fake, FAKE_HERDR);
@@ -148,7 +153,8 @@ function fixture(options = {}) {
   return { root, coordinator, workerRoot, log, herdrOptions, context, params };
 }
 
-test("spawn target requires a registered lowercase standalone Git root, not a worktree or symlink", () => {
+// Why: only a canonical standalone Git root with an eligible owner can be a worker repository.
+test("spawn target requires an owned lowercase standalone Git root, not a worktree or symlink", () => {
   const f = fixture({ registryNames: [WORKER_REPO, "other-work", "linked-work", "alias-work"] });
   try {
     assert.equal(resolveTrustedSpawnRepository(f.coordinator, WORKER_REPO), realpathSync(f.workerRoot));
@@ -156,7 +162,7 @@ test("spawn target requires a registered lowercase standalone Git root, not a wo
     execFileSync("git", ["-C", f.workerRoot, "worktree", "add", "-q", "--detach", join(f.root, "linked-work")]);
     assert.throws(() => resolveTrustedSpawnRepository(f.coordinator, "linked-work"), (error) => error.code === "repository_not_git_root");
     assert.throws(() => resolveTrustedSpawnRepository(f.coordinator, "Upper-work"), (error) => error.code === "repository_untrusted");
-    assert.throws(() => resolveTrustedSpawnRepository(f.coordinator, "unlisted"), (error) => error.code === "repository_untrusted");
+    assert.throws(() => resolveTrustedSpawnRepository(f.coordinator, "unlisted"), (error) => error.code === "repository_unavailable");
     // A registered lexical sibling cannot become a symlink to a different root.
     symlinkSync(join(f.root, "other-work"), join(f.root, "alias-work"));
     assert.throws(() => resolveTrustedSpawnRepository(f.coordinator, "alias-work"), (error) => error.code === "repository_untrusted");
@@ -176,6 +182,7 @@ function cleanup(root) {
   delete process.env.PI_CODING_AGENT_DIR;
 }
 
+// Why: attended Electron must not inherit the Pi TUI's session authority.
 test("the attended Electron context class is explicit and disjoint from the Pi TUI", () => {
   const electron = { mode: "electron-attended", hasUI: true, ui: { confirm: () => true }, cwd: "/tmp" };
   const tui = { mode: "tui", hasUI: true, ui: { confirm: () => true }, cwd: "/tmp" };
@@ -188,6 +195,7 @@ test("the attended Electron context class is explicit and disjoint from the Pi T
   assert.equal(isAttendedElectronContext({ mode: "electron-attended", hasUI: true, ui: { confirm: 5 }, cwd: "/tmp" }), false);
 });
 
+// Why: preflight must observe identity and availability before any mutation.
 test("preflight verifies every prerequisite read-only and observes duplicates once", async () => {
   const f = fixture();
   try {
@@ -206,12 +214,14 @@ test("preflight verifies every prerequisite read-only and observes duplicates on
   }
 });
 
-test("preflight refuses an untrusted repository before any Herdr call", async () => {
+// Why: a foreign-origin checkout must be refused before contacting Herdr.
+test("preflight refuses a foreign origin before any Herdr call", async () => {
   const f = fixture({ registryNames: ["other-repo"] });
+  execFileSync("git", ["-C", f.workerRoot, "remote", "set-url", "origin", "git@github.com:elsewhere/agents-work.git"]);
   try {
     const result = await preflightAttendedElectronSpawn(f.params, f.context, f.herdrOptions);
     assert.equal(result.ok, false);
-    assert.equal(result.code, "repository_untrusted");
+    assert.equal(result.code, "repository_origin_untrusted");
     assert.equal(result.status, "denied");
     assert.deepEqual(readLog(f.log), [], "no Herdr invocation happens for an untrusted repository");
   } finally {
@@ -219,18 +229,19 @@ test("preflight refuses an untrusted repository before any Herdr call", async ()
   }
 });
 
-test("preflight refuses a missing registry without fallback assumptions", async () => {
+// Why: an eligible owned checkout needs no registry entry.
+test("preflight accepts an eligible checkout with no prior registry", async () => {
   const f = fixture({ noRegistry: true });
   try {
     const result = await preflightAttendedElectronSpawn(f.params, f.context, f.herdrOptions);
-    assert.equal(result.ok, false);
-    assert.equal(result.code, "worker_registry_invalid");
-    assert.deepEqual(readLog(f.log), []);
+    assert.equal(result.status, "preflight-verified", JSON.stringify(result));
+    assert.deepEqual(readLog(f.log), [["agent", "list"]]);
   } finally {
     cleanup(f.root);
   }
 });
 
+// Why: an uninstalled model must not reach Herdr.
 test("preflight refuses a model outside the installed roll", async () => {
   const f = fixture({ model: "glm53flash/no-such-model" });
   try {
@@ -243,6 +254,7 @@ test("preflight refuses a model outside the installed roll", async () => {
   }
 });
 
+// Why: unavailable trusted transport must fail before a process is started.
 test("preflight refuses when the trusted executable is missing", async () => {
   const f = fixture({ missingExecutable: true });
   try {
@@ -255,6 +267,7 @@ test("preflight refuses when the trusted executable is missing", async () => {
   }
 });
 
+// Why: invalid host context cannot claim an attended Electron boundary.
 test("preflight refuses wrong context classes and missing host cwd", async () => {
   const f = fixture();
   try {
@@ -270,6 +283,7 @@ test("preflight refuses wrong context classes and missing host cwd", async () =>
   }
 });
 
+// Why: Electron has no coordinator pane identity to use for splits.
 test("pane placements are refused: no pane identity is manufactured or inherited", async () => {
   for (const placement of ["right", "below"]) {
     const f = fixture({ placement });
@@ -288,6 +302,7 @@ test("pane placements are refused: no pane identity is manufactured or inherited
   }
 });
 
+// Why: one confirmed tab and exact read-back must identify the worker.
 test("the commit stage performs one guarded verified start with exact argv and read-back", async () => {
   const f = fixture();
   const confirmations = [];
@@ -329,6 +344,7 @@ test("the commit stage performs one guarded verified start with exact argv and r
   }
 });
 
+// Why: one owner refusal must end the attempt without layout mutation.
 test("a denied confirmation stops before any mutation and is never re-asked", async () => {
   const f = fixture({ confirm: async () => false });
   try {
@@ -342,6 +358,7 @@ test("a denied confirmation stops before any mutation and is never re-asked", as
   }
 });
 
+// Why: a failed native dialog cannot be interpreted as a grant.
 test("a throwing confirmation is a structured refusal with no mutation", async () => {
   const f = fixture({ confirm: async () => { throw new Error("dialog crashed"); } });
   try {
@@ -355,6 +372,7 @@ test("a throwing confirmation is a structured refusal with no mutation", async (
   }
 });
 
+// Why: duplicate workers must be rejected before asking for confirmation.
 test("a duplicate live role is denied before the confirmation ask", async () => {
   const asked = [];
   const f = fixture({ mode: "duplicate", confirm: async () => { asked.push(1); return true; } });
@@ -369,23 +387,24 @@ test("a duplicate live role is denied before the confirmation ask", async () => 
   }
 });
 
-test("a post-confirmation registry race refuses before any mutation", async () => {
+// Why: an origin change after confirmation invalidates the pending start.
+test("a post-confirmation origin race refuses before any mutation", async () => {
   const f = fixture();
-  const registryPath = join(f.coordinator, "config", "herdr-worker-repositories.v1.json");
   f.context.ui.confirm = async () => {
-    rmSync(registryPath);
+    execFileSync("git", ["-C", f.workerRoot, "remote", "set-url", "origin", "git@github.com:elsewhere/agents-work.git"]);
     return true;
   };
   try {
     const result = await executeHerdrSpawnWorkerAttendedElectron(f.params, f.context, f.herdrOptions);
     assert.equal(result.ok, false);
-    assert.equal(result.code, "worker_registry_invalid");
-    assert.deepEqual(readLog(f.log), [["agent", "list"]], "no tab was created for a raced-away registry");
+    assert.equal(result.code, "repository_origin_untrusted");
+    assert.deepEqual(readLog(f.log), [["agent", "list"]], "no tab was created after an origin change");
   } finally {
     cleanup(f.root);
   }
 });
 
+// Why: failed starts must preserve the created tab without automatic retries.
 test("a failed start is one attempt only and reports a partial with cleanup guidance", async () => {
   const f = fixture({ mode: "start-fail" });
   try {
@@ -403,6 +422,7 @@ test("a failed start is one attempt only and reports a partial with cleanup guid
   }
 });
 
+// Why: uncertain layout failures must remain visible as partial state.
 test("a tab-creation failure is one attempt only and reports a partial", async () => {
   const f = fixture({ mode: "tab-fail" });
   try {
@@ -418,6 +438,7 @@ test("a tab-creation failure is one attempt only and reports a partial", async (
   }
 });
 
+// Why: the observed worker model must match the requested model exactly.
 test("a read-back model-argv mismatch fails closed after the one start", async () => {
   const f = fixture({ mode: "wrong-model" });
   try {
@@ -433,6 +454,7 @@ test("a read-back model-argv mismatch fails closed after the one start", async (
   }
 });
 
+// Why: Pulse must route each host context through its own guarded executor.
 test("the pulse seam dispatches by explicit context class and fails closed when unbound", async () => {
   const f = fixture();
   const canonicalRepository = join(dirname(f.coordinator), WORKER_REPO);
@@ -484,6 +506,7 @@ test("the pulse seam dispatches by explicit context class and fails closed when 
   }
 });
 
+// Why: TUI starts cannot manufacture a coordinator pane when it is absent.
 test("a native TUI lifecycle still refuses a missing HERDR_PANE_ID (never manufactured)", async () => {
   const f = fixture();
   try {

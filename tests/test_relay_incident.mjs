@@ -21,7 +21,7 @@ function setup() {
     const dir = join(root, name); mkdirSync(dir); execFileSync("git", ["init", "-q", dir]);
     execFileSync("git", ["-C", dir, "remote", "add", "origin", `https://github.com/${owner}/${name}.git`]);
   }
-  writeFileSync(join(profile, "config/relay-authority.v1.json"), JSON.stringify({ githubOwner: owner, relayers: [{ relayer: "bot", channel: "chat", maxTier: 2 }], denyRepositories: ["vogelkop-*", "self-healing-swarm"] }));
+  writeFileSync(join(profile, "config/relay-authority.v1.json"), JSON.stringify({ schema: "relay-authority.v1", githubOwner: owner, relayers: [{ relayer: "bot", channel: "chat", maxTier: 2 }], denyRepositories: ["vogelkop-*", "self-healing-swarm"] }));
   writeFileSync(join(coordinator, "config-placeholder"), "");
   writeFileSync(join(profile, "config/herdr-worker-repositories.v1.json"), JSON.stringify({ schema: "agentic-driver.herdr-worker-repositories.v1", repositories: names.slice(0, 3) }));
   const log = join(root, "herdr.log");
@@ -113,11 +113,12 @@ test("headless spawn without approval starts and reads back one worker", async (
   assert.equal(calls.filter((argv) => argv[0] === "agent" && argv[1] === "get").length, 1);
   assert.equal(existsSync(join(f.profile, "approvals/uses.v1.jsonl")), false);
 });
-// Why: approvals cannot override checkout and registry identity.
-test("valid authority does not bypass registry, realpath, worktree or Git common-dir checks", async () => {
-  for (const kind of ["unregistered", "symlink", "worktree", "external-common"]) {
+// Why: approvals cannot override canonical checkout and origin identity.
+test("valid authority does not bypass origin, realpath, worktree or Git common-dir checks", async () => {
+  for (const kind of ["foreign-origin", "symlink", "worktree", "external-common"]) {
     const f = setup();
-    const name = kind === "unregistered" ? "agent-skill-vault" : kind === "symlink" ? "linked" : kind === "worktree" ? "detached" : "external-common";
+    const name = kind === "foreign-origin" ? "agent-skill-vault" : kind === "symlink" ? "linked" : kind === "worktree" ? "detached" : "external-common";
+    if (kind === "foreign-origin") execFileSync("git", ["-C", join(f.root, name), "remote", "set-url", "origin", "https://github.com/elsewhere/agent-skill-vault.git"]);
     if (kind === "symlink") symlinkSync(join(f.root, "alpha"), join(f.root, name));
     if (kind === "worktree") {
       execFileSync("git", ["-C", join(f.root, "alpha"), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "fixture"]);
@@ -131,7 +132,7 @@ test("valid authority does not bypass registry, realpath, worktree or Git common
       assert.notEqual(resolve(target, common), join(target, ".git"));
       assert.equal(execFileSync("git", ["-C", target, "rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim(), target);
     }
-    if (kind !== "unregistered") {
+    if (kind !== "foreign-origin") {
       const file = join(f.profile, "config/herdr-worker-repositories.v1.json");
       const registry = JSON.parse(readFileSync(file, "utf8"));
       registry.repositories.push(name);
@@ -140,7 +141,7 @@ test("valid authority does not bypass registry, realpath, worktree or Git common
     const entry = await recordApproval(f.profile, f.approval(name));
     const result = await executeHerdrSpawnWorker(params(name, entry.id), f.context, f.options);
     assert.equal(result.ok, false, `${kind}: ${JSON.stringify(result)}`);
-    assert.ok(["repository_untrusted", "repository_not_git_root"].includes(result.code), `${kind}: ${JSON.stringify(result)}`);
+    assert.ok(["repository_untrusted", "repository_not_git_root", "repository_origin_untrusted"].includes(result.code), `${kind}: ${JSON.stringify(result)}`);
     assert.equal(existsSync(f.log), false, `${kind}: Herdr must not be called`);
     const uses = join(f.profile, "approvals/uses.v1.jsonl");
     assert.equal(existsSync(uses), false, `${kind}: no use or reservation is recorded`);
@@ -325,7 +326,7 @@ test("a repository-only ledger grant does not cover a new worktree target", asyn
   assert.equal(accepted.worktreePath, target);
   assert.equal(accepted.leaseId, leaseId);
 });
-for (const revokedAuthority of ["lease", "registry"]) {
+for (const revokedAuthority of ["lease", "origin"]) {
   // Why: revocation after spawn must preserve the true partial state.
   test(`${revokedAuthority} revocation during final approval writer-lock wait preserves agent_started partial`, async () => {
     const f = setup();
@@ -356,12 +357,7 @@ for (const revokedAuthority of ["lease", "registry"]) {
           auditPendingWhenRevoked = existsSync(lock)
             && !readFileSync(uses, "utf8").includes('"result":"spawned"');
           if (revokedAuthority === "lease") leased = false;
-          else {
-            const registryPath = join(f.profile, "config/herdr-worker-repositories.v1.json");
-            const registry = JSON.parse(readFileSync(registryPath, "utf8"));
-            registry.repositories = registry.repositories.filter((name) => name !== "alpha");
-            writeFileSync(registryPath, JSON.stringify(registry));
-          }
+          else execFileSync("git", ["-C", repo, "remote", "set-url", "origin", "https://github.com/elsewhere/alpha.git"]);
           revoked = true;
           renameSync(lock, `${lock}.retained`);
         }, 20);
@@ -378,13 +374,13 @@ for (const revokedAuthority of ["lease", "registry"]) {
     assert.equal(result.ok, false, JSON.stringify(result));
     assert.equal(result.status, "partial");
     assert.equal(result.partial, "agent_started");
-    assert.equal(result.code, revokedAuthority === "lease" ? "worktree_target_changed" : "repository_untrusted");
+    assert.equal(result.code, revokedAuthority === "lease" ? "worktree_target_changed" : "repository_origin_untrusted");
     assert.equal(result.paneId, "w1:p1");
     assert.equal(result.tabId, "w1:t1");
     assert.match(result.cleanup, /worker agent is live/);
     const calls = readFileSync(f.log, "utf8").split("\n").filter(Boolean).map(JSON.parse);
     assert.deepEqual(calls.map((argv) => argv.slice(0, 2)), [
-      ["agent", "list"], ["workspace", "list"], ["pane", "list"], ["tab", "create"], ["agent", "start"], ["agent", "get"], ["pane", "get"],
+      ["agent", "list"], ["pane", "current"], ["tab", "create"], ["agent", "start"], ["agent", "get"], ["pane", "get"],
     ], "no retry or automatic cleanup after the agent starts");
   });
 }
