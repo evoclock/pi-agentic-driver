@@ -36,6 +36,7 @@ const roles = ["reviewer", "reviewer-foo", "foo-reviewer"];
 test.beforeEach(() => resetHerdrDeliveriesForTests());
 
 function leasedWorktreeFixture() {
+  mkdirSync(join(root, "scratch"), { recursive: true });
   const directory = mkdtempSync(join(root, "scratch/herdr-communication-worktree-"));
   const repository = join(directory, "trusted");
   const worktree = join(directory, "pool", "trusted");
