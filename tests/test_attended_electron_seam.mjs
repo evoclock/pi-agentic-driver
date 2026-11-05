@@ -5,7 +5,7 @@
 // electron-attended context class (never a Pi-TUI representation), the
 // read-only preflight stage (context, closed parameters, trusted repository,
 // installed model roll, executable availability, duplicate-role observation),
-// and the single-attempt commit stage (one native confirmation, tab-only
+// and the single-attempt commit stage (no spawn confirmation, tab-only
 // topology, exact argv/read-back, no retry). All Herdr interaction goes
 // through a REAL fake Herdr process (testExecutablePath with shell:false
 // spawn), never a recorder replacing the guarded lifecycle. No live Herdr,
@@ -191,8 +191,7 @@ test("the attended Electron context class is explicit and disjoint from the Pi T
   assert.equal(isAttendedElectronContext(tui), false, "a TUI context must never satisfy the Electron predicate");
   assert.equal(isNativeTuiContext(tui), true);
   assert.equal(isAttendedElectronContext(null), false);
-  assert.equal(isAttendedElectronContext({ mode: "electron-attended", hasUI: true, ui: null, cwd: "/tmp" }), false);
-  assert.equal(isAttendedElectronContext({ mode: "electron-attended", hasUI: true, ui: { confirm: 5 }, cwd: "/tmp" }), false);
+  assert.equal(isAttendedElectronContext({ mode: "electron-attended", hasUI: false, cwd: "/tmp" }), true);
 });
 
 // Why: preflight must observe identity and availability before any mutation.
@@ -302,14 +301,11 @@ test("pane placements are refused: no pane identity is manufactured or inherited
   }
 });
 
-// Why: one confirmed tab and exact read-back must identify the worker.
-test("the commit stage performs one guarded verified start with exact argv and read-back", async () => {
+// Why: a registered repo can start without UI or ledger; exact read-back identifies the worker.
+test("the commit stage starts headless without a ledger or confirmation and verifies read-back", async () => {
   const f = fixture();
-  const confirmations = [];
-  f.context.ui.confirm = async (title, message) => {
-    confirmations.push({ title, message });
-    return true;
-  };
+  f.context.hasUI = false;
+  f.context.ui = { confirm: () => { throw new Error("spawn must not confirm"); } };
   try {
     process.env.HERDR_PANE_ID = "w9:p99"; // must never be used or inherited
     const result = await executeHerdrSpawnWorkerAttendedElectron(f.params, f.context, f.herdrOptions);
@@ -325,9 +321,6 @@ test("the commit stage performs one guarded verified start with exact argv and r
     assert.deepEqual(result.modelArgv, ["--model", MODEL]);
     assert.equal(result.repository, realpathSync(f.workerRoot));
     assert.equal(result.authorityCreated, false);
-    assert.equal(confirmations.length, 1, "exactly one native confirmation");
-    assert.ok(confirmations[0].message.includes("attended-Electron"));
-    assert.ok(confirmations[0].message.includes(MODEL));
     assert.deepEqual(readLog(f.log), [
       ["agent", "list"],
       ["tab", "create", "--workspace", "w7", "--cwd", realpathSync(f.workerRoot), "--no-focus", "--label", "worker"],
@@ -344,36 +337,8 @@ test("the commit stage performs one guarded verified start with exact argv and r
   }
 });
 
-// Why: one owner refusal must end the attempt without layout mutation.
-test("a denied confirmation stops before any mutation and is never re-asked", async () => {
-  const f = fixture({ confirm: async () => false });
-  try {
-    const result = await executeHerdrSpawnWorkerAttendedElectron(f.params, f.context, f.herdrOptions);
-    assert.equal(result.ok, false);
-    assert.equal(result.code, "confirmation_denied");
-    assert.equal(result.status, "stopped");
-    assert.deepEqual(readLog(f.log), [["agent", "list"]], "only the read-only duplicate observation ran");
-  } finally {
-    cleanup(f.root);
-  }
-});
-
-// Why: a failed native dialog cannot be interpreted as a grant.
-test("a throwing confirmation is a structured refusal with no mutation", async () => {
-  const f = fixture({ confirm: async () => { throw new Error("dialog crashed"); } });
-  try {
-    const result = await executeHerdrSpawnWorkerAttendedElectron(f.params, f.context, f.herdrOptions);
-    assert.equal(result.ok, false);
-    assert.equal(result.code, "confirmation_failed");
-    assert.equal(result.status, "blocked");
-    assert.deepEqual(readLog(f.log), [["agent", "list"]]);
-  } finally {
-    cleanup(f.root);
-  }
-});
-
-// Why: duplicate workers must be rejected before asking for confirmation.
-test("a duplicate live role is denied before the confirmation ask", async () => {
+// Why: duplicate workers are rejected before any layout mutation.
+test("a duplicate live role is denied before creating a tab", async () => {
   const asked = [];
   const f = fixture({ mode: "duplicate", confirm: async () => { asked.push(1); return true; } });
   try {
@@ -387,18 +352,17 @@ test("a duplicate live role is denied before the confirmation ask", async () => 
   }
 });
 
-// Why: an origin change after confirmation invalidates the pending start.
-test("a post-confirmation origin race refuses before any mutation", async () => {
+// Why: an untrusted repository is denied headless before contacting Herdr.
+test("headless commit refuses a foreign origin without creating a tab", async () => {
   const f = fixture();
-  f.context.ui.confirm = async () => {
-    execFileSync("git", ["-C", f.workerRoot, "remote", "set-url", "origin", "git@github.com:elsewhere/agents-work.git"]);
-    return true;
-  };
+  f.context.hasUI = false;
+  f.context.ui = undefined;
+  execFileSync("git", ["-C", f.workerRoot, "remote", "set-url", "origin", "git@github.com:elsewhere/agents-work.git"]);
   try {
     const result = await executeHerdrSpawnWorkerAttendedElectron(f.params, f.context, f.herdrOptions);
     assert.equal(result.ok, false);
     assert.equal(result.code, "repository_origin_untrusted");
-    assert.deepEqual(readLog(f.log), [["agent", "list"]], "no tab was created after an origin change");
+    assert.deepEqual(readLog(f.log), []);
   } finally {
     cleanup(f.root);
   }

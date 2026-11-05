@@ -1,5 +1,6 @@
 node_modules/
-scratch/
+scratch/*
+!scratch/.gitkeep
 .driver/test-gate-evidence/
 /scan-terms.local.json
 /.ci-buildkite/
@@ -25,3 +26,7 @@ skills/public-pr-wording/pr_wording_config.local.json
 config/model-route-policy.v1.local.json
 config/public-sync-terms.local.json
 skills/weekly-build-recap/banned.local.json
+.obsidian/
+.pad-scratch/
+.ci-scratch/
+.treehouse/

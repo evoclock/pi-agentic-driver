@@ -1429,15 +1429,15 @@ function toolResult(details) {
 //     it, which is why the commit stage re-validates everything and callers
 //     must preserve truthful claimed-but-not-started reconciliation.
 //   executeHerdrSpawnWorkerAttendedElectron — the single-attempt commit:
-//     one native owner confirmation from the host, then the same guarded
-//     tab create → agent start → agent get → pane get sequence with exact
+//     the same guarded tab create → agent start → agent get → pane get
+//     sequence with exact
 //     read-back. No retry, no automatic cleanup; failures report partial
 //     state with human cleanup guidance.
 function attendedElectronContextError(context) {
   if (!isAttendedElectronContext(context)) {
     throw lifecycleError(
       "attended_electron_context_required",
-      "the attended Electron boundary requires an explicit electron-attended context with a native confirm callback (never a Pi TUI representation)",
+      "the Electron boundary requires an explicit electron-attended context (never a Pi TUI representation)",
       "blocked",
     );
   }
@@ -1535,23 +1535,6 @@ export async function preflightAttendedElectronSpawn(params, context, options = 
   }
 }
 
-function attendedElectronConfirmBody(role, modelArgv, canonicalRoot, worktreeTarget = null) {
-  return [
-    "One guarded attended-Electron composite spawn: create one tab, then start and verify one Pi agent.",
-    `Role: ${role}`,
-    "Placement: individual tab (the Electron host has no Herdr session pane)",
-    `Model: ${modelArgv[1]} (argv: ${modelArgv.join(" ")})`,
-    `Repository: ${canonicalRoot}`,
-    ...(worktreeTarget
-      ? [
-        `Worktree target: ${worktreeTarget.worktreePath}`,
-        `Treehouse lease: ${worktreeTarget.leaseId}${worktreeTarget.leaseHolder ? ` (holder: ${worktreeTarget.leaseHolder})` : ""}`,
-      ]
-      : []),
-    "No rollback is automatic; a failed step leaves the created state for human cleanup.",
-  ].join("\n");
-}
-
 export async function executeHerdrSpawnWorkerAttendedElectron(params, context, options = {}, signal) {
   let request;
   try {
@@ -1570,30 +1553,10 @@ export async function executeHerdrSpawnWorkerAttendedElectron(params, context, o
     await observeDuplicateRole(spawnCwd, role, options, signal);
     const workspaceId = await availableWorkspace(canonicalRoot, options, signal);
 
-    // ONE native owner confirmation from the attended host. A denial is a
-    // stop; a throw is a structured refusal. Never re-asked, never retried.
-    let confirmed;
-    try {
-      confirmed = await context.ui.confirm(
-        "Spawn Herdr worker (attended Electron)",
-        attendedElectronConfirmBody(role, modelArgv, canonicalRoot, worktreeTarget),
-      );
-    } catch (error) {
-      throw lifecycleError(
-        "confirmation_failed",
-        `the attended confirmation failed: ${typeof error?.message === "string" ? error.message : "unknown error"}`,
-        "blocked",
-      );
-    }
-    if (confirmed !== true) {
-      return errorResult(lifecycleError("confirmation_denied", "native confirmation was not granted", "stopped"));
-    }
-
-    // Revalidation point after confirmation, before the first mutation. A
-    // change here is a post-confirmation race: the caller reports it as a
-    // refusal; nothing has been mutated yet.
+    // Revalidate after asynchronous preflight and before the first mutation.
+    // An identity or lease change here is refused without creating a tab.
     canonicalRoot = revalidateSpawnAuthority(
-      context.cwd, repository, canonicalRoot, request, worktreeTarget, options, "after confirmation",
+      context.cwd, repository, canonicalRoot, request, worktreeTarget, options, "after preflight",
     );
     if (request.worktreePath) spawnCwd = worktreeTarget.worktreePath;
 

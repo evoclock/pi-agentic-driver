@@ -335,6 +335,19 @@ test("registered repo + active exact lease spawns once without a UI or grant", a
   }
 });
 
+// Why: the Electron boundary must preserve exact lease checks without relying on a dialog.
+test("attended registered lease starts headless without a confirmation callback", async () => {
+  const f = fixture({ boundary: "attended" });
+  f.context.hasUI = false;
+  f.context.ui = undefined;
+  try {
+    const result = await executeHerdrSpawnWorkerAttendedElectron(f.params, f.context, f.herdrOptions);
+    assert.equal(result.status, "spawned", JSON.stringify(result));
+    assert.equal(result.worktreePath, realpathSync(f.worktree));
+    assert.equal(result.leaseId, LEASE_ID);
+  } finally { cleanup(f.root); }
+});
+
 // Observe the actual native dispatch, not a child's later log write. A queued
 // revocation may run after spawn but before the child executes its fake body.
 for (const boundary of ["tui", "attended"]) {
@@ -585,14 +598,12 @@ test("WT-01/STD-01/SPEC-003: repository+worktree replacement before mutation is 
   for (const boundary of ["tui", "attended"]) {
     const f = fixture({ boundary });
     const before = { ...snapshotGit(f.workerRoot), ...snapshotGit(f.worktree) };
-    if (boundary === "tui") {
-      process.env.HERDR_PANE_ID = "synthetic-pane";
-      f.herdrOptions.runProcess = (spec) => {
-        const stdout = execFileSync(spec.executable, spec.argv, { ...spec.spawnOptions, encoding: "utf8" });
-        if (spec.argv[0] === "agent" && spec.argv[1] === "list") replaceRepoAndWorktree(f);
-        return { code: 0, stdout, stderr: "" };
-      };
-    } else f.context.ui.confirm = async () => { replaceRepoAndWorktree(f); return true; };
+    if (boundary === "tui") process.env.HERDR_PANE_ID = "synthetic-pane";
+    f.herdrOptions.runProcess = (spec) => {
+      const stdout = execFileSync(spec.executable, spec.argv, { ...spec.spawnOptions, encoding: "utf8" });
+      if (spec.argv[0] === "agent" && spec.argv[1] === "list") replaceRepoAndWorktree(f);
+      return { code: 0, stdout, stderr: "" };
+    };
     try {
       const execute = boundary === "tui" ? executeHerdrSpawnWorker : executeHerdrSpawnWorkerAttendedElectron;
       const result = await execute(f.params, f.context, f.herdrOptions);
