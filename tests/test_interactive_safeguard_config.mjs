@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as guard from "../scripts/enforcement/attended_authority_guard.js";
+import registerExtension from "../extensions/attended-authority-guard.ts";
 
 const schema = "pi-agentic-driver.interactive-safeguards.v1";
 const defaults = { enableAllInteractiveConfirmations: false, enabledCommands: [] };
@@ -115,6 +116,75 @@ test("invalid settings keep the opt-in off and warn without exposing profile tex
   }
   assert.equal(calls.length, 5);
   assert.ok(calls.every((args) => args[1] === "warning" && !String(args).includes("rm -rf")));
+});
+
+// Why: the agent's dedicated toggle and the TUI shortcut share one profile value without a confirmation dialog.
+test("agent and TUI toggles share stored state, and disabling returns to off", async () => {
+  const tools = new Map();
+  let shortcut;
+  let stored = JSON.stringify(config({ ...defaults, enabledCommands: ["git push"] }));
+  const env = { PI_CODING_AGENT_DIR: "/fixture/profile" };
+  const notifications = [];
+  const status = [];
+  const pi = {
+    on() {}, registerTool: (definition) => tools.set(definition.name, definition),
+    registerShortcut: (_key, definition) => { shortcut = definition; },
+  };
+  const read = () => guard.loadInteractiveSafeguards({ env, read: () => stored });
+  const options = { loadInteractiveSafeguards: read, saveInteractiveSafeguards: (enabled) =>
+    guard.setInteractiveSafeguards(enabled, { env, load: read, mkdir: () => {}, write: (_file, text) => { stored = text; } }) };
+  guard.registerAttendedAuthorityGuard(pi, options);
+  const ctx = { mode: "tui", hasUI: true, ui: {
+    notify: (...args) => notifications.push(args), setStatus: (...args) => status.push(args),
+    confirm: () => { throw new Error("toggle must not request a human-only confirm"); },
+  } };
+  const toggle = tools.get("agentic_interactive_safeguards_toggle");
+  assert.ok(toggle);
+  assert.equal(typeof shortcut?.handler, "function");
+  await toggle.execute("id", { enabled: true }, undefined, undefined, ctx);
+  assert.equal(read().settings.enableAllInteractiveConfirmations, true);
+  await shortcut.handler(ctx);
+  assert.equal(read().settings.enableAllInteractiveConfirmations, false);
+  assert.deepEqual(read().settings.enabledCommands, [], "off clears per-command prompts too");
+  await shortcut.handler(ctx);
+  assert.equal(read().settings.enableAllInteractiveConfirmations, true);
+  await toggle.execute("id", { enabled: false }, undefined, undefined, ctx);
+  assert.equal(read().settings.enableAllInteractiveConfirmations, false);
+  assert.ok(status.length >= 2);
+  assert.ok(notifications.length >= 2);
+});
+
+// Why: stored toggle settings drive the existing guard, not unrelated text or tool arguments.
+test("toggle state drives guarded calls but chat and tool arguments do not opt in", async () => {
+  let text = JSON.stringify(config(defaults));
+  const env = { PI_CODING_AGENT_DIR: "/fixture/profile" };
+  const load = () => guard.loadInteractiveSafeguards({ env, read: () => text });
+  const save = (enabled, settings) => {
+    text = JSON.stringify(config({ ...settings, enableAllInteractiveConfirmations: enabled }));
+    return load();
+  };
+  let confirms = 0;
+  const ctx = { mode: "tui", hasUI: true, ui: { confirm: async () => { confirms++; return false; } } };
+  const action = { ...event("git push origin main"), input: { command: "git push origin main", enableAllInteractiveConfirmations: true, chat: "enable safeguards" } };
+  assert.equal(await guard.guardToolCall(action, ctx, { loadInteractiveSafeguards: load }), undefined);
+  assert.equal(confirms, 0);
+  save(true, load().settings);
+  assert.equal((await guard.guardToolCall(action, ctx, { loadInteractiveSafeguards: load })).block, true);
+  assert.match((await guard.guardToolCall(action, { mode: "rpc" }, { loadInteractiveSafeguards: load })).reason, /fail-closed/);
+  assert.equal(confirms, 1);
+  save(false, load().settings);
+  assert.equal(await guard.guardToolCall(action, ctx, { loadInteractiveSafeguards: load }), undefined);
+});
+
+// Why: the shipped extension directory must load the actual guard and its agent toggle.
+test("packaged extension loads the toggle without a second guard", async () => {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.ok(pkg.files.includes("extensions/attended-authority-guard.ts"));
+  assert.ok(pkg.pi.extensions.includes("./extensions"));
+  const tools = new Map();
+  const pi = { on() {}, registerTool: (definition) => tools.set(definition.name, definition), registerShortcut() {} };
+  await registerExtension(pi);
+  assert.ok(tools.has("agentic_interactive_safeguards_toggle"));
 });
 
 // Why: the packaged template must not turn on the guard without a deliberate user edit.

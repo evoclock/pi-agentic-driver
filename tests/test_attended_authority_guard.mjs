@@ -291,14 +291,14 @@ test("registration wires a non-authorizing decision evidence tool exactly once",
   const pi = { on: (name, fn) => handlers.push([name, fn]), registerTool: (tool) => tools.push(tool) };
   assert.deepEqual(registerAttendedAuthorityGuard(pi), { registered: true, schema: GUARD_SCHEMA });
   assert.deepEqual(registerAttendedAuthorityGuard(pi), undefined);
-  assert.deepEqual(handlers.map(([name]) => name), ["tool_call"]);
-  assert.deepEqual(tools.map(({ name }) => name), ["agentic_decision_evidence", "agentic_merge_review_record"]);
+  assert.deepEqual(handlers.map(([name]) => name), ["tool_call", "session_start"]);
+  assert.deepEqual(tools.map(({ name }) => name), ["agentic_interactive_safeguards_toggle", "agentic_decision_evidence", "agentic_merge_review_record"]);
   const params = { kind: "relay", quote: "Build this", relayer: "coordinator", where: "session", when: "2026-10-17T10:00:00Z" };
-  const valid = await tools[0].execute("id", params);
+  const valid = await tools[1].execute("id", params);
   assert.equal(valid.details.recordable, true);
   assert.equal(valid.details.authorityCreated, false);
   assert.equal(valid.details.identityVerified, false);
-  const missingSource = await tools[0].execute("id", { ...params, where: "" });
+  const missingSource = await tools[1].execute("id", { ...params, where: "" });
   assert.equal(missingSource.details.recordable, false);
 });
 
