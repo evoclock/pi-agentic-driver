@@ -10,12 +10,17 @@ import {
 } from "../scripts/enforcement/attended_authority_guard.js";
 import { isNativeTuiContext } from "../scripts/enforcement/native_tui_context.js";
 
+const ENABLED = { loadInteractiveSafeguards: () => ({
+  source: "config", settings: { enableAllInteractiveConfirmations: true, enabledCommands: [] },
+}) };
+
 const TUI = {
   mode: "tui",
   hasUI: true,
   ui: { confirm: async () => true },
 };
 
+// Why: safe operations must not acquire an unexpected confirmation.
 test("safe reads, builds, and tests pass through", () => {
   for (const command of [
     "cat README.md",
@@ -34,6 +39,7 @@ test("safe reads, builds, and tests pass through", () => {
   }
 });
 
+// Why: destructive shell commands must be recognizable for an opted-in guard.
 test("destructive shell operations are classified", () => {
   for (const [command, kind] of [
     ["rm -rf build/", "recursive or forced file deletion"],
@@ -47,6 +53,7 @@ test("destructive shell operations are classified", () => {
   }
 });
 
+// Why: history-changing Git calls must be recognized.
 test("destructive Git operations are classified", () => {
   for (const [command, kind] of [
     ["git push --force origin main", "forced Git push"],
@@ -64,11 +71,13 @@ test("destructive Git operations are classified", () => {
   }
 });
 
+// Why: a safe prefix must not conceal destructive shell syntax.
 test("a destructive payload cannot hide behind a safe prefix", () => {
   assert.equal(classifyBashCommand("git status && rm -rf /").destructive, true);
   assert.equal(classifyBashCommand("cat f | rm -rf x").destructive, true);
 });
 
+// Why: quoting must not bypass shell classification.
 test("quoted destructive tokens are still classified (F1 regression)", () => {
   assert.equal(classifyBashCommand("rm '-rf' build/").destructive, true);
   assert.equal(classifyBashCommand('git "push" origin main').destructive, true);
@@ -76,12 +85,14 @@ test("quoted destructive tokens are still classified (F1 regression)", () => {
   assert.equal(classifyBashCommand('git "push" origin main').kind, "Git push");
 });
 
+// Why: token splitting must not bypass classification.
 test("embedded and split quoting cannot hide destructive tokens", () => {
   assert.equal(classifyBashCommand("r'm' '-rf' build/").destructive, true);
   assert.equal(classifyBashCommand('git pu"sh" origin main').destructive, true);
   assert.equal(classifyBashCommand("\\rm -rf build/").destructive, true);
 });
 
+// Why: interpreter-based commands remain risky despite quoting.
 test("arbitrary-code interpreter forms are classified even when quoted (F1 regression)", () => {
   assert.equal(classifyBashCommand("node '-e' 'process.exit(1)'").destructive, true);
   assert.equal(classifyBashCommand('node --eval "1+1"').destructive, true);
@@ -89,6 +100,7 @@ test("arbitrary-code interpreter forms are classified even when quoted (F1 regre
   assert.equal(classifyBashCommand("npx some-unpublished-pkg").destructive, true);
 });
 
+// Why: classification must not expand beyond its stated target commands.
 test("scope: plain rm and non-push git reads are not guard targets", () => {
   // Plain `rm file` (no -r/-f) is intentionally outside the guard's scope:
   // the guard targets recursive/forced deletion and irreversible operations.
@@ -98,12 +110,14 @@ test("scope: plain rm and non-push git reads are not guard targets", () => {
   assert.equal(classifyBashCommand("git push --force origin main").kind, "forced Git push");
 });
 
+// Why: interpreters cannot be treated as safe-prefix commands.
 test("arbitrary-code interpreters are no longer safe prefixes (F1 regression)", () => {
   assert.equal(classifyBashCommand("node -e 'require(\"fs\").rmSync(\"x\", {recursive: true})'").destructive, true);
   assert.equal(classifyBashCommand("python3 -c 'import shutil; shutil.rmtree(\"x\")'").destructive, true);
   assert.equal(classifyBashCommand("npx some-unpublished-pkg").destructive, true);
 });
 
+// Why: overwrite classification distinguishes new files from existing files.
 test("write over an existing file is destructive; new file is not", () => {
   const exists = () => true;
   const missing = () => false;
@@ -113,6 +127,7 @@ test("write over an existing file is destructive; new file is not", () => {
   assert.equal(classifyWriteCall("read", { path: ".env" }, exists).destructive, false);
 });
 
+// Why: raw Herdr starts cannot bypass the guarded spawn tool.
 test("raw herdr agent start is forbidden fail-closed (no confirm)", async () => {
   for (const command of [
     "herdr agent start worker --kind pi --pane w1:p1 -- --model openai-codex/example-route",
@@ -142,6 +157,7 @@ test("raw herdr agent start is forbidden fail-closed (no confirm)", async () => 
   assert.match(blocked.reason, /agentic_herdr_spawn_worker/);
 });
 
+// Why: raw terminal control cannot bypass the guarded communication tool.
 test("raw herdr terminal control and communication are forbidden without confirmation", async () => {
   for (const command of [
     "herdr agent prompt worker 'do this'",
@@ -160,19 +176,30 @@ test("raw herdr terminal control and communication are forbidden without confirm
   }
 });
 
-test("headless contexts refuse destructive operations fail-closed", async () => {
+// Why: without a user opt-in, destructive calls must not trigger interactive confirmation.
+test("missing opt-in leaves the generic guard off", async () => {
+  let confirmations = 0;
+  const context = { mode: "tui", hasUI: true, ui: { confirm: async () => { confirmations += 1; return false; } } };
+  const event = { toolName: "bash", input: { command: "git push origin main" } };
+  assert.equal(await guardToolCall(event, context, { loadInteractiveSafeguards: () => ({ source: "default", settings: { enableAllInteractiveConfirmations: false, enabledCommands: [] } }) }), undefined);
+  assert.equal(confirmations, 0);
+});
+
+// Why: an opted-in guard cannot confirm destructiveness without a native UI.
+test("opted-in headless contexts refuse destructive operations fail-closed", async () => {
   const result = await guardToolCall(
     { toolName: "bash", input: { command: "git reset --hard" } },
-    { mode: "rpc" },
+    { mode: "rpc" }, ENABLED,
   );
   assert.equal(result.block, true);
   assert.match(result.reason, /fail-closed/);
   assert.ok(result.reason.includes(GUARD_SCHEMA));
 });
 
+// Why: native confirmation and refusal must have distinct results.
 test("native confirmation allows, denial blocks with a clear reason", async () => {
   const event = { toolName: "bash", input: { command: "git push --force" } };
-  const allow = await guardToolCall(event, TUI);
+  const allow = await guardToolCall(event, TUI, ENABLED);
   assert.equal(allow, undefined);
 
   const denying = {
@@ -180,23 +207,25 @@ test("native confirmation allows, denial blocks with a clear reason", async () =
     hasUI: true,
     ui: { confirm: async () => false },
   };
-  const blocked = await guardToolCall(event, denying);
+  const blocked = await guardToolCall(event, denying, ENABLED);
   assert.equal(blocked.block, true);
   assert.match(blocked.reason, /denied by user/);
 });
 
+// Why: refusal must stop only the current operation.
 test("denial does not terminate or retry the session", async () => {
   let calls = 0;
   const denying = { mode: "tui", hasUI: true, ui: { confirm: async () => { calls += 1; return false; } } };
   const event = { toolName: "bash", input: { command: "git clean -fd" } };
-  const first = await guardToolCall(event, denying);
-  const second = await guardToolCall(event, denying);
+  const first = await guardToolCall(event, denying, ENABLED);
+  const second = await guardToolCall(event, denying, ENABLED);
   assert.equal(first.block, true);
   assert.equal(second.block, true);
   assert.equal(calls, 2); // each new call is judged independently, no hidden auto-retry
   assert.equal(first.terminate, undefined);
 });
 
+// Why: harmless calls should not invoke the confirmation UI.
 test("safe tool calls never reach confirmation", async () => {
   let asked = 0;
   const counting = { ...TUI, ui: { confirm: async () => { asked += 1; return true; } } };
@@ -205,26 +234,28 @@ test("safe tool calls never reach confirmation", async () => {
   assert.equal(asked, 0);
 });
 
+// Why: relay metadata is not a substitute for a native confirmation.
 test("coordinator relay cannot bypass native confirmation for irreversible operations", async () => {
   let confirmations = 0;
   const context = { mode: "tui", hasUI: true, ui: { confirm: async () => { confirmations += 1; return false; } } };
   const relay = { relayer: "coordinator", quote: "Build the change", where: "fixture.invalid/message/1", when: "fixture-time" };
   for (const command of ["git push origin main", "git push --force origin main", "rm -rf scratch/generated"]) {
-    const result = await guardToolCall({ toolName: "bash", input: { command, approval: relay } }, context);
+    const result = await guardToolCall({ toolName: "bash", input: { command, approval: relay } }, context, ENABLED);
     assert.equal(result.block, true, command);
   }
   assert.equal(confirmations, 3);
   assert.equal(await guardToolCall({ toolName: "bash", input: { command: "git diff", approval: relay } }, context), undefined);
   assert.equal(confirmations, 3, "ordinary read must not introduce approval churn");
-  const headless = await guardToolCall({ toolName: "bash", input: { command: "git push origin main", approval: relay } }, { mode: "rpc" });
+  const headless = await guardToolCall({ toolName: "bash", input: { command: "git push origin main", approval: relay } }, { mode: "rpc" }, ENABLED);
   assert.equal(headless.block, true);
   assert.match(headless.reason, /fail-closed/);
   assert.equal(confirmations, 3, "headless relay must not invoke native confirmation");
-  const protectedWrite = await guardToolCall({ toolName: "write", input: { path: ".env", approval: relay } }, { mode: "rpc" });
+  const protectedWrite = await guardToolCall({ toolName: "write", input: { path: ".env", approval: relay } }, { mode: "rpc" }, ENABLED);
   assert.equal(protectedWrite.block, true, "relay metadata must not bypass a protected write");
   assert.match(protectedWrite.reason, /fail-closed/);
 });
 
+// Why: evidence must preserve provenance without granting permissions.
 test("decision evidence records a sourced relay without asserting identity or irreversible authority", async () => {
   const quote = "Please draft and build the assigned change";
   const evidence = recordDecisionEvidence({ kind: "relay", quote, relayer: "coordinator", where: "session record", when: "2026-10-17T10:00:00Z" });
@@ -243,15 +274,17 @@ test("decision evidence records a sourced relay without asserting identity or ir
   assert.deepEqual(withEvidence, withoutEvidence, "model-supplied evidence must not affect the push guard");
 });
 
+// Why: model input cannot authorize an opted-in guarded action.
 test("model-supplied authority fields cannot grant passage", async () => {
   const event = {
     toolName: "bash",
     input: { command: "git reset --hard", authority: "granted", approved: true },
   };
-  const result = await guardToolCall(event, { mode: "rpc" });
+  const result = await guardToolCall(event, { mode: "rpc" }, ENABLED);
   assert.equal(result.block, true);
 });
 
+// Why: repeated registration must not duplicate tool handlers.
 test("registration wires a non-authorizing decision evidence tool exactly once", async () => {
   const handlers = [];
   const tools = [];
@@ -269,6 +302,7 @@ test("registration wires a non-authorizing decision evidence tool exactly once",
   assert.equal(missingSource.details.recordable, false);
 });
 
+// Why: confirmation requires the canonical native TUI predicate.
 test("native TUI predicate stays shared and fail-closed", () => {
   assert.equal(isNativeTuiContext(undefined), false);
   assert.equal(isNativeTuiContext({ mode: "tui", hasUI: true }), false);

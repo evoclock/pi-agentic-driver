@@ -23,11 +23,13 @@ function profile(policyJson) {
   return { PI_CODING_AGENT_DIR: dir };
 }
 
+// Why: missing policy must never permit an agent merge.
 test("default is human-merges-only when no config exists", () => {
   assert.equal(DEFAULT_MERGE_POLICY, HUMAN_MERGES_ONLY);
   assert.deepEqual(loadMergePolicy({ env: profile() }), { policy: HUMAN_MERGES_ONLY, source: "default" });
 });
 
+// Why: only profile policy may select the merge mode.
 test("config selects either value from the profile directory only", () => {
   for (const policy of [HUMAN_MERGES_ONLY, AGENTS_AFTER_CHECKS_AND_REVIEW]) {
     assert.deepEqual(loadMergePolicy({ env: profile({ schema: MERGE_POLICY_SCHEMA, policy }) }), { policy, source: "config" });
@@ -35,12 +37,14 @@ test("config selects either value from the profile directory only", () => {
   assert.match(mergePolicyPath({ PI_CODING_AGENT_DIR: "/p" }), /\/p\/config\/merge-policy\.v1\.json$/);
 });
 
+// Why: malformed policy cannot silently enable agent merges.
 test("unknown, malformed or schema-less config fails closed to the default", () => {
   for (const bad of ["{not json", { schema: MERGE_POLICY_SCHEMA, policy: "anyone" }, { policy: AGENTS_AFTER_CHECKS_AND_REVIEW }]) {
     assert.deepEqual(loadMergePolicy({ env: profile(bad) }), { policy: HUMAN_MERGES_ONLY, source: "invalid" });
   }
 });
 
+// Why: merge command variants must reach the policy boundary.
 test("merge commands are detected in common shapes", () => {
   assert.deepEqual(detectMerge("gh pr merge 12 --squash"), { merge: true, form: "gh", ref: "12" });
   assert.equal(detectMerge("/opt/bin/gh 'pr' merge 12").ref, "12");
@@ -61,10 +65,12 @@ const green = {
 const { mergerSession: _m, ...greenFromGithub } = green;
 const gh = detectMerge("gh pr merge 12");
 
+// Why: passing checks do not override a human-only merge policy.
 test("human-merges-only refuses even with full evidence", () => {
   assert.equal(evaluateMerge(HUMAN_MERGES_ONLY, gh, green).allow, false);
 });
 
+// Why: review and checks must bind to the exact proposed merge head.
 test("agents setting allows only with passing checks and a PASS/PASS review of the same head", () => {
   assert.equal(evaluateMerge(AGENTS_AFTER_CHECKS_AND_REVIEW, gh, green).allow, true);
   const cases = [
@@ -86,6 +92,7 @@ test("agents setting allows only with passing checks and a PASS/PASS review of t
   assert.equal(evaluateMerge(AGENTS_AFTER_CHECKS_AND_REVIEW, detectMerge("gh api -X PUT repos/o/r/pulls/1/merge"), green).allow, false);
 });
 
+// Why: merge evidence needs the head, checks, and review record.
 test("evidence reads PR head, checks and the profile review record", () => {
   const env = profile();
   mkdirSync(join(env.PI_CODING_AGENT_DIR, "merge-reviews"));
@@ -102,6 +109,7 @@ test("evidence reads PR head, checks and the profile review record", () => {
 });
 
 for (const [label, ctx] of [["headless bot", HEADLESS], ["direct Pi use", TUI]]) {
+  // Why: merge policy must agree across interactive and headless contexts.
   test(`guard applies the policy without a prompt in ${label}`, async () => {
     let prompted = false;
     const context = { ...ctx, sessionManager: { getSessionId: () => "merger-1" }, ui: { confirm: async () => { prompted = true; return true; } } };
@@ -120,12 +128,18 @@ for (const [label, ctx] of [["headless bot", HEADLESS], ["direct Pi use", TUI]])
   });
 }
 
-test("non-merge commands keep the existing guard behaviour", async () => {
-  const blocked = await guardToolCall(merge("git push origin x"), HEADLESS, { context: HEADLESS, loadMergePolicy: () => { throw new Error("must not load"); } });
+// Why: only merge calls consult merge policy; other calls follow opt-in.
+test("non-merge commands follow the interactive opt-in without loading merge policy", async () => {
+  const options = { context: HEADLESS, loadMergePolicy: () => { throw new Error("must not load"); } };
+  assert.equal(await guardToolCall(merge("git push origin x"), HEADLESS, options), undefined);
+  const blocked = await guardToolCall(merge("git push origin x"), HEADLESS, { ...options,
+    loadInteractiveSafeguards: () => ({ source: "config", settings: { enableAllInteractiveConfirmations: true, enabledCommands: [] } }),
+  });
   assert.equal(blocked.block, true);
-  assert.equal(await guardToolCall(merge("gh pr view 12"), HEADLESS, { context: HEADLESS }), undefined);
+  assert.equal(await guardToolCall(merge("gh pr view 12"), HEADLESS, options), undefined);
 });
 
+// Why: command aliases must not evade either merge policy.
 test("bypass forms are refused under both policy values", () => {
   for (const command of [
     "gh pr merge 12 --admin",
@@ -151,6 +165,7 @@ test("bypass forms are refused under both policy values", () => {
   assert.equal(detectMerge("gh api repos/o/r/rulesets").merge, false);
 });
 
+// Why: review records must be valid and bound to a full revision.
 test("review record tool validates and writes only verdicts for a full SHA", async () => {
   const ids = { standardsReviewer: "rev-a", specReviewer: "rev-b", recordedBySession: "coord-2" };
   assert.equal(reviewRecord({ ...ids, headSha: "abc", standards: "PASS", spec: "PASS" }).ok, false);

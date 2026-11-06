@@ -12,13 +12,13 @@
     "public-pr-wording-tests": "Reuse public-pr-wording-tests in .driver/gate-rules.json; unittest's host-observed Ran N total is the denominator."
   },
   "mutation": {
-    "id": "pr-fetch-http-failure",
-    "path": ".buildkite/pr-checks.sh",
-    "before": "curl --fail --silent --show-error",
-    "after": "curl --silent --show-error",
-    "testCheckId": "python-tests",
-    "scriptEnv": "PR_CHECKS_SCRIPT",
-    "testPaths": ["tests/test_pr_checks_fetch.py"],
-    "reason": "Removing curl's HTTP failure check must fail the accepted-response and HTTP-refusal assertions, even when an error response contains valid PR-shaped JSON."
+    "id": "interactive-safeguard-default",
+    "path": "config/interactive-safeguards.v1.example.json",
+    "before": "\"enableAllInteractiveConfirmations\": false",
+    "after": "\"enableAllInteractiveConfirmations\": true",
+    "testCheckId": "node-tests",
+    "scriptEnv": "SAFEGUARD_CONFIG_FILE",
+    "testPaths": ["tests/test_interactive_safeguard_config.mjs"],
+    "reason": "Changing the shipped example to enable all confirmations must fail the opt-in-default assertion."
   }
 }

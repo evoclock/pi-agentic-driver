@@ -6,24 +6,61 @@
 // Ported observable behavior (private reference: scripts/enforcement/
 // pi_attended_authority.js + cc_destructive_command_guard_hook.py):
 // - Intercept tool calls before execution via the `tool_call` event.
-// - Destructive shell/Git operations require native confirmation.
+// - Destructive shell/Git operations require native confirmation only when
+//   the user explicitly enables this interactive safeguard in their profile.
 // - Safe reads/builds/tests pass through untouched.
 // - An explicit denial returns a clear reason and the session continues;
 //   no hidden retry and no automatic re-ask.
-// - Headless / no-confirmation contexts refuse destructive operations
-//   fail-closed.
-// - No bypasses, no model-supplied authority, no silent escalation. The
-//   model cannot mark a call safe; classification is structural only.
+// - When enabled, headless contexts refuse destructive operations fail-closed.
+// - The model cannot opt in or out; unconditional policy blocks remain active.
 
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { isNativeTuiContext } from "./native_tui_context.js";
 import {
   detectMerge, evaluateMerge, gatherMergeEvidence, loadMergePolicy,
-  reviewRecord, reviewRecordPath, sessionIdOf, MERGE_POLICY_SCHEMA,
+  reviewRecord, reviewRecordPath, sessionIdOf, profileDir, MERGE_POLICY_SCHEMA,
 } from "./merge_policy.js";
 
 export const GUARD_SCHEMA = "pi-agentic-driver.attended-authority.v1";
+export const INTERACTIVE_SAFEGUARDS_SCHEMA = "pi-agentic-driver.interactive-safeguards.v1";
+const DEFAULT_INTERACTIVE_SAFEGUARDS = Object.freeze({ enableAllInteractiveConfirmations: false, enabledCommands: [] });
+
+// Read only the owner's Pi profile, never repository-controlled config or tool input.
+// Invalid or unreadable files keep the off-by-default setting; no config contents enter warnings.
+export function loadInteractiveSafeguards({ env = process.env, read = (path) => readFileSync(path, "utf8") } = {}) {
+  let text;
+  try {
+    text = read(join(profileDir(env), "config", "interactive-safeguards.v1.json"));
+  } catch (error) {
+    return { settings: DEFAULT_INTERACTIVE_SAFEGUARDS, source: error?.code === "ENOENT" ? "default" : "invalid" };
+  }
+  try {
+    const data = JSON.parse(text);
+    const keys = Object.keys(data);
+    const commands = data.enabledCommands === undefined ? [] : data.enabledCommands;
+    if (data.schema !== INTERACTIVE_SAFEGUARDS_SCHEMA
+      || keys.some((key) => !["schema", "enableAllInteractiveConfirmations", "enabledCommands"].includes(key))
+      || (data.enableAllInteractiveConfirmations !== undefined && typeof data.enableAllInteractiveConfirmations !== "boolean")
+      || !Array.isArray(commands) || commands.length > 32
+      || commands.some((command) => typeof command !== "string" || !/^[a-z][a-z0-9-]*(?: [a-z][a-z0-9-]*){0,3}$/.test(command))
+      || new Set(commands).size !== commands.length) throw new Error("invalid safeguard settings");
+    return { settings: { enableAllInteractiveConfirmations: data.enableAllInteractiveConfirmations ?? false, enabledCommands: commands }, source: "config" };
+  } catch {
+    return { settings: DEFAULT_INTERACTIVE_SAFEGUARDS, source: "invalid" };
+  }
+}
+
+function enablesInteractiveConfirmation(toolName, input, settings) {
+  if (settings.enableAllInteractiveConfirmations === true) return true;
+  if (!Array.isArray(settings.enabledCommands)) return false;
+  if (toolName !== "bash") return settings.enabledCommands.includes(toolName);
+  const raw = input.command;
+  // Never match one component of a pipeline, substitution, redirect or chained call.
+  if (typeof raw !== "string" || /[\n\r;&|><`\\#]|\$\(/.test(raw)) return false;
+  const command = unquoteTokens(raw).trim().replace(/\s+/g, " ");
+  return settings.enabledCommands.some((entry) => command === entry || command.startsWith(`${entry} `));
+}
 
 // This records a decision's stated provenance, not the identity of its author.
 // Pi's user-message type alone cannot distinguish typed owner input from a
@@ -185,12 +222,31 @@ function touchesProtectedPath(path) {
   );
 }
 
+// Reject writes to the user-owned profile configuration even with confirmations off.
+// Resolve the host profile path; tool arguments never select the protection root.
+function touchesProfileConfig(path, configDir, cwd) {
+  if (typeof path !== "string" || !path) return false;
+  const within = (target, root) => target === root || target.startsWith(`${root}${sep}`);
+  const target = resolve(cwd, path);
+  if (within(target, configDir)) return true;
+  try {
+    const realRoot = realpathSync(configDir);
+    if (within(realpathSync(target), realRoot)) return true;
+  } catch { /* A new file does not yet have a real path. */ }
+  try {
+    return within(resolve(realpathSync(dirname(target)), basename(target)), realpathSync(configDir));
+  } catch { return false; }
+}
+
 // Existing-file overwrite detection is injected so tests stay filesystem-free.
-export function classifyWriteCall(toolName, input, existsSync) {
+export function classifyWriteCall(toolName, input, existsSync, configRoot = profileDir(), cwd = process.cwd()) {
   if (toolName !== "write" && toolName !== "edit") {
     return { destructive: false };
   }
   const path = input?.path ?? input?.file_path ?? "";
+  if (touchesProfileConfig(path, resolve(configRoot, "config"), cwd)) {
+    return { destructive: true, forbidden: true, kind: "user profile configuration write" };
+  }
   if (touchesProtectedPath(path)) {
     return { destructive: true, kind: `protected path write to ${path}` };
   }
@@ -233,13 +289,15 @@ export function denialReason(toolName, kind, context, options = {}) {
 /**
  * Core guard for one tool call. Returns undefined to allow the call, or
  * `{ block: true, reason }` to refuse it. Confirmation is native-only:
- * `ctx.ui.confirm` in an interactive TUI. Headless contexts never confirm.
+ * `ctx.ui.confirm` in an interactive TUI only when the user profile opts in.
+ * Headless contexts refuse destructive calls when confirmation is enabled.
  * Model-supplied fields on the event can never grant authority.
  */
 export async function guardToolCall(event, ctx, options = {}) {
   const toolName = String(event?.toolName ?? "").toLowerCase();
   if (!MUTATING_TOOLS.has(toolName)) return undefined;
   const input = event?.input && typeof event.input === "object" ? event.input : {};
+  const context = options.context ?? ctx;
   const approvalPath = /(?:^|[\s"'\\/])approvals[\\/]/;
   if ((toolName === "write" || toolName === "edit") && approvalPath.test(String(input.path ?? input.file_path ?? ""))) {
     return { block: true, reason: "Approval ledger writes are reserved for the trusted relay CLI.", ...needsOwner(3, ["ledger edit"], "profile") };
@@ -271,15 +329,22 @@ export async function guardToolCall(event, ctx, options = {}) {
     : { destructive: false };
   const write = toolName === "bash"
     ? { destructive: false }
-    : classifyWriteCall(toolName, input, options.existsSync);
+    : classifyWriteCall(toolName, input, options.existsSync, profileDir(options.profileEnv ?? process.env), context?.cwd ?? process.cwd());
   const verdict = bash.destructive ? bash : write;
   if (!verdict.destructive) return undefined;
 
-  const context = options.context ?? ctx;
+  if (verdict.kind === "user profile configuration write") {
+    return { block: true, reason: `${GUARD_SCHEMA}: user profile config writes are reserved for direct user edits` };
+  }
   // Forbidden fleet forms: never confirmable.
   if (verdict.forbidden) {
     return { block: true, reason: denialReason(toolName, verdict.kind, context, { forbidden: true }) };
   }
+  const loaded = (options.loadInteractiveSafeguards ?? loadInteractiveSafeguards)();
+  if (loaded.source === "invalid") {
+    context?.ui?.notify?.("Invalid interactive safeguards profile; confirmations remain off.", "warning");
+  }
+  if (loaded.source !== "config" || !enablesInteractiveConfirmation(toolName, input, loaded.settings)) return undefined;
   if (!isNativeTuiContext(context)) {
     return { block: true, reason: denialReason(toolName, verdict.kind, context) };
   }
