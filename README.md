@@ -79,7 +79,7 @@ Choose one of two levels in the profile:
 
 Both options are optional. Their defaults are false and an empty list. The profile must use the exact schema and a boolean switch. It accepts no more than 32 unique, lower-case, simple command names of up to four words each. Unknown keys, invalid types, unreadable files, and malformed JSON leave confirmations off. The guard warns without showing profile contents. A missing file uses the defaults without a warning.
 
-This setting changes only the generic attended-authority confirmation. Other safeguards still apply: merge policy, approval-ledger restrictions, the raw Herdr shell ban, extension safeguards, and CI/merge gates. When you enable confirmations, headless destructive calls still fail closed. The guard blocks agent `write` and `edit` calls to the user profile's `config/` directory. Use the toggle, the TUI shortcut, or direct user profile editing to change the setting. Chat text and unrelated tool arguments cannot opt in. The guard is not a shell sandbox.
+This setting changes only the generic attended-authority confirmation. When you enable confirmations, headless destructive calls still fail closed. The guard blocks agent `write` and `edit` calls to the user profile's `config/` directory. Use the toggle, the TUI shortcut, or direct user profile editing to change the setting. Chat text and unrelated tool arguments cannot opt in. The guard is not a shell sandbox.
 
 ## Shipped features
 
