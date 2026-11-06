@@ -55,10 +55,13 @@ proofs for agentic workflows.
 - Pi tabs/panes: **only** `agentic_herdr_spawn_worker` / Pi **herdr** spawn (spelling **herdr**).
 - Never raw Herdr CLI from a bot shell, including agent start, prompt, read, wait, and pane send-keys. The attended-authority guard refuses those bash forms fail-closed. Use `agentic_herdr_communication` for bounded exchanges.
 - A canonical owner-eligible repository needs no registry entry, repository-named workspace, per-spawn grant, or dialog. Start a fresh Pi process after installation to load the updated tool.
+- Trusted GitHub origins use the repository name as GitHub shows it, including mixed case such as `OpenMausBot`. Both SSH and HTTPS origins accept that case.
 - Default Pi model: the operator-named default until the operator names another.
 - Details for agents: [AGENTS.md](./AGENTS.md).
 
 ## Interactive safeguard configuration
+
+The interactive safeguard toggle and optional TUI shortcut are packaged since 3.1.2.
 
 The built-in attended-authority guard can ask before destructive operations such
 as `git push` and overwriting an existing file. Interactive confirmations are

@@ -265,6 +265,30 @@ test("guarded start accepts a private-first origin with a different repository n
   } finally { cleanup(f.root); }
 });
 
+// Why: GitHub preserves repo-name case; matching origins stay eligible without weakening owner and name checks.
+test("mixed-case SSH and HTTPS origin names are accepted; foreign and malformed origins remain denied", () => {
+  const f = fixture({ omitTarget: true });
+  try {
+    for (const origin of [
+      "git@github.com:evoclock/OpenMausBot.git",
+      "https://github.com/evoclock/OpenMausBot.git",
+    ]) {
+      git(f.workerRoot, ["remote", "set-url", "origin", origin]);
+      assert.equal(resolveTrustedSpawnRepository(f.coordinator, WORKER_REPO), f.workerRoot, origin);
+    }
+    for (const origin of [
+      "git@github.com:elsewhere/OpenMausBot.git",
+      "https://github.com/elsewhere/OpenMausBot.git",
+      "git@github.com:evoclock/Open_MausBot.git",
+      "https://github.com/evoclock/Open.MausBot.git",
+    ]) {
+      git(f.workerRoot, ["remote", "set-url", "origin", origin]);
+      assert.throws(() => resolveTrustedSpawnRepository(f.coordinator, WORKER_REPO),
+        (error) => error.code === "repository_origin_untrusted", origin);
+    }
+  } finally { cleanup(f.root); }
+});
+
 // Why: a foreign or excluded remote must fail before layout even if the checkout exists.
 test("guarded start refuses a foreign origin or denied name before creating a tab", async () => {
   for (const denied of ["origin", "policy"]) {

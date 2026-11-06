@@ -723,8 +723,10 @@ def mutation_observation(root: Path, gate_rules: dict, config: dict, changed: se
     check_id = mutation.get("testCheckId")
     env_name = mutation.get("scriptEnv")
     reason = mutation.get("reason")
-    if not all(isinstance(value, str) and value.strip() for value in (path_name, before, after, check_id, env_name, reason)):
-        raise Blocked("mutation needs path, exact before/after text, testCheckId, scriptEnv, and a why note")
+    if not all(isinstance(value, str) and value.strip() for value in (path_name, before, after, check_id, reason)):
+        raise Blocked("mutation needs path, exact before/after text, testCheckId, and a why note")
+    if not is_production_code_path(path_name) and not isinstance(env_name, str):
+        raise Blocked("non-code mutation needs scriptEnv")
     if not safe_repo_path(path_name) or path_name not in changed:
         raise Blocked("mutation target must be a changed repository file in this diff")
     source = root / path_name
@@ -742,14 +744,24 @@ def mutation_observation(root: Path, gate_rules: dict, config: dict, changed: se
     if len(mutation_specs) != 1 or mutation_specs[0]["id"] != check_id:
         raise Blocked("mutation must select one focused test command matching testCheckId")
     test_spec = mutation_specs[0]
-    if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", env_name):
+    if env_name is not None and not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", env_name):
         raise Blocked("mutation scriptEnv must be an uppercase environment variable name")
     mutated = content.replace(before, after, 1).encode("utf-8")
     digest = sha256_bytes(mutated)
-    mutant_path = root / EVIDENCE_REL / "mutants" / digest / Path(path_name).name
-    mutant_path.parent.mkdir(parents=True, exist_ok=True)
-    if not mutant_path.exists():
-        mutant_path.write_bytes(mutated)
+    if env_name is None:
+        snapshot = prepare_base_snapshot(root, base_sha, tests)
+        for changed_name in sorted(changed):
+            changed_source = root / changed_name
+            if changed_source.is_file() and not changed_source.is_symlink():
+                destination = snapshot / changed_name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(changed_source.read_bytes())
+        (snapshot / path_name).write_bytes(mutated)
+    else:
+        mutant_path = root / EVIDENCE_REL / "mutants" / digest / Path(path_name).name
+        mutant_path.parent.mkdir(parents=True, exist_ok=True)
+        if not mutant_path.exists():
+            mutant_path.write_bytes(mutated)
     spec = {
         "id": f"mutation:{mutation.get('id', 'spot-check')}",
         "command": test_spec["command"],
@@ -761,10 +773,11 @@ def mutation_observation(root: Path, gate_rules: dict, config: dict, changed: se
         "mutantSha256": digest,
     }
     environment = os.environ.copy()
-    environment[env_name] = str(mutant_path)
+    if env_name is not None:
+        environment[env_name] = str(mutant_path)
     observation = run_command(
         root,
-        root,
+        snapshot if env_name is None else root,
         spec,
         phase="mutation-spot-check",
         commit_sha=commit_sha,
