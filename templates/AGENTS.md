@@ -84,6 +84,19 @@ reset, clean, stash, overwrite, force-push, or delete work automatically. If a
 step cannot finish safely, record the exact reason and create the next bounded
 task.
 
+
+## Optional Herdr spawn path
+
+Keep your own repository `AGENTS.md`. This file is a starting contract you can copy from; it does not replace an existing file.
+
+If you want this package's Herdr spawn path in your own guidance, add these rules and point at the implementation:
+
+- Start Pi tabs and panes only with `agentic_herdr_spawn_worker` (spelling **herdr**).
+- Do not run raw Herdr CLI from a bot shell, including agent start, prompt, read, wait, and pane send-keys.
+- Use `agentic_herdr_communication` to talk to a running worker.
+
+The implementation is `extensions/herdr-lifecycle.ts` and `extensions/attended-authority-guard.ts`.
+
 ## Repository-specific section
 
 After every change, run `make gate` and fix what it reports.

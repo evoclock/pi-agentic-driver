@@ -48,16 +48,17 @@ proofs for agentic workflows.
   <img src="assets/agentic-driver-full-color.gif" alt="Full-color Agentic Driver control vault" width="768">
 </p>
 
-## Fleet Herdr spawn rule
+## Herdr spawn
 
-**HARD (fleet-wide):** anything that controls bots encodes this in git here, not only in assistant skills.
+Start Pi tabs and panes with `agentic_herdr_spawn_worker` (spelling **herdr**). Do not use raw Herdr CLI from a bot shell, including agent start, prompt, read, wait, and pane send-keys. The attended-authority guard refuses those commands. Use `agentic_herdr_communication` to talk to a running worker.
 
-- Pi tabs/panes: **only** `agentic_herdr_spawn_worker` / Pi **herdr** spawn (spelling **herdr**).
-- Never raw Herdr CLI from a bot shell, including agent start, prompt, read, wait, and pane send-keys. The attended-authority guard refuses those bash forms fail-closed. Use `agentic_herdr_communication` for bounded exchanges.
-- A canonical owner-eligible repository needs no registry entry, repository-named workspace, per-spawn grant, or dialog. Start a fresh Pi process after installation to load the updated tool.
-- Trusted GitHub origins use the repository name as GitHub shows it, including mixed case such as `OpenMausBot`. Both SSH and HTTPS origins accept that case.
-- Default Pi model: the operator-named default until the operator names another.
-- Details for agents: [AGENTS.md](./AGENTS.md).
+A canonical owner-eligible repository needs no registry entry, named workspace, per-spawn grant, or dialog. Start a fresh Pi process after installation so the updated tool loads.
+
+Trusted GitHub origins use the repository name as GitHub shows it, including mixed case such as `OpenMausBot`. SSH and HTTPS origins both accept that case.
+
+The default Pi model is the one you configured, until you name another.
+
+To add this spawn path to your own `AGENTS.md`, copy the optional section from [`templates/AGENTS.md`](templates/AGENTS.md). The template does not replace an existing file. The implementation is [`extensions/herdr-lifecycle.ts`](extensions/herdr-lifecycle.ts) (`agentic_herdr_spawn_worker`) and [`extensions/attended-authority-guard.ts`](extensions/attended-authority-guard.ts).
 
 ## Interactive safeguard configuration
 
