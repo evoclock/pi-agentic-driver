@@ -62,12 +62,23 @@ proofs for agentic workflows.
 
 The built-in attended-authority guard can ask before destructive operations such
 as `git push` and overwriting an existing file. Interactive confirmations are
-**off by default**. To turn them on, put a file at
-`$PI_CODING_AGENT_DIR/config/interactive-safeguards.v1.json`. The
-package ships a starting template at `config/interactive-safeguards.v1.example.json`.
-Pi reads this **user-profile file**, not a repository file, for each guarded call.
+**off by default**. Agents can use `agentic_interactive_safeguards_toggle`
+with `enabled: true` or `false`. In the TUI, **Alt+Shift+S** flips the same
+setting and shows its current state in the status bar. This optional shortcut
+never opens a settings confirmation dialog. Both paths store the setting in
+`$PI_CODING_AGENT_DIR/config/interactive-safeguards.v1.json` (or
+`~/.pi/agent/config/interactive-safeguards.v1.json` by default). The profile
+file is storage, not a required manual setup step. The package ships an example
+at `config/interactive-safeguards.v1.example.json`.
 
-Choose one of two levels:
+The package loads `extensions/attended-authority-guard.ts` from its extension
+directory. Excluding `!extensions/attended-authority-guard.ts` from the package
+resource selection hides the toggle and the generic guard entirely. Do not
+exclude it when you need interactive confirmations. See
+[interactive safeguards](docs/interactive-safeguards.md) for use and limits.
+
+Turning the toggle off clears any saved per-command selections as well as the
+package-wide switch. The stored profile also supports two levels:
 
 - To enable this package's generic interactive confirmation for every destructive
   tool call, set `enableAllInteractiveConfirmations` to `true`.
@@ -99,7 +110,10 @@ shell ban, other extension safeguards, or CI/merge gates. When confirmations
 are enabled, headless destructive calls still fail closed. Agent `write` and
 `edit` calls to the user profile's `config/` directory are always blocked to
 protect the opt-in settings. Keep the final checks and review gates in CI.
-Configure the profile yourself; tool arguments and agent messages cannot opt in.
+Only the dedicated toggle tool, the TUI shortcut, or direct user profile
+editing changes the setting. Ordinary chat text and unrelated tool arguments
+cannot opt in. This guard blocks agent `write` and `edit` calls to profile
+config, but is not a shell sandbox.
 
 ## Shipped features
 

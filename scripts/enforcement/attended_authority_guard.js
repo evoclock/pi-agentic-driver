@@ -12,9 +12,11 @@
 // - An explicit denial returns a clear reason and the session continues;
 //   no hidden retry and no automatic re-ask.
 // - When enabled, headless contexts refuse destructive operations fail-closed.
-// - The model cannot opt in or out; unconditional policy blocks remain active.
+// - Only the dedicated toggle tool or TUI shortcut changes the profile;
+//   chat text and unrelated tool arguments never change the setting.
+// - Unconditional policy blocks remain active.
 
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { isNativeTuiContext } from "./native_tui_context.js";
 import {
@@ -49,6 +51,24 @@ export function loadInteractiveSafeguards({ env = process.env, read = (path) => 
   } catch {
     return { settings: DEFAULT_INTERACTIVE_SAFEGUARDS, source: "invalid" };
   }
+}
+
+// Both the agent tool and the optional TUI shortcut write the same profile setting.
+// Refuse invalid files rather than silently replacing unrecognized user choices.
+export function setInteractiveSafeguards(enabled, { env = process.env, load = () => loadInteractiveSafeguards({ env }), write = writeFileSync, mkdir = mkdirSync } = {}) {
+  if (typeof enabled !== "boolean") throw new Error("Expected an explicit on/off setting.");
+  const current = load();
+  if (current.source === "invalid") throw new Error("Invalid interactive safeguards profile; confirmations remain off.");
+  const file = join(profileDir(env), "config", "interactive-safeguards.v1.json");
+  try {
+    if (lstatSync(file).isSymbolicLink()) throw new Error("Profile setting cannot be a symlink.");
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  const settings = { ...current.settings, enableAllInteractiveConfirmations: enabled, enabledCommands: enabled ? current.settings.enabledCommands : [] };
+  mkdir(dirname(file), { recursive: true, mode: 0o700 });
+  write(file, `${JSON.stringify({ schema: INTERACTIVE_SAFEGUARDS_SCHEMA, ...settings }, null, 2)}\n`, { mode: 0o600 });
+  return { settings, source: "config" };
 }
 
 function enablesInteractiveConfirmation(toolName, input, settings) {
@@ -366,6 +386,58 @@ export function registerAttendedAuthorityGuard(pi, options = {}) {
   if (!pi || REGISTERED.has(pi)) return undefined;
   REGISTERED.add(pi);
   pi.on?.("tool_call", (event, ctx) => guardToolCall(event, ctx, options));
+  const load = options.loadInteractiveSafeguards ?? loadInteractiveSafeguards;
+  const save = options.saveInteractiveSafeguards ?? ((enabled, settings) => setInteractiveSafeguards(enabled, {
+    env: options.profileEnv ?? process.env,
+    load: () => ({ settings, source: "config" }),
+  }));
+  const status = (ctx, enabled) => ctx?.ui?.setStatus?.("interactive-safeguards", `Confirmations: ${enabled ? "on" : "off"}`);
+  pi.on?.("session_start", (_event, ctx) => {
+    if (ctx?.mode !== "tui") return;
+    const current = load();
+    status(ctx, current.settings.enableAllInteractiveConfirmations);
+    if (current.source === "invalid") ctx.ui.notify?.("Invalid interactive safeguards profile; confirmations remain off.", "warning");
+  });
+  pi.registerShortcut?.("alt+shift+s", {
+    description: "Toggle interactive command confirmations",
+    handler: async (ctx) => {
+      if (ctx?.mode !== "tui" || ctx?.hasUI !== true) return;
+      const current = load();
+      if (current.source === "invalid") {
+        ctx.ui.notify("Invalid interactive safeguards profile; confirmations remain off.", "warning");
+        return;
+      }
+      try {
+        const result = save(!current.settings.enableAllInteractiveConfirmations, current.settings);
+        status(ctx, result.settings.enableAllInteractiveConfirmations);
+        ctx.ui.notify(`Interactive confirmations ${result.settings.enableAllInteractiveConfirmations ? "on" : "off"}.`, "info");
+      } catch {
+        ctx.ui.notify("Unable to save interactive safeguards setting.", "error");
+      }
+    },
+  });
+  pi.registerTool?.({
+    name: "agentic_interactive_safeguards_toggle",
+    label: "Interactive confirmations toggle",
+    description: "Set generic interactive command confirmations on or off in the user profile. Does not alter mandatory policy controls.",
+    parameters: {
+      type: "object",
+      properties: { enabled: { type: "boolean", description: "True to enable confirmations; false to disable them." } },
+      required: ["enabled"], additionalProperties: false,
+    },
+    async execute(_toolCallId, params, _signal, _update, ctx) {
+      if (typeof params?.enabled !== "boolean") return { content: [{ type: "text", text: "An explicit boolean on/off setting is required." }], details: { changed: false } };
+      const current = load();
+      if (current.source === "invalid") return { content: [{ type: "text", text: "Invalid interactive safeguards profile; confirmations remain off." }], details: { changed: false } };
+      try {
+        const result = save(params.enabled, current.settings);
+        if (ctx?.mode === "tui") status(ctx, result.settings.enableAllInteractiveConfirmations);
+        return { content: [{ type: "text", text: `Interactive confirmations ${result.settings.enableAllInteractiveConfirmations ? "on" : "off"}.` }], details: { changed: true, enabled: result.settings.enableAllInteractiveConfirmations } };
+      } catch {
+        return { content: [{ type: "text", text: "Unable to save interactive safeguards setting." }], details: { changed: false } };
+      }
+    },
+  });
   pi.registerTool?.({
     name: "agentic_decision_evidence",
     label: "Decision evidence",

@@ -1,3 +1,7 @@
+## Unreleased
+
+- Add an agent-accessible on/off toggle and optional non-blocking TUI shortcut for generic command confirmations, backed by the same user-profile setting. Disabling clears per-command selections; mandatory safeguards remain separate.
+
 ## 3.1.1
 
 - Strip remaining Herdr spawn registration and workspace friction so canonical trusted repos start guarded workers without registry or per-spawn ceremony.
