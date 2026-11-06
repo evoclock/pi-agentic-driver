@@ -60,30 +60,14 @@ Already have an `AGENTS.md`? If you want this spawn path in it, copy the optiona
 
 ## Interactive safeguard configuration
 
-The interactive safeguard toggle and optional TUI shortcut are packaged since 3.1.2.
+Interactive confirmations are off by default. The attended-authority guard can ask before destructive actions, such as `git push` or overwriting a file. Use `agentic_interactive_safeguards_toggle` with `enabled: true` or `false` to change the setting. In the TUI, **Alt+Shift+S** changes the same setting and shows its state in the status bar. The shortcut does not open a settings dialog.
 
-The built-in attended-authority guard can ask before destructive operations such
-as `git push` and overwriting an existing file. Interactive confirmations are
-**off by default**. Agents can use `agentic_interactive_safeguards_toggle`
-with `enabled: true` or `false`. In the TUI, **Alt+Shift+S** flips the same
-setting and shows its current state in the status bar. This optional shortcut
-never opens a settings confirmation dialog. Both paths store the setting in
-`$PI_CODING_AGENT_DIR/config/interactive-safeguards.v1.json` (or
-`~/.pi/agent/config/interactive-safeguards.v1.json` by default). The profile
-file is storage, not a required manual setup step. The package ships an example
-at `config/interactive-safeguards.v1.example.json`.
+The toggle saves the setting at `$PI_CODING_AGENT_DIR/config/interactive-safeguards.v1.json`, or `~/.pi/agent/config/interactive-safeguards.v1.json` by default. You do not need to create this file to use the toggle. See `config/interactive-safeguards.v1.example.json` for an example. Turning the toggle off also clears saved command selections.
 
-Turning the toggle off clears any saved per-command selections as well as the
-package-wide switch. The stored profile also supports two levels:
+Choose one of two levels in the profile:
 
-- To enable this package's generic interactive confirmation for every destructive
-  tool call, set `enableAllInteractiveConfirmations` to `true`.
-- To enable it only for selected commands, leave that value `false` and list
-  simple shell command prefixes in `enabledCommands`, for example `"git push"`.
-  A `git push` entry includes its flags and arguments, including forced pushes;
-  other commands do not ask. Chained commands, pipelines, redirects, and shell
-  substitutions never match a per-command entry. `"write"` and `"edit"` can
-  enable confirmations for those Pi tools separately.
+- Set `enableAllInteractiveConfirmations` to `true` to ask before every destructive tool call covered by this guard.
+- Leave it `false` and list command prefixes in `enabledCommands` to ask only for those commands. For example, `"git push"` matches pushes with flags and arguments, including forced pushes. It does not match chained commands, pipelines, redirects, or shell substitutions. Add `"write"` or `"edit"` to confirm those Pi tool calls separately.
 
 ```json
 {
@@ -93,23 +77,9 @@ package-wide switch. The stored profile also supports two levels:
 }
 ```
 
-Both settings are optional; `false` and an empty list are the defaults. The
-profile must have the exact schema, a boolean for the package-wide switch, and
-an array of at most 32 unique, lower-case, simple command names (up to four
-words each). Unknown keys, bad types, unreadable files, and malformed JSON
-leave confirmations off; the guard shows a warning without printing profile
-contents. A missing file uses the default without a warning.
+Both options are optional. Their defaults are false and an empty list. The profile must use the exact schema and a boolean switch. It accepts no more than 32 unique, lower-case, simple command names of up to four words each. Unknown keys, invalid types, unreadable files, and malformed JSON leave confirmations off. The guard warns without showing profile contents. A missing file uses the defaults without a warning.
 
-This setting changes **only** the generic attended-authority confirmation. It
-does not disable the merge policy, approval-ledger restrictions, the raw Herdr
-shell ban, other extension safeguards, or CI/merge gates. When confirmations
-are enabled, headless destructive calls still fail closed. Agent `write` and
-`edit` calls to the user profile's `config/` directory are always blocked to
-protect the opt-in settings. Keep the final checks and review gates in CI.
-Only the dedicated toggle tool, the TUI shortcut, or direct user profile
-editing changes the setting. Ordinary chat text and unrelated tool arguments
-cannot opt in. This guard blocks agent `write` and `edit` calls to profile
-config, but is not a shell sandbox.
+This setting changes only the generic attended-authority confirmation. Other safeguards still apply: merge policy, approval-ledger restrictions, the raw Herdr shell ban, extension safeguards, and CI/merge gates. When you enable confirmations, headless destructive calls still fail closed. The guard blocks agent `write` and `edit` calls to the user profile's `config/` directory. Use the toggle, the TUI shortcut, or direct user profile editing to change the setting. Chat text and unrelated tool arguments cannot opt in. The guard is not a shell sandbox.
 
 ## Shipped features
 
