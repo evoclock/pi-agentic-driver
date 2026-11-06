@@ -1,6 +1,7 @@
 ## 3.1.1
 
 - Strip remaining Herdr spawn registration and workspace friction so canonical trusted repos start guarded workers without registry or per-spawn ceremony.
+- Make generic destructive-command confirmations opt-in with a user-profile configuration.
 
 ## 3.1.0
 

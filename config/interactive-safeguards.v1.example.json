@@ -1,0 +1,5 @@
+{
+  "schema": "pi-agentic-driver.interactive-safeguards.v1",
+  "enableAllInteractiveConfirmations": false,
+  "enabledCommands": []
+}

@@ -58,6 +58,49 @@ proofs for agentic workflows.
 - Default Pi model: the operator-named default until the operator names another.
 - Details for agents: [AGENTS.md](./AGENTS.md).
 
+## Interactive safeguard configuration
+
+The built-in attended-authority guard can ask before destructive operations such
+as `git push` and overwriting an existing file. Interactive confirmations are
+**off by default**. To turn them on, put a file at
+`$PI_CODING_AGENT_DIR/config/interactive-safeguards.v1.json`. The
+package ships a starting template at `config/interactive-safeguards.v1.example.json`.
+Pi reads this **user-profile file**, not a repository file, for each guarded call.
+
+Choose one of two levels:
+
+- To enable this package's generic interactive confirmation for every destructive
+  tool call, set `enableAllInteractiveConfirmations` to `true`.
+- To enable it only for selected commands, leave that value `false` and list
+  simple shell command prefixes in `enabledCommands`, for example `"git push"`.
+  A `git push` entry includes its flags and arguments, including forced pushes;
+  other commands do not ask. Chained commands, pipelines, redirects, and shell
+  substitutions never match a per-command entry. `"write"` and `"edit"` can
+  enable confirmations for those Pi tools separately.
+
+```json
+{
+  "schema": "pi-agentic-driver.interactive-safeguards.v1",
+  "enableAllInteractiveConfirmations": false,
+  "enabledCommands": ["git push"]
+}
+```
+
+Both settings are optional; `false` and an empty list are the defaults. The
+profile must have the exact schema, a boolean for the package-wide switch, and
+an array of at most 32 unique, lower-case, simple command names (up to four
+words each). Unknown keys, bad types, unreadable files, and malformed JSON
+leave confirmations off; the guard shows a warning without printing profile
+contents. A missing file uses the default without a warning.
+
+This setting changes **only** the generic attended-authority confirmation. It
+does not disable the merge policy, approval-ledger restrictions, the raw Herdr
+shell ban, other extension safeguards, or CI/merge gates. When confirmations
+are enabled, headless destructive calls still fail closed. Agent `write` and
+`edit` calls to the user profile's `config/` directory are always blocked to
+protect the opt-in settings. Keep the final checks and review gates in CI.
+Configure the profile yourself; tool arguments and agent messages cannot opt in.
+
 ## Shipped features
 
 | Tool | What it does | Status |

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests/test_*.mjs",
-    "test:ci": "node --test tests/test_durable_driver.mjs tests/test_durable_assignment.mjs tests/test_outward_effect.mjs tests/test_herdr_async_dispatch.mjs tests/test_herdr_async_seam.mjs tests/test_herdr_communication.mjs tests/test_fresh_pack_install.mjs tests/test_task_board_dispatch.mjs tests/test_task_store_adapter.mjs tests/test_public_extension_set.mjs"
+    "test:ci": "node --test tests/test_durable_driver.mjs tests/test_durable_assignment.mjs tests/test_outward_effect.mjs tests/test_herdr_async_dispatch.mjs tests/test_herdr_async_seam.mjs tests/test_herdr_communication.mjs tests/test_fresh_pack_install.mjs tests/test_task_board_dispatch.mjs tests/test_task_store_adapter.mjs tests/test_public_extension_set.mjs tests/test_interactive_safeguard_config.mjs"
   },
   "license": "AGPL-3.0-only",
   "engines": {
@@ -50,6 +50,7 @@
     "docs/relay-authority.md",
     "scripts/enforcement/merge_policy.js",
     "config/merge-policy.v1.example.json",
+    "config/interactive-safeguards.v1.example.json",
     "docs/merge-policy.md",
     "extensions/code-phage.js",
     "extensions/herdr-communication.ts",
