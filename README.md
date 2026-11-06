@@ -16,23 +16,22 @@
 An agent without guardrails will sometimes rewrite code an existing abstraction already
 covers. It will ship to the wrong remote. It will lose context and report
 success without evidence. Pi is deliberately lean by design: the harness is yours to
-shape. That philosophy is exactly what these extensions practice, they make them mine (and possibly yours too). They take
-some concerns I consider worth addressing, and make them part of the
-harness.
+shape. I built these extensions to shape mine, and you can use them to shape yours.
+They bring the concerns I care about into the harness.
 
 **pi-agentic-driver makes agent work verifiable and controllable. The agent does
-the work and each extension makes sure the work can be checked.** Reviewing happens
-before code is written. Communication involves reports without asserting authority that isn't granted.
-Isolation proofs exist to verify their own cleanup. Sessions survive compaction and
-Git operations stay exact, confirmed, and protected.
+the work and each extension helps you check it.** Reviewing happens
+before an agent writes code. Communication uses reports without claiming authority it does not have.
+Isolation proofs verify their own cleanup. Sessions can keep their place across
+interruptions. You can check consequential Git operations before and after they run.
 
 Features have different evidence levels: focused tests and independent review
-support the shipped contracts, while live host-dependent proof is stated only
+support the shipped contracts. We claim live host-dependent proof only
 where it has actually run. A receipt or worker report is evidence, not approval.
 
-Treehouse recycling is configured in `config/treehouse.v1.json`. Treehouse is a
-separate Go CLI, not an npm dependency; the exact supported CLI version is pinned
-there and checked before any return. Create worktrees from the repository root
+Configure Treehouse recycling in `config/treehouse.v1.json`. Treehouse is a
+separate Go CLI, not an npm dependency. The config pins its supported CLI
+version, which the extension checks before any return. Create worktrees from the repository root
 with `treehouse get --lease --base main --branch <branch>`. The optional Pi
 extension checks driver-held leases at session start and every five minutes.
 It returns only idle, clean worktrees whose exact pushed head belongs to a
@@ -85,39 +84,66 @@ This setting changes only the generic attended-authority confirmation. When you 
 
 | Tool | What it does | Status |
 |------|--------------|--------|
-| `code_phage` | Reviews a plan against a stated goal before code is written and advises your agent. | shipped |
+| `code_phage` | Reviews a plan against a stated goal before your agent writes code. | shipped |
 | `tasks` | Keeps a priority-ordered session plan, then lets the owner make selected items durable in `TASKS.md`. | shipped |
 | `decision-to-spec` skill | Drafts one reviewable assignment from your explicit decision or a sourced, quoted relay, with observable outcomes and a stop point. | packaged skill |
-| `agentic_decision_evidence` | Records the stated source of a decision (direct or relayed, with quote, where, when and relayer) for a private assignment; it verifies no identity and creates no authority. | shipped |
+| `agentic_decision_evidence` | Records where a direct or relayed decision came from, with a quote and time. It verifies no identity and grants no authority. | shipped |
+
+| Tool | What it does | Status |
+|------|--------------|--------|
 | `agentic_relay_check_request` | Checks whether a recorded, scoped relay covers each requested private action; read-only preflight, with authority checked again at the action boundary. | shipped |
-| `agentic_merge_review_record` | Records independent Standards and Spec verdicts for an exact PR head; read only when the merge policy is `agents-after-checks-and-review`, and it merges nothing. | shipped |
+| `agentic_merge_review_record` | Records independent Standards and Spec verdicts for an exact PR head when configured for a review-based merge workflow. It does not merge a PR. | shipped |
 | `agentic_herdr_communication` | Submits one prompt and observes delivery and marked reports; never grants authority. | shipped |
 | `agentic_herdr_spawn_worker` | Starts and verifies one Pi worker tab in a trusted repository, reporting partial failures without an automatic retry. | shipped |
 | `agentic_aidr` | A remedy for AI;DR. Reviews writing for clarity, simplicity, brevity, and humanity. | shipped |
+
+| Tool | What it does | Status |
+|------|--------------|--------|
 | `agentic_linux_microvm_cutover` | Runs one job in a throwaway QEMU/KVM virtual machine on a Linux host, with a severity-tiered killswitch that stops escape attempts. | user-enabled, native confirmation |
 | `agentic_worker_dispatch` | Runs bounded worker journeys and observes worker liveness. Each iteration is a durable checkpoint, so an interrupted journey resumes without resending an uncertain prompt; the `journeys` action lists the records. | shipped |
-| `agentic_journey_outward_effect` | Makes one confirmed Git push, or private draft PR create or update, for an existing journey; after an interruption it checks the remote and never repeats an uncertain write. | shipped, native confirmation |
+
+| Tool | What it does | Status |
+|------|--------------|--------|
+| `agentic_journey_outward_effect` | Confirms one push or private draft PR change for a journey. After an interruption, it checks the remote without replaying an uncertain write. | shipped, native confirmation |
+
+| Tool | What it does | Status |
+|------|--------------|--------|
 | `agentic_kanban_board` | Shows the workspace task board: lanes, flags, priorities, dependencies, and which cards can run. | shipped |
 | `agentic_kanban_board_write` | Adds cards to the board through the trusted writer, which records who authorized the work. | shipped |
 | `agentic_kanban_board_update` | Moves, closes, flags, edits, or removes cards on the board, always recording who authorized the change. | shipped |
+
+| Tool | What it does | Status |
+|------|--------------|--------|
 | `agentic_kanban_board_dispatch` | Claims an eligible board card for automated contained work and creates its assignment envelope. | shipped |
+
+| Tool | What it does | Status |
+|------|--------------|--------|
 | `agentic_kanban_pulse` | Checks for ready work and available capacity, then starts assignments under the board policy. | shipped |
 | `agentic-recovery-evidence` | Opens private recovery evidence in the local TUI; it is not a model-callable tool or recovery authorization. | shipped, local review only |
 | Router | Capacity/policy routing for Board Pulse: seats with scope statements, tunable policy values, and a binding dispatch gate. | shipped |
 | Janus (bundled service) | Local Jev evaluation service on loopback: semantic ranking, the dispatch-gate judgment, redaction before every external call. See `janus/README.md`. | shipped |
 | `weekly-build-recap` skill | Prepares a local weekly GitHub recap with a picture and draft posts; posting remains yours. | shipped |
+
+| Tool | What it does | Status |
+|------|--------------|--------|
 | Bounded loop-until-done | Keeps a session working toward an explicit stopping condition within configured limits; packaged since 2.0.0 and documented here. | shipped |
 
 **Status: active development and testing.** The disabled NUDGE classifier and
-private evidence store are packaged foundations, not a running recovery
-ladder. Herdr 0.9.1 has no proven modal-safe nudge channel. No terminal
-`prompt` or `send-keys` fallback is enabled. Pending integrations below are
-not presented as live features. Worker dispatch persistence is on by
-default and resumes interrupted journeys from durable checkpoints. Its crash
-tests use a simulated Herdr adapter, a local Git remote and a simulated
-GitHub endpoint, so recovery in a live deployed pane is not yet proven.
+private evidence store are foundations, not a running recovery ladder.
+Herdr 0.9.1 has no proven modal-safe nudge channel. There is no terminal
+`prompt` or `send-keys` fallback. Pending integrations below are not live.
 
-Busy workers can receive queued briefs or messages without treating delivery as a completed answer. An idle worker without a done marker is classified as stalled, rather than complete; the former idle-eligible state has been renamed. See `scripts/enforcement/loop_until_done_guide.md` for the bounded loop's limits and stopping behavior. The weekly recap skill lives in `skills/weekly-build-recap/` and writes local drafts only.
+Worker dispatch persists interrupted journeys by default and resumes from
+durable checkpoints. Crash tests use a simulated Herdr adapter, a local Git
+remote, and a simulated GitHub endpoint. Recovery in a live pane is not yet proven.
+
+Busy workers can receive queued briefs or messages, but delivery is not a
+completed answer. The driver calls an idle worker without a done marker
+stalled, not complete; this replaces the old idle-eligible name.
+
+See `scripts/enforcement/loop_until_done_guide.md` for the bounded loop's
+limits. The weekly recap skill in `skills/weekly-build-recap/` writes only
+local drafts.
 
 ## Code review and planning
 
@@ -191,9 +217,9 @@ decision and is not permission to draft.
   behavior and the affected driver capabilities, then asks one round of
   decisions that could change acceptance, scope, ownership, review or stop
   conditions, each with a recommendation.
-- **Make outcomes observable.** Success and meaningful failure are written as
-  Given/When/Then, with the highest feasible existing test seam and the
-  reason it would catch a broken implementation.
+- **Make outcomes observable.** Describe success and meaningful failure as
+  Given/When/Then. Identify the best existing test seam and explain how it
+  would catch a broken implementation.
 - **Bound the work.** Owner, author, an independent standards and boundary
   reviewer, and an exact-artifact acceptance reviewer; exact paths and
   effects, the model, data and runtime route, exclusions, and a stop point.
@@ -246,8 +272,8 @@ models:
 
 - **Semantic ranking** (optional): Janus ranks up to eight eligible seats;
   on any Janus failure the router falls back to preference order.
-- **The binding dispatch gate**: before a task is claimed, Janus judges
-  whether the task fits the selected seat. No verdict, no dispatch — the
+- **The binding dispatch gate**: Janus judges whether a task fits the selected
+  seat before the board claims it. No verdict, no dispatch — the
   gate fails closed when Janus is unreachable.
 
 Janus binds loopback only (`127.0.0.1:8787`), reads its API key from the
@@ -273,12 +299,12 @@ authority; the system repairs SQLite from them, never the reverse.
 <details>
 <summary><strong>Tunable configuration values</strong> <em>(all keys required, defaults are conservative starting values)</em></summary>
 
-Every numeric policy in the router is a configuration key — never a
-constant in code. All keys are **required**. The repository defaults below
-are conservative starting values. Your profile overrides them. A missing key
-is a configuration validation failure: the router fails closed rather than
-guess. Changing a value participates in the configuration digest, so cached
-routing decisions computed under the old values no longer apply.
+Every numeric router policy uses a required configuration key, not a code
+constant. The repository defaults below are starting values; your profile
+can replace them. A missing key fails validation rather than guessing.
+
+The configuration digest changes with each value. Routing decisions cached
+under earlier values no longer apply.
 
 | Section | Key | Default | What it controls |
 |---|---|---|---|
@@ -286,19 +312,34 @@ routing decisions computed under the old values no longer apply.
 | `eligibility.reserve` | `scope` | `account-window` | How widely the reserve floor applies (per account per window at launch). |
 | `eligibility.reserve` | `coldStartFraction` | 0.25 | Consumption assumed for a seat with too little history: deliberately generous, so a mis-estimate fails eligibility instead of draining the account. |
 | `eligibility.reserve` | `estimateSamples` | 20 | How many recent dispatches the consumption estimate averages: enough to smooth outliers, quick enough to track a model change. |
+
+| Section | Key | Default | What it controls |
+|---|---|---|---|
 | `eligibility.reserve` | `estimateMinSamples` | 5 | Below this many observations, the estimator treats the average as noise and uses the cold-start value instead. |
+
+| Section | Key | Default | What it controls |
+|---|---|---|---|
 | `eligibility.reserve` | `estimateOutlierSigma` | 3 | Outlier cut for the estimate: one unusually slow dispatch cannot inflate the average, real tail latency is kept. |
 | `eligibility.reserve` | `ownerInteractiveOverride` | false | Whether your own interactive dispatches bypass the reserve rule (they do not, at launch). |
+
+| Section | Key | Default | What it controls |
+|---|---|---|---|
 | `ranking` | `janusUrl` | `http://127.0.0.1:8787` | The local Janus evaluation service endpoint used for semantic ranking. |
 | `ranking` | `maxCandidates` | 8 | The router ranks at most eight eligible seats per request; preference order trims the list first. |
 | `ranking` | `fallback` | `preference-order` | What happens when ranking is unavailable: dispatch falls back to your preference order and never blocks. |
+
+| Section | Key | Default | What it controls |
+|---|---|---|---|
 | `gate` | `threshold` | 0.9 | The dispatch gate's confidence threshold. A task is only dispatched when the evaluation clears it. Lower it only with evidence from your own audit log. |
 | `gate` | `timeoutMs` | 8000 | How long the gate waits for an evaluation. On timeout there is no verdict, and the gate blocks dispatch (fail closed). |
 | `gate` | `requestBudgetTokens` | 30000 | Maximum size of a gate evaluation request. Normal evaluations use under a thousand tokens. |
+
+| Section | Key | Default | What it controls |
+|---|---|---|---|
 | seat record | `maxConcurrency` | 4 | How many workers one seat may run at once. The default suits a typical single machine or hosted seat. Tune it per seat: a cluster takes more, a constrained subscription endpoint may take less. |
 | automation policy | `maxConcurrent` | 4 | How many workers may run at once across all seats. The default is a conservative start. Tune it to the capacity you actually have, and raise it when you add seats or hardware. |
 
-Seats are named for infrastructure, not models: `dgx-spark`,
+Seat names describe infrastructure, not models: `dgx-spark`,
 `dgx-spark-cluster`, `mac-studio`, `mac-studio-cluster`, `strix-halo`,
 `strix-halo-cluster`, `merge-gateway-worker`. The model is a mutable field on
 the seat, so changing models never renumbers your configuration. Each seat
@@ -375,11 +416,11 @@ across versions rather than pinning one).
 - **List and observe.** The integration checks each observed sibling checkout's
   canonical Git identity and configured origin owner. It does not require a
   registry entry. Worktree targets require a matching Treehouse lease; a
-  symlink-escaped checkout is refused.
+  the tool refuses symlink-escaped checkouts.
 - **Submit once and observe separately.** A prompt returns an immediate,
   non-authorizing delivery receipt. The `delivery` action can report queued,
-  delivered, answered, failed, unknown, or unattributed. A marked answer is
-  attributed only to its own delivery boundary and exact correlation line;
+  delivered, answered, failed, unknown, or unattributed. The tool ties a marked
+  answer only to its own delivery boundary and exact correlation line;
   missing or ambiguous evidence is never called success.
 - **Wait and read.** The same trust checks apply to settlement and marked
   reports. Unknown delivery never causes an automatic retry or resend.
@@ -401,7 +442,7 @@ The `agentic_herdr_spawn_worker` tool turns one natural-language request into He
 native lifecycle. Choose tab placement, a safe role label, a model from the
 active Pi model roster, and a trusted repository. The extension:
 
-- creates a labelled tab in the coordinator's existing workspace (coordinator pane splits are refused);
+- creates a labelled tab in the coordinator's existing workspace (it refuses coordinator pane splits);
 - starts exactly one Pi agent in it;
 - verifies the role, model arguments, pane identity, and canonical repository;
 - resolves the model against the installed Pi roster; exact installed models
@@ -410,11 +451,11 @@ active Pi model roster, and a trusted repository. The extension:
   forbidden routes, ambiguous names, and unbudgeted gateways still fail closed;
 - optionally accepts one explicit worktree target: it must be the canonical Git
   worktree root of that same eligible repository and carry an active
-  Treehouse lease observed read-only, and it is revalidated after preflight
+  Treehouse lease observed read-only; the tool checks it again after preflight
   and between mutations;
 - starts ordinary guarded workers without a per-spawn grant or native dialog;
   an explicitly supplied legacy ledger grant is still validated;
-- when a legacy grant is supplied, requires it to cover the repository, action,
+- when you supply a legacy grant, requires it to cover the repository, action,
   model, role and exact worktree path; ordinary spawns instead verify Git
   identity, origin owner, and active lease identity;
 - treats an explicit empty `models` or `roles` list on a ledger grant as any
@@ -469,11 +510,11 @@ The defaults allow at most 200 attempts or 30 minutes, whichever comes first.
 Each attempt consumes a step before dispatch. After a successful exchange,
 the default wake prompts a check immediately; an interval can delay that prompt.
 Each wake asks the agent to check the original exit condition before another
-dispatch. The per-session allowance cannot be extended or restarted. This
+dispatch. You cannot extend or restart the per-session allowance. This
 command does not dispatch board cards; Board Pulse owns those.
 
-The extension, its defaults, and its guide are included in the 2.0.0 npm
-package file list. See `scripts/enforcement/loop_until_done_guide.md`.
+The 2.0.0 npm package file list includes the extension, its defaults, and its
+guide. See `scripts/enforcement/loop_until_done_guide.md`.
 
 </details>
 
@@ -497,7 +538,7 @@ state machine.
   rechecks worker liveness and asks for native confirmation again before it
   sends. Once a send has started, recovery only observes. One clean tag
   followed by one attributable role report settles the iteration. A tag
-  without a report is polled for about two minutes, then blocks. A missing
+  without a report triggers polling for about two minutes, then blocks. A missing
   tag or an unreadable pane blocks: a missing tag is never proof that the
   prompt did not arrive. An abandoned pending task with no caller waits at
   most 30 seconds, then settles blocked.
@@ -507,8 +548,8 @@ state machine.
 - **One store per session, one owner per store.** The extension opens a
   private store for each stable Pi session ID on first use, not at import. A
   lock records the owner's PID, hostname, process start time and release
-  token. A live competing owner is refused. A stale lock is reclaimed only
-  when its same-host owner is proven dead; unknown ownership, or a host whose
+  token. The store refuses a live competing owner. It reclaims a stale lock
+  only when it can prove its same-host owner has died; unknown ownership, or a host whose
   `ps` cannot report a process start time, refuses.
 - **Keep the record small.** The index holds bounded identities and
   attributed report bodies, not briefs or terminal snapshots. A report is
@@ -522,10 +563,10 @@ the rest block. CI runs these on every pull request. They
 exercise the real dispatch code against a simulated Herdr adapter. Recovery
 in a live deployed pane, an independent live restart, and power-loss
 durability (SQLite runs in NORMAL mode) are not yet proven. Node.js 22.19.0
-or newer is required. See `docs/durable-persistence.md`.
+or newer is necessary. See `docs/durable-persistence.md`.
 
 Credit: Pi Durable (`@earendil-works/pi-durable`) 1.0.4 by Earendil Works,
-MIT. It is installed as a pinned dependency, not copied into driver source.
+MIT. The driver installs it as a pinned dependency instead of copying its source.
 
 </details>
 
@@ -553,7 +594,7 @@ For automated work, you set an explicit policy for the board. It defines:
 - the policy expiry; and
 - the risk ceiling.
 
-Without a valid policy, automated dispatch is refused.
+Without a valid policy, the board refuses automated dispatch.
 
 The `agentic_kanban_board_dispatch` tool claims the highest-priority eligible card. It
 creates a single-attempt assignment envelope that binds the card, repository,
@@ -570,7 +611,7 @@ External board clients submit `agentic-driver.board-claim-request.v2` to
 `claimFromBoardRequest`. Receipts use `agentic-driver.board-claim-receipt.v2`,
 route digests use `agentic-driver.board-claim-route.v2`, and asynchronous
 transport receipts use `agentic-driver.async-transport.receipt.v2`. Clients
-must use these names; prior request, receipt, and route contracts are rejected,
+must use these names; the driver rejects prior request, receipt, and route contracts,
 with no compatibility aliases. Unsupported request schemas fail closed.
 Workspace capabilities live at
 `.agentic-driver/capabilities.json`; route seats and providers use `board-`
@@ -656,8 +697,7 @@ after the job ends.
 
 Isolation is off at the start of every session. Use the `/agentic-isolation-enable`
 command in the Pi TUI, and confirm. The model cannot run
-that command. Every cutover run asks for its own confirmation too. Nothing is
-saved to settings, and headless sessions stay blocked.
+that command. Every cutover run asks for its own confirmation too. The tool saves nothing to settings, and headless sessions stay blocked.
 
 ### You choose the machine
 
@@ -695,8 +735,8 @@ write to the evidence channel, and ten unclassified commands in a row to push
 the anomaly threshold to its limit.
 
 The guest had no disk, no network, no host share, no credentials, and no GPU.
-Nothing outside the kernel's virtual filesystems could be mounted. Every
-attempt was denied and written to a log that survived the machine.
+The guest could mount only the kernel's virtual filesystems. The monitor
+denied and logged every other attempt; the log outlived the machine.
 
 While this is a toy test of sorts my own personal work will be running on
 these as well.
@@ -714,22 +754,21 @@ evidence. The containment layer has a rule for each step:
 - **Exfiltration and remote control.** Any network tool, any socket, ends the
   session immediately.
 - **Persistence through dependencies.** Package installs, registry writes,
-  and manifest tampering are denied and counted. Repeat the attempt and the
+  and manifest tampering trigger denials and increment the count. Repeat the attempt and the
   session ends.
 - **Self-modification.** Rewriting the agent's own tools or the monitoring
-  layer is denied and counted.
-- **Payload staging.** Growth in cache and package directories is sampled by
-  size; repeated growth ends the session.
+  layer triggers a denial and increments the count.
+- **Payload staging.** The monitor samples cache and package directory sizes;
+  repeated growth ends the session.
 - **Cross-agent escalation.** Coordination channels and shared paths used to
   reach other agents end the session immediately.
 - **Evidence tampering.** Editing logs, forging receipts, or writing to the
   console channel ends the session immediately.
-- **Reconnaissance.** Probing the sandbox to learn whether it is watched is
-  counted into a concealment index that ships in the run receipt.
+- **Reconnaissance.** The monitor counts attempts to probe the sandbox for
+  watchers in a concealment index that ships in the run receipt.
 
-Denials are written to a tamper-evident, digest-chained log that outlives the
-session, and a trip produces a kill report naming what happened, with proof
-that the cleanup completed.
+A tamper-evident, digest-chained log keeps denials beyond the session. A trip
+produces a kill report naming what happened and proving cleanup completed.
 
 ### Proven against real machines
 
@@ -737,8 +776,8 @@ Every rule above has been run against a real QEMU/KVM guest with a payload
 built to trigger it. The kill switches fired where they should, the denials
 stopped the jobs, and the cleanup held. One boundary is worth stating: two
 rules watch the same directories by design, and together they are stricter
-than either alone, so the growth-sampling trip is covered by automated tests
-rather than a live run.
+than either alone. Automated tests cover the growth-sampling trip; a live run
+does not.
 
 </details>
 
@@ -750,16 +789,16 @@ journey proceeds through steps without pausing for confirmation, replaces
 agents that get stuck, and records everything in one report you read when
 you come back.
 
-Autonomy is entered by your words alone. Say "run these overnight end to
+Your words alone set autonomous mode. Say "run these overnight end to
 end" or "don't wait for me" and the journey runs in autonomous mode. Say
 "do these two things" and it runs in the normal mode, pausing for you
-between steps. The mode is recorded in the report either way.
+between steps. The report records the mode either way.
 
 `agentic_worker_dispatch` observes coordinator session tasks through a
 read-only task store; dispatch no longer fails for lack of that store.
 Interactive steps require native confirmation. Autonomous journeys follow
 the session's existing autonomy semantics. Board cards in canonical
-`TASKS.md` are assigned by Board Pulse and `agentic_kanban_board_dispatch`,
+`TASKS.md` go through Board Pulse and `agentic_kanban_board_dispatch`,
 which own the route evidence needed for claims and envelopes. The session
 journey never claims board cards.
 
@@ -768,10 +807,10 @@ journey never claims board cards.
 You name the agents for the journey, and that list becomes the standing
 permission. If the implementer gets stuck at 3am, a replacement spawns
 automatically: same role, same model, both in the list you authorized.
-If a task needs an agent you didn't name, the attempt is recorded and that
-thread stops. Nothing outside your list can appear while you sleep.
+If a task needs an agent you didn't name, the report records the attempt and
+that thread stops. Nothing outside your list can appear while you sleep.
 
-The cast is frozen at dispatch and never grows. It can only shrink in
+Dispatch fixes the cast; it never grows. It can only shrink in
 practice (roles finishing their work), never widen.
 
 ### When agents get stuck
@@ -787,7 +826,7 @@ If it can't, the journey stops that role and continues with the others.
 
 One block tells you what happened: the terminal state, each step's outcome,
 every replacement with its gap analysis and progress judgment, and any
-denials. Every claim is tied to a receipt or a report excerpt. No prose
+denials. Every claim cites a receipt or report excerpt. No prose
 narrative to reconstruct; you read the report and know exactly where things
 stand.
 
@@ -796,35 +835,15 @@ stand.
 <details>
 <summary><strong>attended-authority guard</strong> <em>(released, 0.7.0)</em></summary>
 
-The safety net between an agent and your shell. When a model tries to
-delete, overwrite, or push, the guard stops it and asks you. Safe commands
-pass through untouched. If you deny, you get a clear reason and the session
-continues, and the agent does not retry behind your back. In headless runs
-where no human can confirm, destructive commands are refused rather than
-silently allowed.
+The attended-authority guard lets you opt in to confirmations for destructive
+tool calls. Confirmations are off by default. Choose all covered calls or
+specific commands in the interactive safeguard profile described above.
+When confirmations are on, headless destructive calls fail closed. Denials
+are visible, and the guard is not a shell sandbox.
 
-**Merge policy** *(shipped)*. The guard also enforces one merge
-setting, read from `{PI_CODING_AGENT_DIR}/config/merge-policy.v1.json`
-(the installed agent config directory) and never from the working tree.
-
-- **`human-merges-only` is the default.** You merge on GitHub; every agent
-  merge command is refused. A missing, unreadable or unknown policy falls
-  back to this value.
-- **`agents-after-checks-and-review` is opt-in.** An agent may run a plain
-  `gh pr merge <number or URL>` only when every check on the PR head has
-  passed and `agentic_merge_review_record` holds a Standards PASS and a Spec
-  PASS for that exact head. Neither reviewer may be the PR author or the
-  merging session. A new push needs a new record.
-- **Bypasses are refused under both values.** Admin and auto merges, the
-  REST merge endpoint, the `mergePullRequest` mutation, and writes to branch
-  protection or rulesets. A refusal starts with
-  `pi-agentic-driver.merge-policy.v1: needs-owner-approval:` so a
-  coordinator can pass it up as your decision.
-
-This is a workflow guard, not a security boundary. It reads command text, so
-a merge through shell indirection, another tool or the GitHub web page is
-not seen. Branch protection on GitHub remains the real gate. See
-`docs/merge-policy.md`.
+If you want a review-based merge workflow, configure merge policy separately.
+It is optional, not a default requirement. See `docs/merge-policy.md` for
+its supported settings and limitations.
 
 </details>
 
@@ -855,9 +874,9 @@ not seen. Branch protection on GitHub remains the real gate. See
   resumption that identifies goal, changed files, checks, and next step
   without executing anything.
 - **recovery journey.** A private exact-evidence store and read-only TUI review
-  are packaged. Trusted journey authorization, safe handoff, durable unknown-
+  come with the package. Trusted journey authorization, safe handoff, durable unknown-
   delivery lock, and a modal-safe nudge channel are still missing. No recovery
-  action is enabled by a stored hash, receipt, or display token.
+  action can start from a stored hash, receipt, or display token.
 - **broader evidence ledger.** Deterministic indexing, lossless projection,
   checkpoint produce/store/recover, and tested multihost reconciliation remain
   planned beyond the bounded private store.
@@ -881,11 +900,11 @@ before it does it, so a restart can tell a planned write from an uncertain
 one.
 
 - **Record intent first.** Each effect is its own Pi Durable task, committed
-  before Git or GitHub is called. A push binds the branch, the expected
+  before the tool calls Git or GitHub. A push binds the branch, the expected
   remote head (none for a new branch) and the target commit. A PR call binds
   the head, branch, base, and digests of the title and body; an update also
-  binds the PR number and the prior body digest. The PR body is used for
-  that call only and is not stored.
+  binds the PR number and the prior body digest. The tool uses the PR body
+  for that call only; it does not store it.
 - **Observe, never replay.** After an interruption the tool reads the remote
   with `git ls-remote` and `gh api` and never repeats an in-flight write. The
   exact target commit, or the exact PR fields, verify the effect. A missing
@@ -943,12 +962,6 @@ outward effects section of `docs/durable-persistence.md`.
 Each item lands here as its own extension when its scenario passes
 acceptance with all prohibited effects absent.
 
-### Portable repository contract
-
-The `templates/AGENTS.md` file is a starting contract you can copy into any
-repository that uses Pi agents. It asks for controlled tasks and realistic tests, and
-treats agent reports as untrusted evidence. It never overwrites an existing `AGENTS.md`. Add your project rules below it.
-
 ## Packaged skills
 
 *Methods your agent loads on request. A skill never grants authority.*
@@ -1004,7 +1017,7 @@ pi install git:github.com/evoclock/pi-agentic-driver@<latest-tag>
 
 Released extensions load independently.
 
-For optional structural code search, see the separate [public ast-sgrep fork](https://github.com/evoclock/ast-sgrep). It is not bundled with or installed by Pi Agentic Driver. The Pi BigInt and host TypeBox corrections are on the fork's `main`; a follow-up Pi peer-range correction remains on [upstream PR #36](https://github.com/AdityaVG13/ast-sgrep/pull/36), not yet on the fork's `main`. These source changes have not been published as an npm package. The driver does not select or install a code-search provider.
+For optional structural code search, see the separate [public ast-sgrep fork](https://github.com/evoclock/ast-sgrep). It is not bundled with or installed by Pi Agentic Driver. The Pi BigInt and host TypeBox corrections are on the fork's `main`; a follow-up Pi peer-range correction remains on [upstream PR #36](https://github.com/AdityaVG13/ast-sgrep/pull/36), not yet on the fork's `main`. No npm package includes these source changes yet. The driver does not select or install a code-search provider.
 
 ### Choose which package resources load
 
@@ -1047,16 +1060,42 @@ package. You are not required to use every extension.
 <details>
 <summary>Curate an agents-to-public sync</summary>
 
-From a clean agents branch based on `main`, provide private deny terms with `--terms PATH`, `PUBLIC_SYNC_TERMS_FILE`, `config/public-sync-terms.local.json`, or `~/.config/pi-agentic-driver/public-sync-terms.local.json`, in that order. The scanner also reads private repository names from the existing repository registry. Missing local terms block the run. Existing public test fixtures have exact path-and-value-hash allowances in `config/public-sync-fixture-allowances.json`; all other secret matches block the run. The regenerated public lockfile has hashed, entry-scoped allowances for third-party dependency metadata; all other model or provider matches still block. Run `python3 scripts/public_sync.py --public /path/to/public-checkout` to inspect a dry-run report. The checked-in `config/public-sync-exclusions.json` filters private-only paths. Any sensitive content or excluded `package.json` file entry blocks the run; resolve it separately before retrying.
+Start from a clean agents branch based on `main`. Provide private deny terms
+in this order of precedence:
 
-After a clean report, `--apply --branch sync/agents-curated` requires the source checkout at agents `main` with a clean tracked tree. It leases a fresh Treehouse worktree from the existing public checkout's `main`, copies the filtered tree, checks `npm test` and `npm pack --dry-run`, checks packed filenames, and makes one freshly authored commit. The script never pushes, creates remotes, or changes push URLs. Repeated clean dry runs are read-only; a no-change apply does nothing. Inspect the diff and packed contents independently before any owner-controlled public handoff. A failed apply leaves its leased worktree for inspection.
+1. `--terms PATH`
+2. `PUBLIC_SYNC_TERMS_FILE`
+3. `config/public-sync-terms.local.json`
+4. `~/.config/pi-agentic-driver/public-sync-terms.local.json`
+
+The scanner also reads private repository names from the existing registry.
+Missing local terms block the run. Exact path-and-value-hash allowances for
+public test fixtures live in `config/public-sync-fixture-allowances.json`.
+The regenerated public lockfile has hashed, entry-scoped allowances for
+third-party dependency metadata. Other secret, model, or provider matches
+still block the run.
+
+Run `python3 scripts/public_sync.py --public /path/to/public-checkout` for a
+dry-run report. `config/public-sync-exclusions.json` filters private-only
+paths. Resolve sensitive content or excluded `package.json` file entries
+before retrying.
+
+After a clean report, `--apply --branch sync/agents-curated` requires a clean
+tracked tree at agents `main`. It leases a Treehouse worktree from the public
+checkout's `main` and copies the filtered tree. It runs `npm test` and
+`npm pack --dry-run`, checks packed filenames, and creates one fresh commit.
+
+The script does not push, create remotes, or change push URLs. Repeated clean
+dry runs are read-only; an apply with no changes does nothing. Inspect the
+diff and package contents before public handoff. A failed apply leaves its
+leased worktree for inspection.
 
 </details>
 
 ## License
 
 AGPL-3.0-only with author-attribution additional terms (Section 7(b));
-see [LICENSE](LICENSE). Commercial use, forks, and substantial modifications
-are permitted when all AGPL and attribution obligations are followed. A
-separate commercial licence is available for organisations requiring
-proprietary modifications or other terms incompatible with the AGPL.
+see [LICENSE](LICENSE). You may use it commercially, fork it, and make
+substantial changes if you follow the AGPL and attribution terms. A separate
+commercial licence is available for organisations requiring proprietary
+modifications or other terms incompatible with the AGPL.
