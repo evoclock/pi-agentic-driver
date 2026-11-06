@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Restore the shipped-features and router-configuration catalogs in the README to single tables.
+
 ## 3.1.3
 
 - Rewrite the README as product documentation: Herdr spawn through `agentic_herdr_spawn_worker`, confirmations off by default, and merge policy as an optional separate setting.
