@@ -1,5 +1,10 @@
 ## Unreleased
 
+## 3.1.3
+
+- Rewrite the README as product documentation: Herdr spawn through `agentic_herdr_spawn_worker`, confirmations off by default, and merge policy as an optional separate setting.
+- Stop tracking local fleet `AGENTS.md`. Optional spawn guidance lives in `templates/AGENTS.md` for people who already have their own file.
+
 ## 3.1.2
 
 - Add an agent-accessible on/off toggle and optional non-blocking TUI shortcut for generic command confirmations, backed by the same user-profile setting. Disabling clears per-command selections; mandatory safeguards remain separate.
