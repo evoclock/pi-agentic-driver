@@ -12,13 +12,12 @@
     "public-pr-wording-tests": "Reuse public-pr-wording-tests in .driver/gate-rules.json; unittest's host-observed Ran N total is the denominator."
   },
   "mutation": {
-    "id": "interactive-safeguard-default",
-    "path": "config/interactive-safeguards.v1.example.json",
-    "before": "\"enableAllInteractiveConfirmations\": false",
-    "after": "\"enableAllInteractiveConfirmations\": true",
+    "id": "github-origin-mixed-case",
+    "path": "scripts/enforcement/herdr_lifecycle_pi.js",
+    "before": "const ssh = new RegExp(`^git@github\\\\.com:${owner}/([a-zA-Z0-9][a-zA-Z0-9-]{0,63})(?:\\\\.git)?$`);",
+    "after": "const ssh = new RegExp(`^git@github\\\\.com:${owner}/([a-z0-9][a-z0-9-]{0,63})(?:\\\\.git)?$`);",
     "testCheckId": "node-tests",
-    "scriptEnv": "SAFEGUARD_CONFIG_FILE",
-    "testPaths": ["tests/test_interactive_safeguard_config.mjs"],
-    "reason": "Changing the shipped example to enable all confirmations must fail the opt-in-default assertion."
+    "testPaths": ["tests/test_worktree_spawn_target.mjs"],
+    "reason": "Restoring lowercase-only matching for either GitHub origin form must fail the mixed-case acceptance regression."
   }
 }

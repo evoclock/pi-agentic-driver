@@ -1,6 +1,9 @@
 ## Unreleased
 
+## 3.1.2
+
 - Add an agent-accessible on/off toggle and optional non-blocking TUI shortcut for generic command confirmations, backed by the same user-profile setting. Disabling clears per-command selections; mandatory safeguards remain separate.
+- Accept mixed-case repository names in trusted GitHub origins for both SSH and HTTPS.
 
 ## 3.1.1
 

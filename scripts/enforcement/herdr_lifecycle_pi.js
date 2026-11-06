@@ -548,8 +548,8 @@ export function resolveTrustedSpawnRepository(coordinatorCwd, requestedName) {
   // Private-first checkouts can be named for the public project while their
   // origin is the owner's private development repository. Compare the owner,
   // not the checkout basename; the remote repo name must still be bounded.
-  const ssh = new RegExp(`^git@github\\.com:${owner}/([a-z0-9][a-z0-9-]{0,63})(?:\\.git)?$`);
-  const https = new RegExp(`^https://github\\.com/${owner}/([a-z0-9][a-z0-9-]{0,63})(?:\\.git)?$`);
+  const ssh = new RegExp(`^git@github\\.com:${owner}/([a-zA-Z0-9][a-zA-Z0-9-]{0,63})(?:\\.git)?$`);
+  const https = new RegExp(`^https://github\\.com/${owner}/([a-zA-Z0-9][a-zA-Z0-9-]{0,63})(?:\\.git)?$`);
   const remoteName = origin.match(ssh)?.[1] ?? origin.match(https)?.[1];
   if (!remoteName || policy.denyRepositories.some((pattern) => pattern === remoteName
       || (pattern.endsWith("*") && remoteName.startsWith(pattern.slice(0, -1))))) {
