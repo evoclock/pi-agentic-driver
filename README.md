@@ -74,12 +74,6 @@ never opens a settings confirmation dialog. Both paths store the setting in
 file is storage, not a required manual setup step. The package ships an example
 at `config/interactive-safeguards.v1.example.json`.
 
-The package loads `extensions/attended-authority-guard.ts` from its extension
-directory. Excluding `!extensions/attended-authority-guard.ts` from the package
-resource selection hides the toggle and the generic guard entirely. Do not
-exclude it when you need interactive confirmations. See
-[interactive safeguards](docs/interactive-safeguards.md) for use and limits.
-
 Turning the toggle off clears any saved per-command selections as well as the
 package-wide switch. The stored profile also supports two levels:
 
