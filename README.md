@@ -50,15 +50,13 @@ proofs for agentic workflows.
 
 ## Herdr spawn
 
-Start Pi tabs and panes with `agentic_herdr_spawn_worker` (spelling **herdr**). Do not use raw Herdr CLI from a bot shell, including agent start, prompt, read, wait, and pane send-keys. The attended-authority guard refuses those commands. Use `agentic_herdr_communication` to talk to a running worker.
+Use `agentic_herdr_spawn_worker` to start Pi worker tabs and panes. Do not run Herdr commands from a bot shell. The guard blocks direct agent starts, prompts, reads, waits, and pane send-keys. Use `agentic_herdr_communication` to talk to a running worker.
 
-A canonical owner-eligible repository needs no registry entry, named workspace, per-spawn grant, or dialog. Start a fresh Pi process after installation so the updated tool loads.
+In an eligible repository, you do not need to register the repository, create a named workspace, or approve each spawn. Restart Pi after installation to load the updated tool.
 
-Trusted GitHub origins use the repository name as GitHub shows it, including mixed case such as `OpenMausBot`. SSH and HTTPS origins both accept that case.
+For trusted GitHub origins, use the repository name with its GitHub capitalization (for example, `OpenMausBot`). This works with SSH and HTTPS. The tool uses your configured default Pi model unless you choose another.
 
-The default Pi model is the one you configured, until you name another.
-
-To add this spawn path to your own `AGENTS.md`, copy the optional section from [`templates/AGENTS.md`](templates/AGENTS.md). The template does not replace an existing file. The implementation is [`extensions/herdr-lifecycle.ts`](extensions/herdr-lifecycle.ts) (`agentic_herdr_spawn_worker`) and [`extensions/attended-authority-guard.ts`](extensions/attended-authority-guard.ts).
+Already have an `AGENTS.md`? If you want this spawn path in it, copy the optional guidance from [`templates/AGENTS.md`](templates/AGENTS.md). See [`extensions/herdr-lifecycle.ts`](extensions/herdr-lifecycle.ts) and [`extensions/attended-authority-guard.ts`](extensions/attended-authority-guard.ts) for the implementation.
 
 ## Interactive safeguard configuration
 

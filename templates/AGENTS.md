@@ -87,15 +87,13 @@ task.
 
 ## Optional Herdr spawn path
 
-Keep your own repository `AGENTS.md`. This file is a starting contract you can copy from; it does not replace an existing file.
+If you already have an `AGENTS.md`, keep it. Copy these rules into it if you want to use this spawn path:
 
-If you want this package's Herdr spawn path in your own guidance, add these rules and point at the implementation:
-
-- Start Pi tabs and panes only with `agentic_herdr_spawn_worker` (spelling **herdr**).
-- Do not run raw Herdr CLI from a bot shell, including agent start, prompt, read, wait, and pane send-keys.
+- Start Pi worker tabs and panes with `agentic_herdr_spawn_worker`.
+- Do not run Herdr commands from a bot shell, including direct agent starts, prompts, reads, waits, or pane send-keys.
 - Use `agentic_herdr_communication` to talk to a running worker.
 
-The implementation is `extensions/herdr-lifecycle.ts` and `extensions/attended-authority-guard.ts`.
+See `extensions/herdr-lifecycle.ts` and `extensions/attended-authority-guard.ts` for the implementation.
 
 ## Repository-specific section
 
