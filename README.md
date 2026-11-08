@@ -106,7 +106,7 @@ integration limits.
 | `agentic_relay_check_request` | Checks whether a recorded, scoped relay covers each requested private action; read-only preflight, with authority checked again at the action boundary. | shipped |
 | `agentic_merge_review_record` | Records independent Standards and Spec verdicts for an exact PR head when configured for a review-based merge workflow. It does not merge a PR. | shipped |
 | `agentic_herdr_communication` | Submits one prompt and observes delivery and marked reports; never grants authority. | shipped |
-| `agentic_herdr_spawn_worker` | Starts and verifies one Pi worker tab in a trusted repository, reporting partial failures without an automatic retry. | shipped |
+| `agentic_herdr_spawn_worker` | Starts and verifies one Pi worker tab in a trusted repository, reporting partial failures without recreating the layout. | shipped |
 | `agentic_aidr` | A remedy for AI;DR. Reviews writing for clarity, simplicity, brevity, and humanity. | shipped |
 | `agentic_linux_microvm_cutover` | Runs one job in a throwaway QEMU/KVM virtual machine on a Linux host, with a severity-tiered killswitch that stops escape attempts. | user-enabled, native confirmation |
 | `agentic_worker_dispatch` | Runs bounded worker journeys and observes worker liveness. Each iteration is a durable checkpoint, so an interrupted journey resumes without resending an uncertain prompt; the `journeys` action lists the records. | shipped |
@@ -423,7 +423,7 @@ native lifecycle. Choose tab placement, a safe role label, a model from the
 active Pi model roster, and a trusted repository. The extension:
 
 - creates a labelled tab in the coordinator's existing workspace (it refuses coordinator pane splits);
-- starts exactly one Pi agent in it;
+- starts one Pi agent in it, with bounded same-pane retries only when the new shell reports `agent_pane_busy`; it never creates another tab on retry;
 - verifies the role, model arguments, pane identity, and canonical repository;
 - resolves the model against the installed Pi roster; exact installed models
   from known subscription providers need no individual route entry in
@@ -433,6 +433,8 @@ active Pi model roster, and a trusted repository. The extension:
   worktree root of that same eligible repository and carry an active
   Treehouse lease observed read-only; the tool checks it again after preflight
   and between mutations;
+- resolves the named primary clone beside the coordinator when present, or under the user's home directory when that sibling is missing; both paths require the same canonical primary-clone and configured-origin-owner checks;
+- leaves repository deny patterns off for spawn unless `enforceSpawnDenyRepositories: true` is set in the profile's `config/relay-authority.v1.json`; public visibility alone is not refused;
 - starts ordinary guarded workers without a per-spawn grant or native dialog;
   an explicitly supplied legacy ledger grant is still validated;
 - when you supply a legacy grant, requires it to cover the repository, action,
@@ -443,7 +445,7 @@ active Pi model roster, and a trusted repository. The extension:
 - uses fixed argv with `shell: false` and no arbitrary Herdr or shell surface;
 - returns explicit `pane_created`, `tab_created`, or `agent_started` partial
   states when only part of the operation succeeds; and
-- never retries, moves, closes, or deletes created state automatically.
+- never retries layout creation or a non-busy start, and never moves, closes, or deletes created state automatically.
 
 ![A role-labelled worker spawned in an individual tab](assets/spawn-worker-tab.png)
 
