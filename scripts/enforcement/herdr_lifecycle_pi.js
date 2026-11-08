@@ -6,7 +6,8 @@
 // and a bounded receipt. This is deliberately NOT a general Herdr management
 // surface: no raw management verbs, no terminal remote control, no model
 // allowlist constant. Pane placement uses pane split directly; tab placement
-// uses tab create. Both capture the returned pane identity and start once.
+// uses tab create. Both capture the returned pane identity; only a busy shell
+// may cause a bounded retry of start on that same pane.
 import { createHash } from "node:crypto";
 import { accessSync, constants as fsConstants, readFileSync, realpathSync, statSync, lstatSync } from "node:fs";
 import { homedir } from "node:os";
@@ -460,15 +461,19 @@ export function resolveTrustedSpawnRepository(coordinatorCwd, requestedName) {
   if (typeof requestedName !== "string" || !SAFE_NAME_REGEXP.test(requestedName)) {
     throw lifecycleError("repository_untrusted", "the requested repository name is invalid", "denied");
   }
-  const candidate = resolve(coordinatorReal, "..", requestedName);
+  const sibling = resolve(coordinatorReal, "..", requestedName);
+  let candidate = sibling;
   let candidateReal;
   try {
     candidateReal = realpathSync(candidate);
-  } catch {
-    throw lifecycleError("repository_unavailable", "the requested repository is unavailable");
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw lifecycleError("repository_unavailable", "the requested repository is unavailable");
+    candidate = resolve(homedir(), requestedName);
+    try { candidateReal = realpathSync(candidate); }
+    catch { throw lifecycleError("repository_unavailable", "the requested repository is unavailable"); }
   }
-  if (candidateReal !== resolve(coordinatorReal, "..", requestedName)) {
-    throw lifecycleError("repository_untrusted", "the requested repository entry is not a canonical sibling", "denied");
+  if (candidateReal !== candidate) {
+    throw lifecycleError("repository_untrusted", "the requested repository entry is not canonical", "denied");
   }
   let standaloneRoot = false;
   try {
@@ -507,10 +512,11 @@ export function resolveTrustedSpawnRepository(coordinatorCwd, requestedName) {
   if (policy?.schema !== "relay-authority.v1" || typeof owner !== "string"
       || !/^[a-zA-Z0-9-]{1,39}$/.test(owner)
       || !Array.isArray(policy.denyRepositories)
-      || policy.denyRepositories.some((pattern) => typeof pattern !== "string" || !/^[a-z0-9*-]{1,64}$/.test(pattern))) {
+      || policy.denyRepositories.some((pattern) => typeof pattern !== "string" || !/^[a-z0-9*-]{1,64}$/.test(pattern))
+      || (policy.enforceSpawnDenyRepositories !== undefined && typeof policy.enforceSpawnDenyRepositories !== "boolean")) {
     throw lifecycleError("repository_policy_invalid", "the configured repository owner policy is invalid", "denied");
   }
-  if (policy.denyRepositories.some((pattern) => pattern === requestedName
+  if (policy.enforceSpawnDenyRepositories === true && policy.denyRepositories.some((pattern) => pattern === requestedName
       || (pattern.endsWith("*") && requestedName.startsWith(pattern.slice(0, -1))))) {
     throw lifecycleError("repository_denied", "the requested repository is excluded by policy", "denied");
   }
@@ -523,8 +529,8 @@ export function resolveTrustedSpawnRepository(coordinatorCwd, requestedName) {
   const ssh = new RegExp(`^git@github\\.com:${owner}/([a-zA-Z0-9][a-zA-Z0-9-]{0,63})(?:\\.git)?$`);
   const https = new RegExp(`^https://github\\.com/${owner}/([a-zA-Z0-9][a-zA-Z0-9-]{0,63})(?:\\.git)?$`);
   const remoteName = origin.match(ssh)?.[1] ?? origin.match(https)?.[1];
-  if (!remoteName || policy.denyRepositories.some((pattern) => pattern === remoteName
-      || (pattern.endsWith("*") && remoteName.startsWith(pattern.slice(0, -1))))) {
+  if (!remoteName || (policy.enforceSpawnDenyRepositories === true && policy.denyRepositories.some((pattern) => pattern === remoteName
+      || (pattern.endsWith("*") && remoteName.startsWith(pattern.slice(0, -1)))))) {
     throw lifecycleError("repository_origin_untrusted", "the repository origin is not eligible under the configured owner", "denied");
   }
   return candidateReal;
@@ -1187,6 +1193,21 @@ async function invokeHerdr(argv, canonicalRoot, options, signal) {
   return normalized.stdout;
 }
 
+// Layout creation can return before the pane's shell is ready. Only the
+// explicit busy response is safe to retry; every attempt uses the same pane.
+async function startOnReadyPane(startCall, spawnCwd, options, signal, revalidate) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt) revalidate();
+    try { return await invokeHerdr(startCall, spawnCwd, options, signal); }
+    catch (error) {
+      if (attempt === 3 || !/\(agent_pane_busy(?:\b|:)/.test(error?.message ?? "")) {
+        throw lifecycleError("start_failed", error?.message || "Herdr agent start failed");
+      }
+      await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+    }
+  }
+}
+
 function agentListArgv() {
   return Object.freeze(["agent", "list"]);
 }
@@ -1298,15 +1319,14 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
         context?.cwd, repository, canonicalRoot, request, worktreeTarget, options, "between mutations",
       );
 
-      // Start exactly once in the shell pane returned by the layout command.
+      // Retry only a busy shell, never layout creation or a different pane.
       const startCall = startArgv(role, rootPaneId, modelArgv);
-      let startRaw;
-      try {
-        startRaw = await invokeHerdr(startCall, spawnCwd, options, signal);
-        agentStartSucceeded = true;
-      } catch (error) {
-        throw lifecycleError("start_failed", error?.message || "Herdr agent start failed");
-      }
+      const startRaw = await startOnReadyPane(startCall, spawnCwd, options, signal, () => {
+        canonicalRoot = revalidateSpawnAuthority(
+          context?.cwd, repository, canonicalRoot, request, worktreeTarget, options, "before agent start retry",
+        );
+      });
+      agentStartSucceeded = true;
 
       // Agent start is a mutation, so authorization must be resolved again
       // before accepting any start/read-back facts.
@@ -1557,15 +1577,14 @@ export async function executeHerdrSpawnWorkerAttendedElectron(params, context, o
         context.cwd, repository, canonicalRoot, request, worktreeTarget, options, "between mutations",
       );
 
-      // Start exactly once in the tab's root pane.
+      // Retry only a busy shell in the tab's original root pane.
       const startCall = startArgv(role, rootPaneId, modelArgv);
-      let startRaw;
-      try {
-        startRaw = await invokeHerdr(startCall, spawnCwd, options, signal);
-        agentStartSucceeded = true;
-      } catch (error) {
-        throw lifecycleError("start_failed", error?.message || "Herdr agent start failed");
-      }
+      const startRaw = await startOnReadyPane(startCall, spawnCwd, options, signal, () => {
+        canonicalRoot = revalidateSpawnAuthority(
+          context.cwd, repository, canonicalRoot, request, worktreeTarget, options, "before agent start retry",
+        );
+      });
+      agentStartSucceeded = true;
 
       canonicalRoot = revalidateSpawnAuthority(
         context.cwd, repository, canonicalRoot, request, worktreeTarget, options, "after agent start",

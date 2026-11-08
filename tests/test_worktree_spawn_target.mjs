@@ -15,7 +15,7 @@ import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import os, { tmpdir } from "node:os";
 import { join } from "node:path";
 import childProcess, { execFileSync } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
@@ -102,6 +102,8 @@ if (command === "pane" && argv[1] === "split") {
   process.exit(0);
 }
 if (command === "agent" && argv[1] === "start") {
+  if (mode === "busy-once" && readFileSync(process.env.FAKE_HERDR_LOG, "utf8").split("\\n").filter((line) => line.includes('"start"')).length === 1)
+    fail("agent_pane_busy", "pane shell is starting");
   if (mode === "start-fail") fail("start_failed", "the agent could not start");
   emit({ result: { type: "agent_started", argv,
     agent: { name: argv[2], agent: "pi", pane_id: "w7:p10", cwd: paneCwd("w7:p10"), launch_pending: false, interactive_ready: true } } });
@@ -335,15 +337,66 @@ test("Git root spelling with a different inode denies a lowercase request", () =
   }
 });
 
-// Why: a foreign or excluded remote must fail before layout even if the checkout exists.
-test("guarded start refuses a foreign origin or denied name before creating a tab", async () => {
+// Why: legacy deny patterns remain inert until explicitly opted in for spawn.
+test("spawn deny patterns are opt-in for both checkout and origin names", async () => {
+  for (const name of [WORKER_REPO, "agents-*"]) {
+    const f = fixture({ omitTarget: true });
+    try {
+      const policyPath = join(f.root, "profile", "config", "relay-authority.v1.json");
+      const policy = { schema: "relay-authority.v1", githubOwner: "evoclock", denyRepositories: [name] };
+      writeFileSync(policyPath, JSON.stringify(policy));
+      assert.equal(resolveTrustedSpawnRepository(f.coordinator, WORKER_REPO), f.workerRoot);
+      writeFileSync(policyPath, JSON.stringify({ ...policy, enforceSpawnDenyRepositories: true }));
+      assert.throws(() => resolveTrustedSpawnRepository(f.coordinator, WORKER_REPO), (error) => error.code === "repository_denied");
+      git(f.workerRoot, ["remote", "set-url", "origin", "git@github.com:evoclock/blocked-origin.git"]);
+      writeFileSync(policyPath, JSON.stringify({ ...policy, denyRepositories: ["blocked-*"], enforceSpawnDenyRepositories: true }));
+      assert.throws(() => resolveTrustedSpawnRepository(f.coordinator, WORKER_REPO), (error) => error.code === "repository_origin_untrusted");
+      writeFileSync(policyPath, JSON.stringify({ ...policy, denyRepositories: ["blocked-*"], enforceSpawnDenyRepositories: false }));
+      assert.equal(resolveTrustedSpawnRepository(f.coordinator, WORKER_REPO), f.workerRoot);
+    } finally { cleanup(f.root); }
+  }
+});
+
+// Why: a coordinator in another repository's Treehouse slot still finds the
+// named primary under home; the optional target remains lease-validated.
+test("named primary resolves from home when coordinator is in another Treehouse slot", async () => {
+  const f = fixture();
+  const original = os.homedir;
+  try {
+    const coordinatorSlot = makeWorktree(f.coordinator, join(f.root, "other-pool", "slot9", "coordinator"), "coord-slot");
+    const home = join(f.root, "home");
+    mkdirSync(home);
+    const homeRepo = gitRepo(join(home, WORKER_REPO));
+    git(homeRepo, ["remote", "add", "origin", `https://github.com/evoclock/${WORKER_REPO}.git`]);
+    const homeLease = makeWorktree(homeRepo, join(f.root, "home-pool", "slot1", WORKER_REPO), "home-lease");
+    const lease = { ...f.lease, path: homeLease, branch: "home-lease" };
+    writeFileSync(f.statePath, JSON.stringify([lease]));
+    os.homedir = () => home;
+    syncBuiltinESMExports();
+    f.context.cwd = coordinatorSlot;
+    f.params.worktreePath = homeLease;
+    process.env.HERDR_PANE_ID = "w7:p1";
+    assert.equal(resolveTrustedSpawnRepository(coordinatorSlot, WORKER_REPO), homeRepo);
+    const result = await executeHerdrSpawnWorker(f.params, f.context, f.herdrOptions);
+    assert.equal(result.status, "spawned", JSON.stringify(result));
+    assert.equal(result.repository, homeRepo);
+    assert.equal(result.worktreePath, homeLease);
+  } finally {
+    os.homedir = original;
+    syncBuiltinESMExports();
+    cleanup(f.root);
+  }
+});
+
+// Why: a foreign or explicitly excluded remote must fail before layout even if the checkout exists.
+test("guarded start refuses a foreign origin or opted-in denied name before creating a tab", async () => {
   for (const denied of ["origin", "policy"]) {
     const f = fixture({ omitTarget: true });
     process.env.HERDR_PANE_ID = "synthetic-pane";
     try {
       if (denied === "origin") git(f.workerRoot, ["remote", "set-url", "origin", "git@github.com:elsewhere/agents-work.git"]);
       else writeFileSync(join(f.root, "profile", "config", "relay-authority.v1.json"), JSON.stringify({
-        schema: "relay-authority.v1", githubOwner: "evoclock", denyRepositories: [WORKER_REPO],
+        schema: "relay-authority.v1", githubOwner: "evoclock", denyRepositories: [WORKER_REPO], enforceSpawnDenyRepositories: true,
       }));
       const result = await executeHerdrSpawnWorker(f.params, f.context, f.herdrOptions);
       assert.equal(result.code, denied === "origin" ? "repository_origin_untrusted" : "repository_denied");
@@ -365,6 +418,22 @@ test("worker spawn uses coordinator workspace without matching repository label"
       assert.equal(readLog(f.log).some(({ argv }) => argv[0] === "tab" && argv.includes("w7")), true);
     } finally { cleanup(f.root); }
   }
+});
+
+// Why: layout can finish before its shell accepts a start; retry only that pane.
+test("a busy new pane retries start without creating another tab", async () => {
+  const f = fixture({ mode: "busy-once", omitTarget: true });
+  try {
+    process.env.HERDR_PANE_ID = "w7:p1";
+    const result = await executeHerdrSpawnWorker(f.params, f.context, f.herdrOptions);
+    assert.equal(result.status, "spawned", JSON.stringify(result));
+    const calls = readLog(f.log).map(({ argv }) => argv);
+    assert.equal(calls.filter(([a, b]) => a === "tab" && b === "create").length, 1);
+    const starts = calls.filter(([a, b]) => a === "agent" && b === "start");
+    assert.equal(starts.length, 2);
+    assert.deepEqual(starts[0], starts[1]);
+    assert.ok(starts[0].includes("w7:p10"));
+  } finally { cleanup(f.root); }
 });
 
 // Why: A worker must not take over a coordinator pane.
