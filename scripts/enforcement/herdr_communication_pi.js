@@ -541,6 +541,8 @@ function processFailure(code, status = "blocked", diagnostic) {
     failure = communicationError("role_blocked", "the target role is blocked; the brief was not submitted", "blocked");
   } else if (code === "aborted") {
     failure = communicationError("aborted", "Herdr communication was aborted");
+  } else if (typeof code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(code)) {
+    failure = communicationError(code, boundedFailureDiagnostic(diagnostic) || `Herdr returned ${code}`, status);
   } else {
     failure = communicationError("herdr_process_failed", "Herdr returned a process failure", status);
   }
@@ -754,7 +756,7 @@ async function invokeHerdr(action, params, context, options = {}, signal) {
     throw processFailure(
       external.code,
       "blocked",
-      normalized.stderr || external.message,
+      external.message || normalized.stderr,
     );
   }
   // Herdr's agent read command is the one intentional raw-text exception:
@@ -767,8 +769,9 @@ async function invokeHerdr(action, params, context, options = {}, signal) {
   } catch {
     throw communicationError("malformed_json", "Herdr returned malformed JSON");
   }
-  if (extractExternalErrorCode(parsed)) {
-    throw processFailure(extractExternalErrorCode(parsed));
+  if (isPlainObject(parsed?.error)) {
+    const external = externalErrorDetails(parsed);
+    throw processFailure(external.code, "blocked", external.message);
   }
   return parsed;
 }

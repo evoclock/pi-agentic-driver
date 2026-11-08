@@ -17,6 +17,7 @@ import {
   HERDR_ROLE_PATTERN,
   HERDR_ROLE_POLICY,
   resolveTrustedHerdrExecutable,
+  registerHerdrCommunicationInterface,
 } from "./herdr_communication_pi.js";
 import { isAttendedElectronContext } from "./native_tui_context.js";
 import { reserveApprovalUse, recordApprovalUse, authorizeApproval, checkRelayRequests } from "./approval_ledger_pi.js";
@@ -78,6 +79,7 @@ export const HERDR_SPAWN_WORKER_PARAMETERS = Object.freeze({
     // must resolve to the canonical Git worktree root of the registered
     // repository and carry an active Treehouse lease observed read-only.
     worktreePath: { type: "string", minLength: 1, maxLength: 1024 },
+    workspace: { type: "string", minLength: 1, maxLength: 128 },
     authority: { type: "object", additionalProperties: false, properties: { ledgerId: { type: "string" } }, required: ["ledgerId"] },
   },
   required: ["placement", "role", "model", "repository"],
@@ -173,15 +175,19 @@ export function validateSpawnParams(params) {
     throw lifecycleError("invalid_parameters", "spawn parameters must be an object", "denied");
   }
   const requiredKeys = ["placement", "role", "model", "repository"];
-  const optionalKeys = ["worktreePath", "authority"];
+  const optionalKeys = ["worktreePath", "workspace", "authority"];
   const keys = Object.keys(params);
   if (keys.length < requiredKeys.length || keys.length > requiredKeys.length + optionalKeys.length
       || requiredKeys.some((k) => !keys.includes(k))
       || keys.some((k) => !requiredKeys.includes(k) && !optionalKeys.includes(k))
       || (params.authority !== undefined && (!isPlainObject(params.authority) || Object.keys(params.authority).length !== 1 || typeof params.authority.ledgerId !== "string"))) {
-    throw lifecycleError("closed_parameters", "spawn_worker accepts placement, role, model, repository, and optional worktreePath or authority ledgerId", "denied");
+    throw lifecycleError("closed_parameters", "spawn_worker accepts placement, role, model, repository, and optional worktreePath, workspace, or authority ledgerId", "denied");
   }
-  const { placement, role, model, repository, worktreePath } = params;
+  const { placement, role, model, repository, worktreePath, workspace } = params;
+  if (workspace !== undefined && (typeof workspace !== "string" || workspace.length > 128
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(workspace))) {
+    throw lifecycleError("workspace_invalid", "workspace must be a bounded workspace id or label", "denied");
+  }
   if (worktreePath !== undefined) {
     if (typeof worktreePath !== "string" || worktreePath.length > 1024 || !worktreePath.trim()
         || worktreePath.includes("\0")) {
@@ -209,6 +215,7 @@ export function validateSpawnParams(params) {
   return {
     placement, role, model, repository,
     ...(worktreePath === undefined ? {} : { worktreePath }),
+    ...(workspace === undefined ? {} : { workspace }),
     ...(params.authority ? { authority: params.authority } : {}),
   };
 }
@@ -1093,6 +1100,18 @@ async function availableWorkspace(canonicalRoot, options, signal) {
   return workspaceId;
 }
 
+async function selectedWorkspace(selection, canonicalRoot, options, signal) {
+  const listed = parseJsonEnvelope(await invokeHerdr(["workspace", "list"], canonicalRoot, options, signal), "workspace list");
+  if (!Array.isArray(listed.workspaces) || listed.workspaces.length > 128) {
+    throw lifecycleError("workspace_unavailable", "workspace list is invalid", "denied");
+  }
+  const matches = listed.workspaces.filter((item) => item?.workspace_id === selection || item?.label === selection);
+  if (matches.length !== 1 || !/^w[A-Za-z0-9]+$/.test(matches[0]?.workspace_id ?? "")) {
+    throw lifecycleError("workspace_unavailable", "the selected workspace was not found uniquely in workspace list", "denied");
+  }
+  return matches[0].workspace_id;
+}
+
 export function splitArgv(coordinatorPaneId, canonicalRoot, placement) {
   return Object.freeze([
     "pane", "split", coordinatorPaneId,
@@ -1246,11 +1265,9 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
       : null;
     let spawnCwd = worktreeTarget ? worktreeTarget.worktreePath : canonicalRoot;
 
-    // The calling pane must be a Herdr session pane; `pane current --current`
-    // resolves the coordinator pane identity for the final move step.
     const currentPane = process.env.HERDR_PANE_ID;
-    if (typeof currentPane !== "string" || !currentPane.trim()) {
-      throw lifecycleError("current_pane_unavailable", "HERDR_PANE_ID is not set; no current pane to resolve", "denied");
+    if (!currentPane?.trim() && !request.workspace) {
+      throw lifecycleError("workspace_required", "select a workspace id or label when there is no caller pane", "denied");
     }
 
     // Duplicate live names are denied at spawn (read-only observation).
@@ -1258,9 +1275,15 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
     if (duplicateRoleExists(listed, role)) {
       throw lifecycleError("duplicate_worker_name", "a live agent already holds this name", "denied");
     }
-    const coordinator = parseCurrentPane(await invokeHerdr(currentPaneArgv(), spawnCwd, options, signal));
-    const workspaceId = coordinator.paneId.split(":")[0];
-    if (!/^w[A-Za-z0-9]+$/.test(workspaceId) || !coordinator.tabId.startsWith(`${workspaceId}:`)) {
+    // Explicit selection is independent of caller pane and must match the live list.
+    // Without selection, preserve the existing caller-pane workspace behavior.
+    const coordinator = request.workspace ? null
+      : parseCurrentPane(await invokeHerdr(currentPaneArgv(), spawnCwd, options, signal));
+    const workspaceId = request.workspace
+      ? await selectedWorkspace(request.workspace, spawnCwd, options, signal)
+      : coordinator.paneId.split(":")[0];
+    if (!/^w[A-Za-z0-9]+$/.test(workspaceId)
+        || (coordinator && !coordinator.tabId.startsWith(`${workspaceId}:`))) {
       throw lifecycleError("current_pane_unavailable", "the coordinator workspace could not be identified", "denied");
     }
     if (request.authority !== undefined) {
@@ -1282,8 +1305,7 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
     );
     if (request.worktreePath) spawnCwd = worktreeTarget.worktreePath;
 
-    // Use the coordinator's existing workspace, never a repository-named one.
-    // The preceding authority fence also covers the pane observation.
+    // Use the selected or caller workspace. The authority fence covers the observation.
 
     const layoutPartial = placement === "tab" ? "tab_created" : "pane_created";
     let layoutRaw;
@@ -1655,6 +1677,9 @@ export async function executeHerdrRegisterRepository({ name }) {
 export function registerHerdrLifecycleInterface(pi, options = {}) {
   if (typeof pi?.registerTool !== "function" || REGISTRATIONS.has(pi)) return;
   REGISTRATIONS.add(pi);
+  // The lifecycle extension is loaded by hosts that exclude the standalone
+  // communication extension. Share its guarded prompt tool across surfaces.
+  registerHerdrCommunicationInterface(pi, options);
   pi.registerTool({
     name: "agentic_relay_check_request",
     label: "Check relayed request",
@@ -1677,7 +1702,7 @@ export function registerHerdrLifecycleInterface(pi, options = {}) {
   pi.registerTool({
     name: HERDR_SPAWN_WORKER_TOOL,
     label: "Herdr Spawn Worker",
-    description: "One guarded composite spawn into the caller's Herdr session: create one worker tab in a trusted repository, then start and verify one Pi agent there. No spawn confirmation is required; bounded read-back and partial-failure reporting remain.",
+    description: "Create and verify one worker tab in a trusted repository. Select a workspace id or label when outside a Herdr pane; otherwise the caller pane supplies the workspace.",
     promptSnippet: "Use agentic_herdr_spawn_worker to start one guarded worker tab in a verified sibling Git checkout without pre-registering it; no raw Herdr management verbs or terminal remote control.",
     promptGuidelines: [
       "Roles are free-form safe names except the coordinator class; models must resolve against the installed Pi model roll.",

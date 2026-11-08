@@ -488,7 +488,7 @@ test("the pulse seam dispatches by explicit context class and fails closed when 
 });
 
 // Why: TUI starts cannot manufacture a coordinator pane when it is absent.
-test("a native TUI lifecycle still refuses a missing HERDR_PANE_ID (never manufactured)", async () => {
+test("a native TUI lifecycle requires workspace selection without HERDR_PANE_ID", async () => {
   const f = fixture();
   try {
     const hadPaneId = process.env.HERDR_PANE_ID;
@@ -502,7 +502,7 @@ test("a native TUI lifecycle still refuses a missing HERDR_PANE_ID (never manufa
     );
     if (hadPaneId !== undefined) process.env.HERDR_PANE_ID = hadPaneId;
     assert.equal(result.ok, false);
-    assert.equal(result.code, "current_pane_unavailable");
+    assert.equal(result.code, "workspace_required");
     assert.deepEqual(readLog(f.log), [], "the TUI path does not manufacture a pane identity either");
   } finally {
     cleanup(f.root);

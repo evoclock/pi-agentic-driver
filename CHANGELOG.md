@@ -1,31 +1,16 @@
-## 3.1.4
+## 3.1.5
 
-- Accept `review_requested` and `blocked` as journey consume reasons.
-- Repair reservations and keep both held on unverified spawn.
-- Allow durable cancel to take a late receipt.
-- Wait for `done === true` before dispatching dependent cards.
-- Add REST and MCP commands for those fixed machines.
-- Start workers when mixed-case Git checkout paths refer to the same folder.
-- Disable repository pre-registration as a gate for guarded Herdr spawn; start a guarded worker without registering the repository first.
-- Make repository deny patterns opt-in for worker spawn without refusing public checkouts by default.
-- Resolve named primary clones under the user's home directory when no coordinator sibling exists, including when the coordinator uses a Treehouse slot.
-- Retry a busy new shell for a bounded time on the same pane without creating another tab.
-- Restore the shipped-features and router-configuration catalogs in the README to single tables.
+- Let trusted hosts start and contact workers without a caller pane.
 
-## 3.1.3
-
-- Rewrite the README as product documentation: Herdr spawn through `agentic_herdr_spawn_worker`, confirmations off by default, and merge policy as an optional separate setting.
-- Stop tracking local fleet `AGENTS.md`. Optional spawn guidance lives in `templates/AGENTS.md` for people who already have their own file.
-
-## 3.1.2
+## Unreleased
 
 - Add an agent-accessible on/off toggle and optional non-blocking TUI shortcut for generic command confirmations, backed by the same user-profile setting. Disabling clears per-command selections; mandatory safeguards remain separate.
-- Accept mixed-case repository names in trusted GitHub origins for both SSH and HTTPS.
 
 ## 3.1.1
 
 - Strip remaining Herdr spawn registration and workspace friction so canonical trusted repos start guarded workers without registry or per-spawn ceremony.
-- Make generic destructive-command confirmations opt-in with a user-profile configuration.
+- Vendor shared pr/env guards into the private driver with source provenance and tool-call coverage.
+- Repo hygiene: ignore local Obsidian/pad/ci/treehouse scratch paths; stop tracking generated `pipeline_output/` inventory and the archify trial scratch.
 
 ## 3.1.0
 

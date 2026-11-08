@@ -21,6 +21,7 @@ import childProcess, { execFileSync } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import {
   executeHerdrSpawnWorker,
+  registerHerdrLifecycleInterface,
   executeHerdrSpawnWorkerAttendedElectron,
   preflightAttendedElectronSpawn,
   resolveTrustedSpawnRepository,
@@ -236,12 +237,48 @@ test("a parameterized target is optional and bounded: old four-key calls stay va
   const base = { placement: "tab", role: "worker", model: MODEL, repository: WORKER_REPO };
   assert.equal(validateSpawnParams(base).worktreePath, undefined);
   assert.equal(validateSpawnParams({ ...base, worktreePath: "/abs/slot" }).worktreePath, "/abs/slot");
+  assert.equal(validateSpawnParams({ ...base, workspace: "w7" }).workspace, "w7");
+  assert.throws(() => validateSpawnParams({ ...base, workspace: "../bad" }),
+    (error) => error.code === "workspace_invalid");
   assert.throws(() => validateSpawnParams({ ...base, worktreePath: "relative/slot" }),
     (error) => error.code === "worktree_target_invalid");
   assert.throws(() => validateSpawnParams({ ...base, worktreePath: "" }),
     (error) => error.code === "worktree_target_invalid");
   assert.throws(() => validateSpawnParams({ ...base, worktreePath: "/abs", extra: 1 }),
     (error) => error.code === "closed_parameters");
+});
+
+// Why: a host that excludes the communication extension still needs the guarded prompt tool.
+test("lifecycle alone registers the guarded communication tool", () => {
+  const names = [];
+  registerHerdrLifecycleInterface({ registerTool: ({ name }) => names.push(name) });
+  assert.equal(names.filter((name) => name === "agentic_herdr_communication").length, 1);
+  assert.equal(names.filter((name) => name === "agentic_herdr_spawn_worker").length, 1);
+});
+
+// Why: a pane-free host selects the exact live workspace, never the first implicitly.
+test("pane-free spawn selects an explicit workspace id or label and preserves pane fallback", async () => {
+  const f = fixture({ omitTarget: true });
+  delete process.env.HERDR_PANE_ID;
+  try {
+    for (const workspace of ["w7", "agents-work"]) {
+      const result = await executeHerdrSpawnWorker({ ...f.params, role: `worker-${workspace.replaceAll("_", "-")}`, workspace }, f.context, f.herdrOptions);
+      assert.equal(result.status, "spawned", JSON.stringify(result));
+    }
+    const calls = readLog(f.log).map(({ argv }) => argv);
+    assert.equal(calls.filter((argv) => argv[0] === "tab" && argv[argv.indexOf("--workspace") + 1] === "w7").length, 2);
+    assert.equal(calls.some((argv) => argv[0] === "pane" && argv[1] === "current"), false);
+    const missing = await executeHerdrSpawnWorker(f.params, f.context, f.herdrOptions);
+    assert.equal(missing.code, "workspace_required");
+    const unknown = await executeHerdrSpawnWorker({ ...f.params, workspace: "other" }, f.context, f.herdrOptions);
+    assert.equal(unknown.code, "workspace_unavailable");
+    const split = await executeHerdrSpawnWorker({ ...f.params, placement: "right", workspace: "w7" }, f.context, f.herdrOptions);
+    assert.equal(split.code, "worker_tab_required");
+    process.env.HERDR_PANE_ID = "synthetic-pane";
+    const fallback = await executeHerdrSpawnWorker(f.params, f.context, f.herdrOptions);
+    assert.equal(fallback.status, "spawned", JSON.stringify(fallback));
+    assert.equal(readLog(f.log).some(({ argv }) => argv[0] === "pane" && argv[1] === "current"), true);
+  } finally { cleanup(f.root); }
 });
 
 // Why: A new owned checkout needs no prior registry entry or registration prompt.
@@ -272,17 +309,17 @@ test("mixed-case SSH and HTTPS origin names are accepted; foreign and malformed 
   const f = fixture({ omitTarget: true });
   try {
     for (const origin of [
-      "git@github.com:evoclock/Agents-Work.git",
-      "https://github.com/evoclock/Agents-Work.git",
+      "git@github.com:evoclock/MixedCaseApp.git",
+      "https://github.com/evoclock/MixedCaseApp.git",
     ]) {
       git(f.workerRoot, ["remote", "set-url", "origin", origin]);
       assert.equal(resolveTrustedSpawnRepository(f.coordinator, WORKER_REPO), f.workerRoot, origin);
     }
     for (const origin of [
-      "git@github.com:elsewhere/Agents-Work.git",
-      "https://github.com/elsewhere/Agents-Work.git",
-      "git@github.com:evoclock/Agents_Work.git",
-      "https://github.com/evoclock/Agents.Work.git",
+      "git@github.com:elsewhere/MixedCaseApp.git",
+      "https://github.com/elsewhere/MixedCaseApp.git",
+      "git@github.com:evoclock/Mixed_CaseApp.git",
+      "https://github.com/evoclock/Mixed.CaseApp.git",
     ]) {
       git(f.workerRoot, ["remote", "set-url", "origin", origin]);
       assert.throws(() => resolveTrustedSpawnRepository(f.coordinator, WORKER_REPO),

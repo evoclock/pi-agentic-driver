@@ -54,6 +54,19 @@ test("published files contain no legacy board-client name", () => {
   }
 });
 
+// Why: each vendored guard must be both discoverable by Pi and present in the published archive.
+test("vendored guards are registered and packaged without duplicate extension paths", () => {
+  const pkg = JSON.parse(readFileSync(process.env.PACKAGE_MANIFEST || join(REPO_ROOT, "package.json"), "utf8"));
+  const guards = ["env-guard", "pr-merge-guard", "pr-message-guard"];
+  assert.ok(pkg.pi.extensions.includes("./extensions"));
+  assert.equal(new Set(pkg.pi.extensions).size, pkg.pi.extensions.length);
+  for (const name of guards) {
+    const path = `pi/extensions/${name}.ts`;
+    assert.ok(pkg.files.includes(path), `not packaged: ${path}`);
+    assert.ok(pkg.pi.extensions.includes(`./${path}`), `not registered: ${path}`);
+  }
+});
+
 // Why: missing entry points or dependencies make the installed package unusable.
 test("package file list matches the public extension set", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -201,6 +214,11 @@ test("packed tarball retains the offline Durable module without private scratch"
     assert.ok(files.has("scripts/enforcement/storage_owner_lock_pi.js"));
     assert.ok(files.has("scripts/enforcement/durable_driver_pi.d.ts"));
     assert.ok(files.has("extensions/loop-until-done.ts"));
+    // The original vault copies stay in pi/extensions; explicit Pi entries load them from there.
+    for (const name of ["env-guard", "pr-merge-guard", "pr-message-guard"]) {
+      const path = `pi/extensions/${name}.ts`;
+      assert.ok(files.has(path), `missing packed guard: ${path}`);
+    }
     assert.ok(files.has("scripts/enforcement/loop_until_done_pi.js"));
     assert.ok(files.has("scripts/enforcement/loop_until_done_guide.md"));
     assert.ok(files.has(".agentic-driver/loop-until-done.defaults.json"));
