@@ -64,7 +64,7 @@ test("communication accepts a leased worktree of the trusted repository", async 
     },
   );
   assert.equal(observed.ok, true, JSON.stringify(observed));
-  assert.equal(observed.observation.repository, fixture.repository);
+  assert.equal(observed.observation.repository, fixture.worktree);
   const calls = [];
   const delivered = await executeHerdrCommunication(
     { action: "prompt", role: "worker", prompt: "one bounded brief", timeoutMs: 1000 },
@@ -79,6 +79,7 @@ test("communication accepts a leased worktree of the trusted repository", async 
   );
   assert.equal(delivered.ok, true, JSON.stringify(delivered));
   assert.equal(delivered.promptSent, true);
+  assert.equal(delivered.repository, fixture.worktree);
   assert.deepEqual(calls, ["get", "read", "prompt"]);
 });
 
@@ -331,13 +332,14 @@ test("plain read expands once when the 400-line tail starts inside the latest re
     { cwd: root },
     { runProcess: async ({ argv }) => {
       calls.push([...argv]);
+      if (argv[1] === "get") return info(role);
       const lines = Number(argv[argv.indexOf("--lines") + 1]);
       return { code: 0, stdout: lines === 400 ? `${close}\n` : `${open}\n${body}\n${close}\n` };
     } },
   );
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(result.report, body);
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
 });
 
 // Why: echoed instructions are not answers and nested report markers are ambiguous.
@@ -877,7 +879,7 @@ test("prompt refusals are structured and never throw", async () => {
   );
   assert.equal(gone.ok, false);
   assert.equal(gone.status, "refused");
-  assert.equal(gone.code, "stale_role_mapping");
+  assert.equal(gone.code, "agent_name_not_found");
 
   const failing = deliveryFixture();
   const failingRunProcess = async (request) => {
@@ -935,7 +937,7 @@ test("an unknown deliveryId is refused without any Herdr traffic", async () => {
   );
   assert.equal(unknown.ok, false);
   assert.equal(unknown.status, "refused");
-  assert.equal(unknown.code, "delivery_unknown");
+  assert.equal(unknown.code, "role_required");
   assert.deepEqual(f.calls, []);
 });
 
@@ -996,7 +998,7 @@ test("wait and read keep their existing contracts", async () => {
     { action: "wait", role: "worker", timeoutMs: 1000 },
     { cwd: root },
     { runProcess: async ({ argv }) => {
-      assert.equal(argv[1], "wait");
+      assert.ok(["get", "wait"].includes(argv[1]));
       assert.ok(!argv.includes("--timeout"));
       return { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: "worker", agent: "pi", status: "idle", repository: root } }) };
     } },
@@ -1162,8 +1164,8 @@ test("a delivery with no report yet stays delivered across repeated queries", as
   }
 });
 
-// Why: correlation must be an exact opening line, not a nearby string.
-test("indented and separated correlation lines stay delivered and never publish framing", async () => {
+// Why: padding is allowed, but a correlation line later in the body is not.
+test("padded first-line correlation is accepted but separated lines are not", async () => {
   for (const prefix of ["   Delivery: ", "\nDelivery: "]) {
     const f = partitionFixture();
     const receipt = await executeHerdrCommunication(
@@ -1176,9 +1178,9 @@ test("indented and separated correlation lines stay delivered and never publish 
         { action: "delivery", deliveryId: receipt.deliveryId },
         { cwd: root }, { runProcess: f.runProcess },
       );
-      assert.equal(query.deliveryState, "delivered");
-      assert.equal(query.report, undefined);
-      assert.match(query.reason, /exact correlation line/);
+      assert.equal(query.deliveryState, prefix.startsWith("   ") ? "answered" : "delivered");
+      if (prefix.startsWith("   ")) assert.equal(query.report, "completed but not correctly framed");
+      else assert.equal(query.report, undefined);
     }
   }
 });
@@ -1436,4 +1438,95 @@ test("a handoff that fails after a zero exit is unknown, not failed", async () =
     );
     assert.equal(state.deliveryState, "unknown", "post-handoff uncertainty is not recorded as failed");
   }
+});
+
+// Why: a lost registration must not hide a uniquely labeled live worker.
+// A registered role takes precedence. A lost registration can use only its
+// unique labeled Pi pane; every observation keeps the pane's cwd.
+test("tab-labeled worker survives a lost agent registration", async () => {
+  const worker = "connection-probe";
+  const pane = "w1:p5";
+  const calls = [];
+  const runProcess = async ({ argv }) => {
+    calls.push(argv);
+    if (argv[0] === "tab") return { code: 0, stdout: JSON.stringify({ tabs: [{ label: worker, tab_id: "w1:t5", root_pane_id: pane }] }) };
+    if (argv[0] === "pane") return { code: 0, stdout: JSON.stringify({ pane: { pane_id: pane, tab_id: "w1:t5", agent: "pi", agent_status: "idle", cwd: root } }) };
+    if (argv[1] === "list") return { code: 0, stdout: JSON.stringify({ type: "agent_list", agents: [] }) };
+    if (argv[1] === "get") return { code: 1, stdout: JSON.stringify({ error: { code: "agent_not_found" } }) };
+    if (argv[1] === "read") return { code: 0, stdout: `[CONNECTION_PROBE_REPORT_BEGIN]\nanswer\n[CONNECTION_PROBE_REPORT_END]` };
+    throw new Error(`unexpected ${argv}`);
+  };
+  const options = { runProcess };
+  const listed = await executeHerdrCommunication({ action: "list" }, { cwd: root }, options);
+  assert.equal(listed.ok, true, JSON.stringify(listed));
+  assert.equal(listed.roles[0].repository, root);
+  const get = await executeHerdrCommunication({ action: "get", role: worker }, { cwd: root }, options);
+  assert.equal(get.observation.repository, root);
+  const read = await executeHerdrCommunication({ action: "read", role: worker }, { cwd: root }, options);
+  assert.equal(read.report, "answer");
+  assert.equal(read.repository, root);
+  assert.ok(calls.some((argv) => argv[1] === "read" && argv[2] === pane));
+});
+
+// Why: recovered reports must identify both the role and delivery on the first line.
+test("unknown delivery recovery requires the named role and exact leading correlation", async () => {
+  const id = "dlv-recovered-1";
+  const role = "connection-probe";
+  const [open, close] = markerPair(role);
+  let text = `${open}\r\n │ Delivery: ${id}  │\r\nrecovered\r\n${close}`;
+  const runProcess = async ({ argv }) => argv[1] === "get" ? info(role)
+    : { code: 0, stdout: text };
+  const recover = () => executeHerdrCommunication({ action: "delivery", role, deliveryId: id }, { cwd: root }, { runProcess });
+  assert.equal((await recover()).deliveryState, "answered");
+  text = `${open}\nother line\nDelivery: ${id}\nnot mine\n${close}`;
+  assert.equal((await recover()).code, "delivery_unknown");
+  text = `${open}\nDelivery: another-id\nnot mine\n${close}`;
+  assert.equal((await recover()).code, "delivery_unknown");
+  assert.equal((await executeHerdrCommunication({ action: "delivery", deliveryId: id }, { cwd: root }, { runProcess })).code, "role_required");
+  assert.equal((await executeHerdrCommunication({ action: "delivery", role: "coordinator", deliveryId: id }, { cwd: root }, { runProcess })).code, "target_role_denied");
+});
+
+// Why: tab recovery cannot bypass repository, uniqueness, or role guards.
+test("tab fallback refuses ambiguous labels, wrong repositories, and coordinator targets", async () => {
+  const role = "worker";
+  let labels = [{ label: role, tab_id: "w1:t5", root_pane_id: "w1:p5" }];
+  let cwd = root;
+  const runProcess = async ({ argv }) => {
+    if (argv[0] === "tab") return { code: 0, stdout: JSON.stringify({ tabs: labels }) };
+    if (argv[0] === "pane") return { code: 0, stdout: JSON.stringify({ pane: { pane_id: "w1:p5", tab_id: "w1:t5", agent: "pi", agent_status: "idle", cwd } }) };
+    if (argv[1] === "get") return { code: 1, stdout: JSON.stringify({ error: { code: "agent_not_found" } }) };
+    return { code: 0, stdout: JSON.stringify({ type: "agent_list", agents: [] }) };
+  };
+  const get = (target = role) => executeHerdrCommunication({ action: "get", role: target }, { cwd: root }, { runProcess });
+  labels.push({ label: role, tab_id: "w1:t6", root_pane_id: "w1:p6" });
+  assert.equal((await get()).code, "ambiguous_target_role");
+  labels.pop();
+  cwd = "/another/untrusted/repository";
+  assert.equal((await get()).code, "repository_mismatch");
+  assert.equal((await get("coordinator-foo")).code, "target_role_denied");
+});
+
+// Why: missing-agent failures must retain their external diagnostic code.
+test("Herdr agent-missing diagnostics survive generic process wrappers", async () => {
+  for (const code of ["agent_not_found", "agent_name_not_found"]) {
+    const result = await executeHerdrCommunication({ action: "get", role: "worker" }, { cwd: root }, {
+      runProcess: async ({ argv }) => argv[0] === "tab"
+        ? { code: 0, stdout: JSON.stringify({ tabs: [] }) }
+        : { code: 1, stdout: JSON.stringify({ error: { code: "herdr_process_failed", message: `diagnostic: ${code}` } }) },
+    });
+    assert.equal(result.code, code);
+  }
+});
+
+// Why: the caller repository is not the worker's actual working directory.
+test("read reports worker cwd rather than the caller cwd", async () => {
+  const f = leasedWorktreeFixture();
+  const role = "worker";
+  const read = await executeHerdrCommunication({ action: "read", role }, { cwd: f.repository }, {
+    treehouseStatus: JSON.stringify([f.lease]),
+    runProcess: async ({ argv }) => argv[1] === "get"
+      ? { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: role, agent: "pi", status: "idle", repository: f.repository, cwd: f.worktree } }) }
+      : { code: 0, stdout: "[WORKER_REPORT_BEGIN]\nbody\n[WORKER_REPORT_END]" },
+  });
+  assert.equal(read.repository, f.worktree);
 });

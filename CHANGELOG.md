@@ -1,3 +1,7 @@
+## 3.1.6
+
+- Keep worker delivery reports visible after a reconnect, report the worker directory instead of the caller directory, and let a finished worker take the next brief.
+
 ## 3.1.5
 
 - Let trusted hosts start and contact workers without a caller pane.

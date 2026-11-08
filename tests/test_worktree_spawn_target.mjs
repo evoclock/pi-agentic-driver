@@ -82,6 +82,9 @@ if (command === "agent" && argv[1] === "list") {
   else emit({ agents: [] });
   process.exit(0);
 }
+if (command === "tab" && argv[1] === "list") {
+  emit({ tabs: mode === "duplicate-tab" ? [{ label: "worker", tab_id: "w7:t2", root_pane_id: "w7:p9" }] : [] }); process.exit(0);
+}
 if (command === "tab" && argv[1] === "create") {
   if (mode === "mutate-lease") {
     const state = JSON.parse(readFileSync(process.env.FAKE_HERDR_STATE, "utf8"));
@@ -500,11 +503,12 @@ test("registered repo + active exact lease spawns once without a UI or grant", a
     const calls = readLog(f.log);
     assert.deepEqual(calls.map((entry) => entry.argv).filter((argv) => argv[0] === "tab" || argv[0] === "agent"), [
       ["agent", "list"],
+      ["tab", "list"],
       ["tab", "create", "--workspace", "w7", "--cwd", realpathSync(f.worktree), "--no-focus", "--label", "worker"],
       ["agent", "start", "worker", "--kind", "pi", "--pane", "w7:p10", "--timeout", "120000", "--", "--model", MODEL],
       ["agent", "get", "worker"],
     ]);
-    const mutationCwds = calls.filter((entry) => entry.argv[0] === "tab" || entry.argv[1] === "start").map((entry) => entry.cwd);
+    const mutationCwds = calls.filter((entry) => entry.argv[1] === "create" || entry.argv[1] === "start").map((entry) => entry.cwd);
     assert.ok(mutationCwds.every((cwd) => realpathSync(cwd) === realpathSync(f.worktree)), "Herdr runs in the target cwd");
   } finally {
     cleanup(f.root);
@@ -555,10 +559,10 @@ for (const boundary of ["tui", "attended"]) {
         assert.equal(revoked, true);
         const commands = [["agent", "list"], ["tab", "create"], ...(mutation === "start" ? [["agent", "start"]] : [])];
         console.log("dispatch timing", JSON.stringify({ boundary, mutation, dispatches, result }));
-        assert.deepEqual(dispatches.map((entry) => entry.command), [["agent", "list"], ...(boundary === "tui" ? [["pane", "current"]] : [["workspace", "list"]]), ...commands.slice(1)]);
+        assert.deepEqual(dispatches.map((entry) => entry.command), [["agent", "list"], ...(boundary === "tui" ? [["tab", "list"], ["pane", "current"]] : [["tab", "list"], ["workspace", "list"]]), ...commands.slice(1)]);
         assert.ok(dispatches.every((entry) => !entry.revoked && entry.leases === 1), "every actual dispatch precedes revocation, without an owned yield");
         assert.deepEqual(readLog(f.log).map((entry) => entry.argv.slice(0, 2)),
-          [["agent", "list"], ...(boundary === "tui" ? [["pane", "current"]] : []), ...commands.slice(1)],
+          [["agent", "list"], ["tab", "list"], ...(boundary === "tui" ? [["pane", "current"]] : []), ...commands.slice(1)],
           "one actual effect per dispatch, no retry");
         assert.equal(result.ok, false);
         assert.equal(result.code, "worktree_target_changed");
@@ -587,6 +591,17 @@ test("duplicate role mutates nothing and never starts", async () => {
   }
 });
 
+// Why: a worker tab can survive its named registration and still block a duplicate spawn.
+test("an existing labeled worker tab blocks duplicate spawn", async () => {
+  const f = fixture({ mode: "duplicate-tab" });
+  try {
+    process.env.HERDR_PANE_ID = "w1:p1";
+    const result = await executeHerdrSpawnWorker(f.params, f.context, f.herdrOptions);
+    assert.equal(result.code, "duplicate_worker_name");
+    assert.deepEqual(readLog(f.log).map((entry) => entry.argv), [["agent", "list"], ["tab", "list"]]);
+  } finally { cleanup(f.root); }
+});
+
 // Why: Ordinary root spawns must not require a Treehouse lease.
 test("a missing target keeps the old behavior and never consults Treehouse", async () => {
   const f = fixture({ omitTarget: true });
@@ -597,7 +612,7 @@ test("a missing target keeps the old behavior and never consults Treehouse", asy
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.equal(result.worktreePath, undefined);
     assert.equal(result.leaseId, undefined);
-    const tab = readLog(f.log).find((entry) => entry.argv[0] === "tab");
+    const tab = readLog(f.log).find((entry) => entry.argv[0] === "tab" && entry.argv[1] === "create");
     assert.equal(tab.argv[5], realpathSync(f.workerRoot));
   } finally {
     cleanup(f.root);
@@ -679,7 +694,7 @@ test("a lease change across the observation boundary fails closed with no mutati
     const result = await executeHerdrSpawnWorker(f.params, f.context, f.herdrOptions);
     assert.equal(result.ok, false);
     assert.equal(result.code, "worktree_target_changed");
-    assert.deepEqual(readLog(f.log).map((entry) => entry.argv), [["agent", "list"], ["pane", "current", "--current"]]);
+    assert.deepEqual(readLog(f.log).map((entry) => entry.argv), [["agent", "list"], ["tab", "list"], ["pane", "current", "--current"]]);
   } finally {
     cleanup(f.root);
   }
@@ -710,7 +725,7 @@ test("the attended Electron boundary honors the same target and refusal rules", 
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.equal(result.worktreePath, realpathSync(ok.worktree));
     assert.equal(result.leaseId, LEASE_ID);
-    const tab = readLog(ok.log).find((entry) => entry.argv[0] === "tab");
+    const tab = readLog(ok.log).find((entry) => entry.argv[0] === "tab" && entry.argv[1] === "create");
     assert.equal(tab.argv[5], realpathSync(ok.worktree));
   } finally {
     cleanup(ok.root);
@@ -788,7 +803,7 @@ test("WT-01/STD-01/SPEC-003: repository+worktree replacement before mutation is 
       assert.ok(result.status === "blocked" || result.status === "partial", boundary);
       const after = { ...snapshotGit(f.workerRoot), ...snapshotGit(f.worktree) };
       assert.notEqual(after.adminInode, before.adminInode, `${boundary}: the fixture really replaced Git administration`);
-      assert.equal(readLog(f.log).filter((entry) => entry.argv[0] === "tab").length, 0, `${boundary}: no layout mutation`);
+      assert.equal(readLog(f.log).filter((entry) => entry.argv[0] === "tab" && entry.argv[1] === "create").length, 0, `${boundary}: no layout mutation`);
     } finally {
       cleanup(f.root);
     }
@@ -898,7 +913,7 @@ for (const revokedAuthority of ["lease", "origin"]) {
       assert.equal(result.status, revokedAuthority === "lease" ? "blocked" : "denied");
       assert.equal(result.leaseId, undefined, "no stale lease is certified");
       assert.equal(result.partial, undefined, "preflight has not mutated layout or started an agent");
-      assert.deepEqual(readLog(f.log).map((entry) => entry.argv), [["agent", "list"]]);
+      assert.deepEqual(readLog(f.log).map((entry) => entry.argv), [["agent", "list"], ["tab", "list"]]);
     } finally {
       cleanup(f.root);
     }
