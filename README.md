@@ -53,7 +53,7 @@ Use `agentic_herdr_spawn_worker` to start Pi worker tabs and panes. Do not run H
 
 In an eligible repository, you do not need to register the repository, create a named workspace, or approve each spawn. Restart Pi after installation to load the updated tool.
 
-For trusted GitHub origins, use the repository name with its GitHub capitalization (for example, `OpenMausBot`). This works with SSH and HTTPS. The tool uses your configured default Pi model unless you choose another.
+For trusted GitHub origins, use the repository name with its GitHub capitalization (for example, `MixedCaseRepo`). This works with SSH and HTTPS. The tool uses your configured default Pi model unless you choose another.
 
 Already have an `AGENTS.md`? If you want this spawn path in it, copy the optional guidance from [`templates/AGENTS.md`](templates/AGENTS.md). See [`extensions/herdr-lifecycle.ts`](extensions/herdr-lifecycle.ts) and [`extensions/attended-authority-guard.ts`](extensions/attended-authority-guard.ts) for the implementation.
 
@@ -61,7 +61,7 @@ Already have an `AGENTS.md`? If you want this spawn path in it, copy the optiona
 
 Interactive confirmations are off by default. The attended-authority guard can ask before destructive actions, such as `git push` or overwriting a file. Use `agentic_interactive_safeguards_toggle` with `enabled: true` or `false` to change the setting. In the TUI, **Alt+Shift+S** changes the same setting and shows its state in the status bar. The shortcut does not open a settings dialog.
 
-The toggle saves the setting at `$PI_CODING_AGENT_DIR/config/interactive-safeguards.v1.json`, or `~/.pi/agent/config/interactive-safeguards.v1.json` by default. You do not need to create this file to use the toggle. See `config/interactive-safeguards.v1.example.json` for an example. Turning the toggle off also clears saved command selections.
+The toggle saves the setting at `$PI_CODING_AGENT_DIR/config/interactive-safeguards.v1.json`. By default, this file lives in the Pi agent config directory. You do not need to create this file to use the toggle. See `config/interactive-safeguards.v1.example.json` for an example. Turning the toggle off also clears saved command selections.
 
 Choose one of two levels in the profile:
 
@@ -506,6 +506,14 @@ state machine.
   tag or an unreadable pane blocks: a missing tag is never proof that the
   prompt did not arrive. An abandoned pending task with no caller waits at
   most 30 seconds, then settles blocked.
+**Packaged since 3.1.4.** Journeys accept `review_requested` and `blocked`
+as consume reasons. Reservation repair keeps both reservations held when a
+worker start cannot be verified. Durable cancellation can still record a late
+receipt; dependent cards wait until the earlier card has `done === true`.
+The fixed-machine controls are also available through REST and MCP commands.
+Worker starts recognize mixed-case Git checkout paths that refer to the same
+folder.
+
 - **Inspect journeys.** The `journeys` action lists bounded journey records
   for the current repository (journey, iteration, state, task and card),
   optionally filtered by role or journey ID. It grants nothing.

@@ -120,7 +120,7 @@ export async function openDurableDriver({ directory }) {
           await this.start({ runId, steps: [{ id: stepId, kind: "external" }] });
           const before = await this.status(runId);
           if (before.state !== "active" || before.steps[0].state !== "pending") {
-            return { runId, state: before.state === "finished" ? "finished" : "held", step: before.steps[0] };
+            return { runId, state: ["finished", "cancelled"].includes(before.state) ? before.state : "held", step: before.steps[0] };
           }
           if (signal.aborted) {
             await this.cancel(runId);
@@ -193,7 +193,8 @@ export async function openDurableDriver({ directory }) {
             if (JSON.stringify(step.receipt ?? null) !== JSON.stringify(receipt ?? null)) throw new Error("receipt conflict");
             return run;
           }
-          if (run.state !== "active" || step !== run.steps.find((item) => item.state !== "finished")) {
+          if ((run.state !== "active" && !(run.state === "cancelled" && step.kind === "external" && step.state === "intent")) ||
+              step !== run.steps.find((item) => item.state !== "finished")) {
             throw new Error("step is not active");
           }
           if (step.kind === "external") {
@@ -208,7 +209,7 @@ export async function openDurableDriver({ directory }) {
             throw new Error("internal step is not ready");
           }
           step.state = "finished";
-          if (run.steps.every((item) => item.state === "finished")) run.state = "finished";
+          if (run.state !== "cancelled" && run.steps.every((item) => item.state === "finished")) run.state = "finished";
           return run;
         });
       },
@@ -217,7 +218,6 @@ export async function openDurableDriver({ directory }) {
       async reconcile(runId, evidence) {
         validateId(evidence?.stepId);
         return change(runId, (run) => {
-          if (run.state === "cancelled") throw new Error("cancelled run cannot reconcile");
           const step = run.steps.find((item) => item.id === evidence.stepId);
           if (!step || step.kind !== "external" || step.requestKey !== evidence.requestKey) {
             throw new Error("unknown external intent");

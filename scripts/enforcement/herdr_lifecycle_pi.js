@@ -510,14 +510,16 @@ export function resolveTrustedSpawnRepository(coordinatorCwd, requestedName) {
     throw lifecycleError("repository_not_git_root", "the requested repository must be a lowercase, canonical Git repository root (not a worktree or symlink)", "denied");
   }
   const root = gitRoot(candidateReal);
-  if (root !== candidateReal) {
+  if (statIdentity(root, "repository_not_git_root", "Git root")
+      !== statIdentity(candidateReal, "repository_not_git_root", "requested repository")) {
     throw lifecycleError("repository_not_git_root", "the requested repository resolved outside its Git root", "denied");
   }
   try {
     const dotGit = join(candidateReal, ".git");
     const common = gitProbe(candidateReal, ["rev-parse", "--git-common-dir"]);
     if (!statSync(dotGit).isDirectory() || realpathSync(dotGit) !== dotGit
-        || resolve(candidateReal, common) !== dotGit) throw new Error("non-primary Git directory");
+        || statIdentity(resolve(candidateReal, common), "repository_not_git_root", "Git common directory")
+          !== statIdentity(dotGit, "repository_not_git_root", "primary Git directory")) throw new Error("non-primary Git directory");
   } catch {
     throw lifecycleError("repository_not_git_root", "the requested repository is not a primary clone", "denied");
   }

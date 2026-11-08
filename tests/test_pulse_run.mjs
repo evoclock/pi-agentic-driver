@@ -19,8 +19,9 @@ import {
 import {
   pulseRun, pulseTick, mintBatchContext as mintBatchContextWithRoutes, reserveBatchEntry, consumeBatchEntry,
   releaseBatchEntry, batchExpired, pulsePolicyOperation, createPulseTimer,
-  registerPulseTools, pulseWorkerSpawnSeam,
+  registerPulseTools, pulseWorkerSpawnSeam, executeBatch,
 } from "../scripts/enforcement/pulse_scheduler_pi.js";
+import { openRouterStore, closeRouterStore, getReservation, encodeReservationIdentity } from "../scripts/enforcement/router_store_pi.js";
 
 const authority = { source: "instruction", sessionOrReportId: "sess-1", quotedInstruction: "plan the work" };
 const TEST_DIGEST = "a".repeat(64);
@@ -117,6 +118,7 @@ function tuiContext({ confirmed = true, modelRegistry = null, scopedModels = nul
 
 const registry = { get: (id) => id === "zai/glm-5.3" ? { id } : null, isAuthenticated: () => true };
 
+// Why: Host spawns must use a trusted registry identity, not an arbitrary repository path.
 test("host spawn seam converts a canonical policy path to its trusted registry name", async () => {
   const calls = [];
   const seam = pulseWorkerSpawnSeam({
@@ -140,6 +142,7 @@ test("host spawn seam converts a canonical policy path to its trusted registry n
   assert.equal(calls.length, 1);
 });
 
+// Why: Scheduling must not start without a direct human instruction.
 test("run fails closed without a direct human instruction", async () => {
   const dir = freshDir();
   try {
@@ -151,6 +154,7 @@ test("run fails closed without a direct human instruction", async () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: A disabled or missing Pulse policy must prevent new assignments.
 test("run fails closed when Pulse is disabled or absent", async () => {
   const dir = freshDir();
   try {
@@ -161,6 +165,7 @@ test("run fails closed when Pulse is disabled or absent", async () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: A headless call cannot substitute for native batch confirmation.
 test("run fails closed headlessly: the one batch confirmation requires the native TUI", async () => {
   const dir = freshDir();
   try {
@@ -174,6 +179,7 @@ test("run fails closed headlessly: the one batch confirmation requires the nativ
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: A single confirmed batch should claim and start once, then consume its entry.
 test("run with one confirmation claims and starts one card; entry consumed after verified start", async () => {
   const dir = freshDir();
   try {
@@ -201,6 +207,7 @@ test("run with one confirmation claims and starts one card; entry consumed after
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Declining the batch confirmation must leave every card unclaimed.
 test("run cancelled at the one confirmation claims nothing", async () => {
   const dir = freshDir();
   try {
@@ -218,6 +225,7 @@ test("run cancelled at the one confirmation claims nothing", async () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Available capacity must admit multiple eligible cards without exceeding the ceiling.
 test("run respects capacity: two cards, ceiling four, both started in one batch", async () => {
   const dir = freshDir();
   try {
@@ -234,6 +242,7 @@ test("run respects capacity: two cards, ceiling four, both started in one batch"
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: A competing claim must remove only its card from the batch without double-claiming.
 test("run: claim race removes the card from the landed batch and never double-claims", async () => {
   const dir = freshDir();
   try {
@@ -243,6 +252,7 @@ test("run: claim race removes the card from the landed batch and never double-cl
     // batch), and only card 2 lands. Card 1 is never double-claimed. Host
     // placement is only claimable through the trusted confirmed-batch path,
     // so the pre-claim uses it (registered after a minted, confirmed batch).
+    // Why: This pre-claim exercises the same confirmed host path as the competing batch.
     const preBatch = mintBatchContext({
       scan: { schema: "agentic-driver.board-pulse.v1", board: boardPath, cards: [], proposedDispatches: [] },
       cards: [],
@@ -270,6 +280,7 @@ test("run: claim race removes the card from the landed batch and never double-cl
     assert.equal(claims.claims.filter((c) => c.cardId === ids[0]).length, 1);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+// Why: An uncertain spawn must reserve its entry and prevent a second start.
 test("run: ambiguous spawn leaves the entry reserved and never spawns twice", async () => {
   const dir = freshDir();
   try {
@@ -291,6 +302,39 @@ test("run: ambiguous spawn leaves the entry reserved and never spawns twice", as
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: an ambiguous spawn must retain the reservation while its board claim is live.
+test("unverified spawn keeps the live claim's reservation claimed", async () => {
+  const dir = freshDir();
+  const store = openRouterStore({ dbPath: join(dir, "router.db") });
+  try {
+    const { boardPath, ids } = fixtureBoard(dir, { cards: 1, policyOverrides: { placement: "host" } });
+    const reservationId = encodeReservationIdentity({ decisionId: "decision-ambiguous", seatId: "test-seat", accountId: "test-account", vectors: [{ windowId: "messages", unit: "messages", quantity: 1 }] });
+    const batch = mintBatchContext({ scan: { schema: "agentic-driver.board-pulse.v1", board: boardPath, cards: [], proposedDispatches: [] },
+      cards: [], policy: readAutomationPolicy(boardPath), instruction: "work the ready card" });
+    batch.entries.push({ cardId: ids[0], title: "Card 1", role: "implementer", model: "zai/glm-5.3", repository: dir,
+      placement: "host", state: "unused", seatId: "test-seat", accountId: "test-account", provider: "openai", effort: "default",
+      containmentTier: "testudo", phase: "implement", routeDecisionId: "decision-ambiguous", routeDecisionDigest: TEST_DIGEST,
+      reservationId, reservationVectors: [{ windowId: "messages", unit: "messages", quantity: 1 }],
+      routeDecisionRecord: { decisionId: "decision-ambiguous", createdAt: new Date().toISOString(), cardHash: TEST_DIGEST,
+        selectedSeatId: "test-seat", parentDecisionId: null } });
+    registerConfirmedBatchForClaims(batch);
+    let starts = 0;
+    const result = await executeBatch({ batch, boardPath, routerStore: store, allowHostDispatch: true,
+      spawnWorker: async () => { starts += 1; return { ok: false, reason: "delivery-unknown" }; } });
+    assert.equal(result.terminalReason, "spawn-unverified");
+    assert.equal(starts, 1);
+    assert.equal(batch.entries[0].state, "reserved");
+    const claims = JSON.parse(readFileSync(join(dir, "TASKS.md.claims.json"), "utf8"));
+    assert.equal(claims.claims.length, 1);
+    assert.equal(getReservation(store, reservationId).state, "claimed");
+    const again = await executeBatch({ batch, boardPath, routerStore: store, allowHostDispatch: true,
+      spawnWorker: async () => { starts += 1; return { ok: true }; } });
+    assert.equal(starts, 1);
+    assert.equal(getReservation(store, reservationId).state, "claimed");
+  } finally { closeRouterStore(store); rmSync(dir, { recursive: true, force: true }); }
+});
+
+// Why: Batch entries must cover eligible cards and enforce one-use transitions.
 test("batch context: mint covers full eligible list, single-use transitions are atomic", async () => {
   const dir = freshDir();
   try {
@@ -320,6 +364,7 @@ test("batch context: mint covers full eligible list, single-use transitions are 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: A confirmed batch must expire at the earliest applicable deadline.
 test("batch context: interactive expiry is the earlier of policy expiry or five minutes", async () => {
   const dir = freshDir();
   try {
@@ -338,6 +383,7 @@ test("batch context: interactive expiry is the earlier of policy expiry or five 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Enable and disable changes must persist their bounded policy states.
 test("policy operations: enable/disable persist the closed semantic result", async () => {
   const dir = freshDir();
   try {
@@ -353,6 +399,7 @@ test("policy operations: enable/disable persist the closed semantic result", asy
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Configuration must apply only valid route and interval changes.
 test("policy operations: configure roleRoute and interval; invalid changes fail closed", async () => {
   const dir = freshDir();
   try {
@@ -381,6 +428,7 @@ test("policy operations: configure roleRoute and interval; invalid changes fail 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Headless callers must not accept host risk or persist that approval.
 test("policy operations: headless host-risk acceptance fails closed and writes nothing", async () => {
   const dir = freshDir();
   try {
@@ -403,6 +451,7 @@ test("policy operations: headless host-risk acceptance fails closed and writes n
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Revoking or removing policy must stop new claims.
 test("policy operations: revocation (disable) and policy absence stop new claims", async () => {
   const dir = freshDir();
   try {
@@ -414,6 +463,7 @@ test("policy operations: revocation (disable) and policy absence stop new claims
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Unavailable containment must deny dispatch rather than fall back to a host spawn.
 test("automated tick: container placement is denied with containment-seam-unavailable, no host spawn", async () => {
   const dir = freshDir();
   try {
@@ -432,6 +482,7 @@ test("automated tick: container placement is denied with containment-seam-unavai
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Interactive mode must not schedule effects without its attended flow.
 test("automated tick: interactive mode is a no-op (no scheduling effects)", async () => {
   const dir = freshDir();
   try {
@@ -443,6 +494,7 @@ test("automated tick: interactive mode is a no-op (no scheduling effects)", asyn
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Timer start, single-flight, and clear must not duplicate scheduled work.
 test("timer lifecycle: no tick before start, single-flight, fillOnStart queues one tick, clear is idempotent", async () => {
   const scheduled = [];
   let tickCount = 0;
@@ -475,6 +527,7 @@ test("timer lifecycle: no tick before start, single-flight, fillOnStart queues o
   assert.equal(timer.stats().stopped, true);
 });
 
+// Why: Disabling fill-on-start must defer the first tick until the interval.
 test("timer lifecycle: fillOnStart=false schedules the interval, never immediate", () => {
   const scheduled = [];
   const timer = createPulseTimer({
@@ -489,6 +542,7 @@ test("timer lifecycle: fillOnStart=false schedules the interval, never immediate
   assert.equal(scheduled[0].ms, 300000);
 });
 
+// Why: Tool registration must connect run and policy actions to their real handlers.
 test("tool run/enable/configure surface is wired end-to-end through the registered tool", async () => {
   const dir = freshDir();
   try {

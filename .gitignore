@@ -30,6 +30,3 @@ skills/weekly-build-recap/banned.local.json
 .pad-scratch/
 .ci-scratch/
 .treehouse/
-
-# Local fleet agent guidance; do not publish.
-/AGENTS.md

@@ -233,6 +233,11 @@ export function getReservation(store, reservationId) {
   };
 }
 
+export function reservationForEnvelope(store, envelopeId) {
+  const row = store.db.prepare("SELECT reservation_id FROM reservations WHERE envelope_id = ?").get(envelopeId);
+  return row ? getReservation(store, row.reservation_id) : null;
+}
+
 export function reservationsForDecision(store, decisionId) {
   return store.db.prepare(
     "SELECT reservation_id AS reservationId, state, vectors_json AS vectorsJson, account_id AS accountId, seat_id AS seatId FROM reservations WHERE decision_id = ?",
@@ -361,11 +366,14 @@ export function reconcileReservationFromClaim(store, { claim, now, leaseSeconds 
       claim.envelopeId, envelope.envelopeId, 0);
     return { ok: true, repaired: true, reason: "re-materialized from authenticated reservation identity" };
   }
-  // Window 3: reservation expired (or still reserved) while the claim is
-  // active — the claim is authoritative; re-materialize as claimed.
+  // Only the reserved/expired crash window can be repaired. A settled row
+  // must never be revived even if an authenticated claim is still live.
+  if (current.state !== "reserved" && current.state !== "expired") {
+    return { ok: false, repaired: false, reason: `reservation is ${current.state}; cannot reconcile` };
+  }
   store.db.prepare(`
     UPDATE reservations SET state = 'claimed', claimed_at = ?, lease_expires_at = ?, claim_id = ?, envelope_id = ?
-    WHERE reservation_id = ?
+    WHERE reservation_id = ? AND state IN ('reserved', 'expired')
   `).run(now, leaseExpiry(now, leaseSeconds), claim.envelopeId, envelope.envelopeId, reservationId);
   return { ok: true, repaired: true, reason: "re-materialized from authenticated claim (crash window 3)" };
 }

@@ -63,6 +63,7 @@ function baseCard(overrides = {}) {
   return card;
 }
 
+// Why: Ready selection must ignore unranked or flagged cards while preserving priority order.
 test("ready selection excludes unranked and flagged cards and preserves board order within priority", () => {
   const dir = mkdtempSync(join(tmpdir(), "ready-board-"));
   const boardPath = join(dir, "TASKS.md");
@@ -79,19 +80,24 @@ test("ready selection excludes unranked and flagged cards and preserves board or
 
 // --- §1: closed vocabularies and identity ----------------------------------
 
+// Why: Unknown lane, flag, and priority values must not enter the board model.
 test("lanes, flags, and priorities are closed enums", () => {
   assert.deepEqual(LANES, ["backlog", "in-progress", "review", "done"]);
   assert.deepEqual(FLAGS, ["proposed", "blocked", "cancelled"]);
   assert.deepEqual(PRIORITIES, ["P0", "P1", "P2", "P3"]);
 });
 
+// Why: Card identifiers must retain the documented format for reliable references.
 test("cardId syntax is pinned per design §1", () => {
+  // Why: Allowed IDs include compact and namespaced forms used in existing boards.
   for (const ok of ["T-0001", "A", "proj:feat_1.x-y", "0x0"]) assert.ok(CARD_ID_RE.test(ok), ok);
   for (const bad of ["", "-lead", ".dot", "has space", "é".repeat(1), "a".repeat(129), "#tag", "a/b"]) {
+    // Why: Invalid separators, Unicode, and overlong IDs must not become claimable references.
     assert.equal(CARD_ID_RE.test(bad), false, bad);
   }
 });
 
+// Why: Duplicate IDs would make card claims and dependencies ambiguous.
 test("duplicate cardId is a validation error", () => {
   const md = [
     "## backlog",
@@ -104,6 +110,7 @@ test("duplicate cardId is a validation error", () => {
   assert.ok(result.errors.some((e) => e.includes("duplicate cardId")));
 });
 
+// Why: Imported identifiers must normalize safely while retaining provenance.
 test("imported ID /-to--- substitution retains the original in provenance", () => {
   assert.equal(substituteImportedId("gh/42"), "gh--42");
   const card = baseCard({
@@ -114,13 +121,16 @@ test("imported ID /-to--- substitution retains the original in provenance", () =
   assert.equal(validateCard(card, registries).ok, true);
 });
 
+// Why: Priority conversion must match the documented lossy Obsidian mapping.
 test("Obsidian priority mapping is the documented lossy map", () => {
   assert.deepEqual(OBSIDIAN_PRIORITY_MAP, {
     highest: "P0", high: "P1", medium: "P2", low: "P3", lowest: "P3",
   });
 });
 
+// Why: A branch name cannot anchor the immutable base revision of a card.
 test("base:: requires a full 40-hex commit SHA, never a branch name", () => {
+  // Why: A complete commit digest must be accepted as an immutable base.
   assert.ok(COMMIT_SHA_RE.test(SHA));
   assert.equal(validateCard(baseCard({ base: SHA }), registries).ok, true);
   const bad = validateCard(baseCard({ base: "main" }), registries);
@@ -128,6 +138,7 @@ test("base:: requires a full 40-hex commit SHA, never a branch name", () => {
   assert.ok(bad.errors.some((e) => e.includes("40-hex")));
 });
 
+// Why: Role and capability values must belong to declared registries.
 test("user-declared role and capability registries gate values", () => {
   const ok = validateCard(baseCard({ role: "implementer", capabilities: ["fs-write"] }), registries);
   assert.equal(ok.ok, true);
@@ -137,12 +148,14 @@ test("user-declared role and capability registries gate values", () => {
   assert.ok(badCap.errors.some((e) => e.includes("capability registry")));
 });
 
+// Why: Decorative tags must not masquerade as board flags.
 test("decorative flag-name tags are a validation error", () => {
   const bad = validateCard(baseCard({ tags: ["blocked"] }), registries);
   assert.equal(bad.ok, false);
   assert.ok(bad.errors.some((e) => e.includes("decorative")));
 });
 
+// Why: Scoped user-level cards need an unambiguous repository destination.
 test("user-level cards with scope must name their repositories", () => {
   const bad = validateCard(baseCard({ userLevel: true }), { ...registries, userLevel: true });
   assert.ok(bad.errors.some((e) => e.includes("must name the repository")));
@@ -152,12 +165,14 @@ test("user-level cards with scope must name their repositories", () => {
 
 // --- §1: hash canonicalization ---------------------------------------------
 
+// Why: Stable key ordering and absent-field handling are necessary for reproducible hashes.
 test("canonical JSON sorts keys recursively and omits absent optionals", () => {
   assert.equal(canonicalJsonString({ b: 1, a: { d: 2, c: 3 } }), '{"a":{"c":3,"d":2},"b":1}');
   assert.equal(canonicalJsonString({ a: 1, z: undefined }), '{"a":1}');
   assert.equal(canonicalJsonString({ a: 1, z: null }), '{"a":1}');
 });
 
+// Why: Equivalent Unicode strings must hash identically after normalization.
 test("strings are NFC-normalized before hashing", () => {
   const decomposed = "e\u0301";
   const composed = "é";
@@ -165,17 +180,20 @@ test("strings are NFC-normalized before hashing", () => {
   assert.equal(computeSpecHash(decomposed), computeSpecHash(composed));
 });
 
+// Why: Visual formatting must not alter semantic identity or embed authority in a card hash.
 test("presentation is excluded from the hash; authority source is outside it", () => {
   const a = baseCard({ title: "Do the thing" });
   const b = baseCard({ title: "Do the thing ✨🚀", provenance: "x", description: "changed" });
   assert.equal(computeCardHash(a), computeCardHash(b));
 });
 
+// Why: A meaningful card edit must invalidate its previous hash.
 test("semantic change changes the hash", () => {
   assert.notEqual(computeCardHash(baseCard()), computeCardHash(baseCard({ priority: "P0" })));
   assert.notEqual(computeCardHash(baseCard()), computeCardHash(baseCard({ flags: ["blocked"] })));
 });
 
+// Why: Capability, repository, and path changes must be detectable by semantic hashing.
 test("B3 regression: capabilities, repositories, and unchanged paths are hash-bearing", () => {
   assert.notEqual(
     computeCardHash(baseCard()),
@@ -219,6 +237,7 @@ const TASKS_BOARD = [
   "- [x] Bootstrap repo <!-- id: T-0001 --> [priority:: P2] [specHash:: abc] [dodHash:: def] [scope:: .] [stopping:: n/a]",
 ].join("\n");
 
+// Why: Both supported board formats must yield the same card semantics.
 test("both surface shapes parse into the same semantic model", () => {
   const obsidian = parseBoard(OBSIDIAN_BOARD);
   const tasks = parseBoard(TASKS_BOARD);
@@ -234,6 +253,7 @@ test("both surface shapes parse into the same semantic model", () => {
   assert.equal(a.stoppingPoint, b.stoppingPoint);
 });
 
+// Why: Cancelled checkbox and date notation must parse without falsely marking completion.
 test("[-] cancelled checkbox maps to #cancelled; emoji date maps to due", () => {
   const md = "## backlog\n\n- [-] Dropped idea [id:: T-0009]\n- [ ] With date [id:: T-0010] 📅 2026-01-02";
   const parsed = parseBoard(md);
@@ -243,23 +263,27 @@ test("[-] cancelled checkbox maps to #cancelled; emoji date maps to due", () => 
   assert.equal(dated.due, "2026-01-02");
 });
 
+// Why: Unknown headings must not introduce undeclared lanes.
 test("unknown ## headings are rejected (lanes stay closed)", () => {
   const parsed = parseBoard("## someday\n\n- [ ] x [id:: T-0001]");
   assert.equal(parsed.ok, false);
   assert.ok(parsed.errors.some((e) => e.includes("closed")));
 });
 
+// Why: Indented lines must remain description text, not become fields.
 test("indented continuation lines are description text", () => {
   const parsed = parseBoard(OBSIDIAN_BOARD);
   const card = parsed.cards.find((c) => c.cardId === "T-0003");
   assert.equal(card.description, "follow-up notes here");
 });
 
+// Why: Both parsers must remove presentation prefixes from titles consistently.
 test("title stripping is consistent across both parsers", () => {
   const raw = "Fix the login race [id:: T-0002] [priority:: P0] 📅 2026-01-02 ✨";
   assert.equal(stripTitle(raw), "Fix the login race");
 });
 
+// Why: Conflicting board mirrors must be rejected instead of selecting a preferred version.
 test("mirror-consistency disagreement fails closed", () => {
   const md = "## backlog\n\n- [ ] x <!-- id: T-0002 --> [id:: T-0003]";
   const parsed = parseBoard(md);
@@ -267,6 +291,7 @@ test("mirror-consistency disagreement fails closed", () => {
   assert.ok(parsed.errors.some((e) => e.includes("mirror-consistency")));
 });
 
+// Why: Serialization must preserve card semantics when parsed again.
 test("round-trip: serialize then parse preserves the semantic model", () => {
   const card = baseCard({ due: "2026-09-20", role: "implementer", capabilities: ["fs-write"] });
   for (const surface of ["obsidian", "tasks"]) {
@@ -283,8 +308,10 @@ test("round-trip: serialize then parse preserves the semantic model", () => {
   }
 });
 
+// Why: Decorative emoji must not be required for valid board cards.
 test("emoji are optional presentation, never required", () => {
   const plain = serializeTasksCard(baseCard());
+  // Why: Plain serialization must not require decorative pictographs to retain semantics.
   assert.equal(/\p{Extended_Pictographic}/u.test(plain), false);
 });
 
@@ -294,6 +321,7 @@ function boardIndex(cards) {
   return new Map(cards.map((card) => [card.cardId, card]));
 }
 
+// Why: Dispatch eligibility must report which required condition blocks a card.
 test("dispatchable ⇔ the §3.3 conjunction, and failures are stated", () => {
   const good = baseCard();
   assert.deepEqual(isDispatchable(good, boardIndex([])), { dispatchable: true, failedConditions: [] });
@@ -315,16 +343,22 @@ test("dispatchable ⇔ the §3.3 conjunction, and failures are stated", () => {
   }
 });
 
-test("dependencies must be done and not cancelled; a cancelled dependency fails", () => {
-  const depDone = baseCard({ cardId: "T-0001", lane: "done" });
+// Why: a done lane without a completed checkbox must not unblock dependents.
+test("dependencies must be completed and not cancelled; a lane-only done dependency fails", () => {
+  const depDone = baseCard({ cardId: "T-0001", lane: "done", done: true });
   const ok = isDispatchable(baseCard({ dependencies: ["T-0001"] }), boardIndex([depDone]));
   assert.equal(ok.dispatchable, true);
+
+  const laneOnly = baseCard({ cardId: "T-0001", lane: "done", done: false });
+  const laneOnlyResult = isDispatchable(baseCard({ dependencies: ["T-0001"] }), boardIndex([laneOnly]));
+  assert.equal(laneOnlyResult.dispatchable, false);
+  assert.ok(laneOnlyResult.failedConditions.some((c) => c.includes("not completed")));
 
   const depOpen = baseCard({ cardId: "T-0001", lane: "in-progress" });
   const r1 = isDispatchable(baseCard({ dependencies: ["T-0001"] }), boardIndex([depOpen]));
   assert.ok(r1.failedConditions.some((c) => c.includes('not "done"')));
 
-  const depCancelled = baseCard({ cardId: "T-0001", lane: "done", flags: ["cancelled"] });
+  const depCancelled = baseCard({ cardId: "T-0001", lane: "done", done: true, flags: ["cancelled"] });
   const r2 = isDispatchable(baseCard({ dependencies: ["T-0001"] }), boardIndex([depCancelled]));
   assert.ok(r2.failedConditions.some((c) => c.includes("cancelled")));
 
@@ -334,6 +368,7 @@ test("dependencies must be done and not cancelled; a cancelled dependency fails"
 
 // --- §6 gate 3: tamper gates -------------------------------------------------
 
+// Why: A stale card hash must stop dispatch after a semantic edit.
 test("stale or tampered card hash fails closed at dispatch", () => {
   const card = baseCard();
   assert.equal(isDispatchable(card, boardIndex([])).dispatchable, true);
@@ -343,6 +378,7 @@ test("stale or tampered card hash fails closed at dispatch", () => {
   assert.ok(result.failedConditions.some((c) => c.includes("stale or tampered")));
 });
 
+// Why: Missing card hashes must fail closed before dispatch.
 test("B1 regression: a missing card hash never dispatches (fails closed)", () => {
   const card = baseCard();
   delete card.hash;
@@ -351,6 +387,7 @@ test("B1 regression: a missing card hash never dispatches (fails closed)", () =>
   assert.ok(result.failedConditions.some((c) => c.includes("card hash missing")));
 });
 
+// Why: Persisted specification or completion text must match its recorded hash.
 test("B2 regression: spec/DoD hashes are verified against persisted text", () => {
   // Persisted text tampered after the hash was written: mismatch fails closed.
   const tamperedSpec = baseCard({ specText: "tampered spec" });
@@ -374,6 +411,7 @@ test("B2 regression: spec/DoD hashes are verified against persisted text", () =>
   assert.equal(isDispatchable(bogus, boardIndex([])).dispatchable, false);
 });
 
+// Why: Dispatch requires a valid authority-source record for the card.
 test("B4 regression: dispatch requires a well-formed authority-source record", () => {
   for (const bad of [
     null,
@@ -395,6 +433,7 @@ test("B4 regression: dispatch requires a well-formed authority-source record", (
 
 // --- F1 regression: closed record shape and writer-authenticated provenance
 
+// Why: Unrecognized authority fields or conflicting quote forms must be rejected.
 test("F1: the authority record shape is closed — exactly three fields, exactly one of quotedInstruction or digest", () => {
   const good = { source: "instruction", sessionOrReportId: "s1", quotedInstruction: "do it" };
   assert.equal(isValidAuthoritySource(good), true);
@@ -408,6 +447,7 @@ test("F1: the authority record shape is closed — exactly three fields, exactly
   assert.equal(isValidAuthoritySource({ ...good, writerHmac: "x" }), false);
 });
 
+// Why: A hand-written card without trusted writer provenance must not dispatch.
 test("F1: cards not written through the trusted writer cannot dispatch (ledger + HMAC)", () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "board.md");
@@ -473,6 +513,7 @@ test("F1: cards not written through the trusted writer cannot dispatch (ledger +
   }
 });
 
+// Why: The writer secret and issued-ID record must persist with restricted permissions.
 test("F1: the writer state file records the secret and the issued-IDs ledger, mode 0600", () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "board.md");
@@ -505,6 +546,7 @@ test("F1: the writer state file records the secret and the issued-IDs ledger, mo
 
 // --- F2 regression: canonical base64url only; empty spec/DoD never dispatches
 
+// Why: Noncanonical encoded fields could hide altered card content.
 test("F2: decodeFieldText requires a canonical base64url round-trip", () => {
   assert.equal(decodeFieldText(encodeFieldText("hello world")), "hello world");
   assert.equal(decodeFieldText("***"), null);
@@ -516,6 +558,7 @@ test("F2: decodeFieldText requires a canonical base64url round-trip", () => {
   assert.equal(decodeFieldText(encodeFieldText("")), null);
 });
 
+// Why: A card without substantive work or completion criteria must not be written or dispatched.
 test("F2: empty specification or definition-of-done text fails closed at dispatch and at write", () => {
   const emptySpec = baseCard({ specText: "", specHash: computeSpecHash("") });
   const r1 = isDispatchable(emptySpec, boardIndex([]));
@@ -542,6 +585,7 @@ test("F2: empty specification or definition-of-done text fails closed at dispatc
   }
 });
 
+// Why: Parsing must not let malformed authority fields bypass validation.
 test("B4 regression: a parsed malformed authority field fails validation", () => {
   const md = "## backlog\n\n- [ ] x [id:: T-0001] [authority:: {oops}]";
   const parsed = validateBoard(md);
@@ -549,6 +593,7 @@ test("B4 regression: a parsed malformed authority field fails validation", () =>
   assert.ok(parsed.errors.some((e) => e.includes("malformed authority-source")));
 });
 
+// Why: Free-text punctuation and lookalikes must not inject board structure.
 test("adversarial: quotes, backticks, :: inside values, emoji lookalikes, HTML-comment injection", () => {
   // HTML-comment injection in TASKS.md is rejected.
   const injected = parseBoard("## backlog\n\n- [ ] x <!-- id: T-0001 --> <!-- id: T-0002 -->");
@@ -577,6 +622,7 @@ test("adversarial: quotes, backticks, :: inside values, emoji lookalikes, HTML-c
   assert.equal(computeCardHash(baseCard({ title: "`rm -rf /`" })), computeCardHash(baseCard({ title: "safe" })));
 });
 
+// Why: Invalid authority-source records must be refused at the writer boundary.
 test("malformed authority source records are refused", () => {
   assert.throws(() => recordAuthoritySource({ source: "vibes", sessionOrReportId: "s1", quotedInstruction: "do it" }));
   assert.throws(() => recordAuthoritySource({ source: "instruction", sessionOrReportId: "", quotedInstruction: "x" }));
@@ -592,6 +638,7 @@ test("malformed authority source records are refused", () => {
   assert.ok(!("timestamp" in record));
 });
 
+// Why: Duplicate authority-bearing fields must not override the original value.
 test("M2 regression: duplicate authority-bearing fields are rejected fail-closed", () => {
   for (const [line, key] of [
     ["- [ ] x [id:: T-0001] [priority:: P1] [priority:: P0]", "priority"],
@@ -605,6 +652,7 @@ test("M2 regression: duplicate authority-bearing fields are rejected fail-closed
   }
 });
 
+// Why: Aliases and repeated flags must not bypass duplicate-field checks.
 test("F5: semantic alias keys collide as duplicates, and repeated flags are errors", () => {
   for (const [line, key] of [
     ["- [ ] x [id:: T-0001] [specHash:: aa] [spec-hash:: bb]", "specHash"],
@@ -630,6 +678,7 @@ test("F5: semantic alias keys collide as duplicates, and repeated flags are erro
 
 // --- §3.5: trusted board writer ----------------------------------------------
 
+// Why: The trusted writer must allocate and authenticate cards in one persist operation.
 test("writer allocates IDs, hashes, validates, persists atomically", () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "board.md");
@@ -675,6 +724,7 @@ test("writer allocates IDs, hashes, validates, persists atomically", () => {
   }
 });
 
+// Why: Invalid card input must leave the board untouched.
 test("writer declines before persist on violation — nothing lands", () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "board.md");
@@ -695,6 +745,7 @@ test("writer declines before persist on violation — nothing lands", () => {
   }
 });
 
+// Why: New writes must not extend an already invalid board.
 test("writer refuses to build on an invalid board", () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "board.md");
@@ -713,6 +764,7 @@ test("writer refuses to build on an invalid board", () => {
   }
 });
 
+// Why: A caller must not choose its own card identity.
 test("writer never accepts a model-supplied cardId", () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "board.md");
@@ -729,6 +781,7 @@ test("writer never accepts a model-supplied cardId", () => {
   }
 });
 
+// Why: Deleted high IDs must not become available for reuse.
 test("B5 regression: deleting the highest card never reuses its ID (durable high-water mark)", () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "board.md");
@@ -759,6 +812,7 @@ test("B5 regression: deleting the highest card never reuses its ID (durable high
   }
 });
 
+// Why: Caller-selected prefixes must not alter the board's declared ID namespace.
 test("B5 regression: a model-supplied idPrefix that differs from the board prefix is rejected", () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "board.md");
@@ -791,6 +845,7 @@ test("B5 regression: a model-supplied idPrefix that differs from the board prefi
   }
 });
 
+// Why: Concurrent board writes must serialize under the writer lock.
 test("B5 regression: writer operations are serialized with a lock file", () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "board.md");
@@ -824,6 +879,7 @@ test("B5 regression: writer operations are serialized with a lock file", () => {
   }
 });
 
+// Why: The final board text must validate before it reaches disk.
 test("B6 regression: the resulting board text is fully validated before persist", () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "board.md");
@@ -844,6 +900,7 @@ test("B6 regression: the resulting board text is fully validated before persist"
   }
 });
 
+// Why: Titles and instructions must not inject fields or comments into the board.
 test("B6 regression: titles and instruction text cannot inject field or comment syntax", () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "board.md");
@@ -884,6 +941,7 @@ test("B6 regression: titles and instruction text cannot inject field or comment 
 
 // --- §6 gate 4: reversal proof ------------------------------------------------
 
+// Why: Missing boards must return an unavailable observation instead of invented state.
 test("reversal: no board file means no observation and a per-call board-unavailable surface", async () => {
   const observation = observeBoardProvider({ boardPath: "/nonexistent/board.md" });
   assert.equal(observation.present, false);
@@ -908,6 +966,7 @@ test("reversal: no board file means no observation and a per-call board-unavaila
   assert.equal(writeResult.details.persisted, false);
 });
 
+// Why: Board providers must observe current data on each request.
 test("reversal: provider observation happens per call on a real board file", async () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "board.md");
@@ -935,6 +994,7 @@ test("reversal: provider observation happens per call on a real board file", asy
   }
 });
 
+// Why: The extension must resolve the board from the active workspace.
 test("B7 regression: the extension resolves the board path from the workspace", async () => {
   const extensionModule = await import("../extensions/task-board.ts");
   // Documented behavior: a known workspace always yields a candidate path
@@ -1021,6 +1081,7 @@ function fixtureCard(overrides = {}) {
   });
 }
 
+// Why: Rich Obsidian board notation must remain parseable.
 test("comprehension gate fixture: a real rich Obsidian-style board parses cleanly", () => {
   const md = serializeBoard([
     // F6: T-0004 actually depends on a done card (T-0001), and its
@@ -1061,6 +1122,7 @@ test("comprehension gate fixture: a real rich Obsidian-style board parses cleanl
   assert.equal(isDispatchable(t5parsed, index).dispatchable, false);
 });
 
+// Why: The simpler board-client format must remain parseable.
 test("comprehension gate fixture: simple board-client-style board parses cleanly", () => {
   const md = serializeBoard([
     fixtureCard({ cardId: "T-0004", title: "Fix login race", priority: "P0", dependencies: ["T-0001"] }),
@@ -1089,6 +1151,7 @@ test("comprehension gate fixture: simple board-client-style board parses cleanly
 
 // --- F3 regression: lock tokens and compare-and-delete reclamation
 
+// Why: Lock cleanup must never remove another writer's lock token.
 test("F3: the lock content is a random owner token and finally unlinks only its own token", () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "board.md");
@@ -1112,6 +1175,7 @@ test("F3: the lock content is a random owner token and finally unlinks only its 
   }
 });
 
+// Why: A stale lock must be reclaimed only if its observed owner is unchanged.
 test("F3: a stale lock is reclaimed by compare-and-delete against the observed token", () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "board.md");
@@ -1151,6 +1215,7 @@ test("F3: a stale lock is reclaimed by compare-and-delete against the observed t
 
 // --- F4 regression: caller registries propagate into validateBoard
 
+// Why: Declared roles and capabilities must validate while undeclared ones fail.
 test("F4: a board with declared roles/capabilities validates; undeclared ones fail", () => {
   const declared = serializeBoard([
     baseCard({ cardId: "T-0001", role: "implementer", capabilities: ["fs-write"] }),
@@ -1188,6 +1253,7 @@ test("F4: a board with declared roles/capabilities validates; undeclared ones fa
 
 // --- F7 regression: state-file recovery and tool re-observation
 
+// Why: Recovery after state-file loss must preserve the highest issued card ID.
 test("F7a: a missing state file with a non-empty board recovers the high-water mark under the lock", () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "board.md");
@@ -1222,6 +1288,7 @@ test("F7a: a missing state file with a non-empty board recovers the high-water m
   }
 });
 
+// Why: Board tools must re-observe state and report deletion on the next call.
 test("F7b: the board tool re-observes on every call and reports board-unavailable", async () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "board.md");
@@ -1252,6 +1319,7 @@ test("F7b: the board tool re-observes on every call and reports board-unavailabl
 
 // --- §3.5 write tool: the trusted writer exposed as agentic_kanban_board_write
 
+// Why: A successful write must allocate, hash, and authenticate the stored card.
 test("write tool: successful write allocates cardId, persists hashes, records authority with HMAC", async () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "TASKS.md");
@@ -1299,6 +1367,7 @@ test("write tool: successful write allocates cardId, persists hashes, records au
   }
 });
 
+// Why: The write tool must reject an absent authority record with a structured response.
 test("write tool: refuses a missing authority record with a structured failure", async () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "TASKS.md");
@@ -1325,6 +1394,7 @@ test("write tool: refuses a missing authority record with a structured failure",
   }
 });
 
+// Why: The write tool must reject malformed authority rather than storing it.
 test("write tool: refuses a malformed authority record with a structured failure", async () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "TASKS.md");
@@ -1360,6 +1430,7 @@ test("write tool: refuses a malformed authority record with a structured failure
   }
 });
 
+// Why: A card missing its specification must be rejected without throwing.
 test("write tool: refuses an invalid card (missing specification) with a structured failure", async () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "TASKS.md");
@@ -1386,6 +1457,7 @@ test("write tool: refuses an invalid card (missing specification) with a structu
   }
 });
 
+// Why: Lock contention must be surfaced as a structured refusal.
 test("write tool: writer-lock-held surfaces as a structured failure, not a throw", async () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "TASKS.md");
@@ -1415,6 +1487,7 @@ test("write tool: writer-lock-held surfaces as a structured failure, not a throw
   }
 });
 
+// Why: A missing board may bootstrap fresh but must not return stale content.
 test("write tool with no board: bootstraps a fresh board; stale content does not return", async () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "TASKS.md");
@@ -1444,6 +1517,7 @@ test("write tool with no board: bootstraps a fresh board; stale content does not
   }
 });
 
+// Why: Recreating a deleted board must not resurrect its previous cards.
 test("write tool after board deletion: bootstraps fresh, never resurrects stale content", async () => {
   const dir = mkdtempSync(join(tmpdir(), "board1-"));
   const boardPath = join(dir, "TASKS.md");

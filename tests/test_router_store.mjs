@@ -34,6 +34,7 @@ const VECTORS = [
   { windowId: "tokens-unbounded", unit: "tokens", resetAt: null, quantity: 1200, windowTotal: 10000, windowRemaining: 8000 },
 ];
 
+// Why: Reservation claims must retain their binding through final consumption.
 test("reservation lifecycle: reserved → claimed → consumed", () => {
   const { store, dir } = freshStore();
   try {
@@ -59,6 +60,7 @@ test("reservation lifecycle: reserved → claimed → consumed", () => {
   } finally { closeRouterStore(store); rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Repeating settlement must not change a terminal reservation or double-spend it.
 test("consume and release are idempotent", () => {
   const { store, dir } = freshStore();
   try {
@@ -79,6 +81,7 @@ test("consume and release are idempotent", () => {
   } finally { closeRouterStore(store); rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: TTL expiry must not evict a claimed reservation with a live lease.
 test("TTL expiry applies ONLY to reserved; claimed is governed by lease renewal", () => {
   const { store, dir } = freshStore();
   try {
@@ -97,6 +100,7 @@ test("TTL expiry applies ONLY to reserved; claimed is governed by lease renewal"
   } finally { closeRouterStore(store); rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Only a claimed reservation can extend its lease without changing state.
 test("lease renewal extends claimed reservations and never expires them", () => {
   const { store, dir } = freshStore();
   try {
@@ -112,6 +116,7 @@ test("lease renewal extends claimed reservations and never expires them", () => 
   } finally { closeRouterStore(store); rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: An authenticated claim must reconstruct a missing reservation after a crash.
 test("crash window 2: claim succeeded, back-reference lost — envelope is authority, SQLite repaired", () => {
   const { store, dir } = freshStore();
   try {
@@ -136,6 +141,7 @@ test("crash window 2: claim succeeded, back-reference lost — envelope is autho
   } finally { closeRouterStore(store); rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: An active claim must repair a reserved or expired row after the crash window.
 test("crash window 3: reservation expired while claim active — claim is authoritative", () => {
   const { store, dir } = freshStore();
   try {
@@ -154,6 +160,25 @@ test("crash window 3: reservation expired while claim active — claim is author
   } finally { closeRouterStore(store); rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: startup repair must not revive a settled reservation from a lingering claim.
+test("reconciliation preserves consumed and released reservations", () => {
+  const { store, dir } = freshStore();
+  try {
+    for (const state of ["consumed", "released"]) {
+      const reservationId = createReservation(store, { decisionId: state, seatId: "s1", accountId: "a1", vectors: VECTORS, now: NOW });
+      const claim = { envelopeId: `env-${state}`, envelope: { envelopeId: `env-${state}`, reservationId } };
+      claimReservation(store, { reservationId, claimId: claim.envelopeId, envelopeId: claim.envelopeId, now: NOW });
+      if (state === "consumed") consumeReservation(store, { reservationId, now: NOW });
+      else releaseReservation(store, { reservationId, now: NOW });
+      const before = getReservation(store, reservationId);
+      const result = reconcileReservationFromClaim(store, { claim, now: "2026-09-16T13:00:00Z" });
+      assert.equal(result.repaired, false);
+      assert.deepEqual(getReservation(store, reservationId), before);
+    }
+  } finally { closeRouterStore(store); rmSync(dir, { recursive: true, force: true }); }
+});
+
+// Why: Once a claim settles, its reservation must follow the terminal outcome.
 test("crash window 4: reclaim while spawn ambiguous — the reservation follows the claim", () => {
   const { store, dir } = freshStore();
   try {
@@ -170,6 +195,7 @@ test("crash window 4: reclaim while spawn ambiguous — the reservation follows 
   } finally { closeRouterStore(store); rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Older quota generations must not overwrite the latest observation.
 test("quota observations: latest generation wins; lower generation is rollback", () => {
   const { store, dir } = freshStore();
   try {
@@ -202,6 +228,7 @@ test("quota observations: latest generation wins; lower generation is rollback",
   } finally { closeRouterStore(store); rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Consumption estimates need samples in capture order and scoped to the seat.
 test("consumption samples feed the estimator in capture order", () => {
   const { store, dir } = freshStore();
   try {
@@ -214,6 +241,7 @@ test("consumption samples feed the estimator in capture order", () => {
   } finally { closeRouterStore(store); rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Route and ranking decisions must remain available for later audit.
 test("route decisions and ranking observations persist for audit", () => {
   const { store, dir } = freshStore();
   try {
@@ -238,6 +266,7 @@ test("route decisions and ranking observations persist for audit", () => {
   } finally { closeRouterStore(store); rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Corrupt storage must refuse new reservations instead of silently accepting them.
 test("SQLite corruption fails closed for NEW reservations (storeHealthy reports)", () => {
   const { store, dir } = freshStore();
   try {
@@ -260,6 +289,7 @@ test("SQLite corruption fails closed for NEW reservations (storeHealthy reports)
   }
 });
 
+// Why: Reclaiming an already-bound reservation must reject other identities but renew its owner.
 test("claimReservation: already-claimed binding mismatch rejects; the same binding renews idempotently", () => {
   const { store, dir } = freshStore();
   try {

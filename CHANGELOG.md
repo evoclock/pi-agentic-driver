@@ -1,6 +1,6 @@
-## Unreleased
+## 3.1.4
 
-- Restore the shipped-features and router-configuration catalogs in the README to single tables.
+- Accept review_requested and blocked as journey consume reasons; repair reservations and keep both held on unverified spawn; allow durable cancel to take a late receipt; wait for done === true before dispatching dependents; add REST and MCP commands for those fixed machines; start workers when mixed-case Git checkout paths refer to the same folder; restore the shipped-features and router-configuration catalogs in the README to single tables.
 
 ## 3.1.3
 

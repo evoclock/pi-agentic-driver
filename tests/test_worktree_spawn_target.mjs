@@ -143,7 +143,7 @@ function makeWorktree(repo, path, branch = "lease-slot") {
 function fixture(options = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "worktree-spawn-")));
   const coordinator = gitRepo(join(root, "coordinator"));
-  const workerRoot = gitRepo(join(root, WORKER_REPO));
+  const workerRoot = gitRepo(join(root, options.workerDirectory ?? WORKER_REPO));
   git(workerRoot, ["remote", "add", "origin", `git@github.com:evoclock/${WORKER_REPO}.git`]);
   const policyDir = join(root, "profile", "config");
   mkdirSync(policyDir, { recursive: true });
@@ -270,23 +270,69 @@ test("mixed-case SSH and HTTPS origin names are accepted; foreign and malformed 
   const f = fixture({ omitTarget: true });
   try {
     for (const origin of [
-      "git@github.com:evoclock/OpenMausBot.git",
-      "https://github.com/evoclock/OpenMausBot.git",
+      "git@github.com:evoclock/Agents-Work.git",
+      "https://github.com/evoclock/Agents-Work.git",
     ]) {
       git(f.workerRoot, ["remote", "set-url", "origin", origin]);
       assert.equal(resolveTrustedSpawnRepository(f.coordinator, WORKER_REPO), f.workerRoot, origin);
     }
     for (const origin of [
-      "git@github.com:elsewhere/OpenMausBot.git",
-      "https://github.com/elsewhere/OpenMausBot.git",
-      "git@github.com:evoclock/Open_MausBot.git",
-      "https://github.com/evoclock/Open.MausBot.git",
+      "git@github.com:elsewhere/Agents-Work.git",
+      "https://github.com/elsewhere/Agents-Work.git",
+      "git@github.com:evoclock/Agents_Work.git",
+      "https://github.com/evoclock/Agents.Work.git",
     ]) {
       git(f.workerRoot, ["remote", "set-url", "origin", origin]);
       assert.throws(() => resolveTrustedSpawnRepository(f.coordinator, WORKER_REPO),
         (error) => error.code === "repository_origin_untrusted", origin);
     }
   } finally { cleanup(f.root); }
+});
+
+// Why: Git's alternate toplevel spelling is the same folder only when device and inode match, even on Linux.
+test("Git root spelling with the same inode accepts a lowercase request", () => {
+  const f = fixture({ noWorktree: true, omitTarget: true });
+  const alternate = join(f.root, "git-toplevel-spelling");
+  symlinkSync(f.workerRoot, alternate, "dir");
+  const original = childProcess.spawnSync;
+  try {
+    assert.notEqual(alternate, f.workerRoot);
+    assert.equal(statSync(alternate).dev, statSync(f.workerRoot).dev);
+    assert.equal(statSync(alternate).ino, statSync(f.workerRoot).ino);
+    childProcess.spawnSync = (command, args, options) =>
+      command === "git" && args.includes("--show-toplevel")
+        ? { status: 0, stdout: `${alternate}\n` }
+        : original(command, args, options);
+    syncBuiltinESMExports();
+    assert.equal(resolveTrustedSpawnRepository(f.coordinator, WORKER_REPO), f.workerRoot);
+  } finally {
+    childProcess.spawnSync = original;
+    syncBuiltinESMExports();
+    cleanup(f.root);
+  }
+});
+
+// Why: equal case-folded names do not make two distinct Git roots the same folder.
+test("Git root spelling with a different inode denies a lowercase request", () => {
+  const f = fixture({ noWorktree: true, omitTarget: true });
+  const alternate = gitRepo(join(f.root, "other", "Agents-Work"));
+  const original = childProcess.spawnSync;
+  try {
+    assert.equal(alternate.split("/").at(-1).toLowerCase(), WORKER_REPO);
+    assert.notEqual(`${statSync(alternate).dev}:${statSync(alternate).ino}`,
+      `${statSync(f.workerRoot).dev}:${statSync(f.workerRoot).ino}`);
+    childProcess.spawnSync = (command, args, options) =>
+      command === "git" && args.includes("--show-toplevel")
+        ? { status: 0, stdout: `${alternate}\n` }
+        : original(command, args, options);
+    syncBuiltinESMExports();
+    assert.throws(() => resolveTrustedSpawnRepository(f.coordinator, WORKER_REPO),
+      (error) => error.code === "repository_not_git_root");
+  } finally {
+    childProcess.spawnSync = original;
+    syncBuiltinESMExports();
+    cleanup(f.root);
+  }
 });
 
 // Why: a foreign or excluded remote must fail before layout even if the checkout exists.

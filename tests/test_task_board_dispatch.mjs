@@ -70,6 +70,7 @@ function withPolicy(boardPath, overrides = {}) {
   writeFileSync(automationPolicyPath(boardPath), JSON.stringify(policyFor(boardPath, null, overrides)));
 }
 
+// Why: Concurrent attempts on one card must yield only one authenticated claim.
 test("atomic claim: two CONCURRENT claims, one wins (Promise.all, same card)", async () => {
   const dir = freshDir();
   try {
@@ -91,6 +92,7 @@ test("atomic claim: two CONCURRENT claims, one wins (Promise.all, same card)", a
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Sequential claims must assign distinct cards rather than reuse the first.
 test("atomic claim: sequential claims take distinct cards", () => {
   const dir = freshDir();
   try {
@@ -106,6 +108,7 @@ test("atomic claim: sequential claims take distinct cards", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: An active claim must prevent a second claim on the same card ID.
 test("atomic claim: a claimed card cannot be claimed again by cardId", () => {
   const dir = freshDir();
   try {
@@ -119,6 +122,7 @@ test("atomic claim: a claimed card cannot be claimed again by cardId", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: An open prerequisite must prevent claiming its dependent card.
 test("blocked-by gating: a card with an open dependency is not claimable", () => {
   const dir = freshDir();
   try {
@@ -135,6 +139,7 @@ test("blocked-by gating: a card with an open dependency is not claimable", () =>
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Claims must not proceed without an automation policy.
 test("policy enforcement: no policy = refused", () => {
   const dir = freshDir();
   try {
@@ -146,6 +151,7 @@ test("policy enforcement: no policy = refused", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: An undeclared worker role must not claim a card.
 test("policy enforcement: role not in policy = refused", () => {
   const dir = freshDir();
   try {
@@ -157,6 +163,7 @@ test("policy enforcement: role not in policy = refused", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Invalid role names must not pass policy validation through injection.
 test("F5: policy roles must match ROLE_NAME_RE (injection rejected)", () => {
   const dir = freshDir();
   try {
@@ -170,6 +177,7 @@ test("F5: policy roles must match ROLE_NAME_RE (injection rejected)", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Unknown policy fields must not silently broaden claim permissions.
 test("F5: unknown policy fields fail closed with a clear reason", () => {
   const dir = freshDir();
   try {
@@ -182,6 +190,7 @@ test("F5: unknown policy fields fail closed with a clear reason", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Active-role projection text must reject malformed role names.
 test("F5: the projection [active:: role] value is pattern-validated", () => {
   const dir = freshDir();
   try {
@@ -197,6 +206,7 @@ test("F5: the projection [active:: role] value is pattern-validated", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Automated claims must not place work on the host without an attended boundary.
 test("policy enforcement: host placement refused in automated mode (§3.4)", () => {
   const dir = freshDir();
   try {
@@ -208,6 +218,7 @@ test("policy enforcement: host placement refused in automated mode (§3.4)", () 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: The global claim ceiling must cap active assignments.
 test("policy enforcement: maxConcurrent caps active claims", () => {
   const dir = freshDir();
   try {
@@ -221,6 +232,7 @@ test("policy enforcement: maxConcurrent caps active claims", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Concurrent Pulse claims must obey the per-role ceiling under the lock.
 test("policy enforcement: pulse role maxConcurrent caps claims atomically under the writer lock", () => {
   const dir = freshDir();
   try {
@@ -255,6 +267,7 @@ test("policy enforcement: pulse role maxConcurrent caps claims atomically under 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: A policy for another board must not authorize claims on this board.
 test("F4: the policy is bound to the board file it applies to", () => {
   const dir = freshDir();
   try {
@@ -272,6 +285,7 @@ test("F4: the policy is bound to the board file it applies to", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: An issued envelope must bind every execution-relevant card and repository field.
 test("envelope bindings: card hash, repository, starting revision, base, branch, scope, stopping point, risk, expiry", () => {
   const dir = freshDir();
   try {
@@ -314,6 +328,7 @@ test("envelope bindings: card hash, repository, starting revision, base, branch,
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: The envelope must preserve the declared base when branches chain.
 test("F4: base revision binds into the envelope (branch chaining)", () => {
   const dir = freshDir();
   try {
@@ -327,6 +342,7 @@ test("F4: base revision binds into the envelope (branch chaining)", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: A card must not raise its risk level beyond what policy permits.
 test("F4: per-card risk override only when the policy allows", () => {
   const dir = freshDir();
   try {
@@ -338,6 +354,7 @@ test("F4: per-card risk override only when the policy allows", () => {
   } finally { /* pure */ }
 });
 
+// Why: An envelope must never outlive its policy.
 test("envelope expiry is capped by the policy expiry", () => {
   const dir = freshDir();
   try {
@@ -351,6 +368,7 @@ test("envelope expiry is capped by the policy expiry", () => {
   } finally { /* pure */ }
 });
 
+// Why: Expired claims must release their card and require a fresh envelope to retry.
 test("expiry release: a short-lived policy expires its envelope; release on check; new envelope on retry", async () => {
   const dir = freshDir();
   try {
@@ -375,6 +393,7 @@ test("expiry release: a short-lived policy expires its envelope; release on chec
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: A consumed envelope must never authorize a repeated attempt.
 test("F2: a consumed envelope can never be reused — only a new envelopeId", () => {
   const dir = freshDir();
   try {
@@ -396,6 +415,7 @@ test("F2: a consumed envelope can never be reused — only a new envelopeId", ()
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Reclaiming a claim should free its card for another assignment.
 test("explicit reclaim: drops the claim and frees the card", () => {
   const dir = freshDir();
   try {
@@ -412,6 +432,7 @@ test("explicit reclaim: drops the claim and frees the card", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Tampering with authenticated claims must fail closed.
 test("F1: the claims file is HMAC-authenticated; tampering fails closed", () => {
   const dir = freshDir();
   try {
@@ -435,6 +456,7 @@ test("F1: the claims file is HMAC-authenticated; tampering fails closed", () => 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Invalid claim JSON or shape must not be treated as an empty claim list.
 test("F1: a malformed claims file (bad JSON, wrong shape) fails closed", () => {
   const dir = freshDir();
   try {
@@ -453,6 +475,7 @@ test("F1: a malformed claims file (bad JSON, wrong shape) fails closed", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Hand-written unauthenticated claims must not be trusted.
 test("F1: a claims file with no HMAC (hand-written) fails closed", () => {
   const dir = freshDir();
   try {
@@ -465,6 +488,7 @@ test("F1: a claims file with no HMAC (hand-written) fails closed", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Recovery must finish an interrupted transaction and republish its projection.
 test("F3: an interrupted transaction rolls forward — projection republished", () => {
   const dir = freshDir();
   try {
@@ -499,6 +523,7 @@ test("F3: an interrupted transaction rolls forward — projection republished", 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Pending transaction records must roll forward deterministically after interruption.
 test("F3: a pending transaction record is reconciled (roll-forward)", () => {
   const dir = freshDir();
   try {
@@ -548,6 +573,7 @@ function first2(boardPath) {
   return board.cards.find((c) => !readClaims(boardPath).some((claim) => claim.cardId === c.cardId))?.cardId;
 }
 
+// Why: Hand-edited cards outside the writer's issued-ID record must not be claimable.
 test("ID provenance: a hand-edited card outside the writer ledger cannot be claimed", () => {
   const dir = freshDir();
   try {
@@ -562,6 +588,7 @@ test("ID provenance: a hand-edited card outside the writer ledger cannot be clai
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Active claims belong in the projection without mutating the canonical board.
 test("claim shows as active in the projection; canonical board untouched", () => {
   const dir = freshDir();
   try {
@@ -577,6 +604,7 @@ test("claim shows as active in the projection; canonical board untouched", () =>
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Eligibility must combine card readiness, claim occupancy, and writer provenance.
 test("dispatch eligibility: pure predicate composes with claims and provenance", () => {
   const dir = freshDir();
   try {
@@ -593,6 +621,7 @@ test("dispatch eligibility: pure predicate composes with claims and provenance",
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Malformed policy shapes must not authorize dispatch.
 test("policy shape validation: malformed policies fail closed", () => {
   assert.equal(checkAutomationPolicy(null).ok, false);
   assert.equal(checkAutomationPolicy({}).ok, false);
@@ -611,6 +640,7 @@ test("policy shape validation: malformed policies fail closed", () => {
   assert.equal(checkAutomationPolicy({ roles: ["x"], placement: "container", maxConcurrent: 1, expiry: "2099-01-01", board: "other.md", riskCeiling: "low" }, { boardPath: "this.md" }).ok, false);
 });
 
+// Why: The dispatch tool must remain registered through the shared board interface.
 test("reversibility: the dispatch tool registers with the other board tools", () => {
   const registered = [];
   const fake = { registerTool: (tool) => registered.push(tool.name) };
@@ -619,6 +649,7 @@ test("reversibility: the dispatch tool registers with the other board tools", ()
   assert.ok(registered.includes("agentic_kanban_board"));
 });
 
+// Why: Missing policy must be explicit and the policy path derived from the board.
 test("readAutomationPolicy: missing file returns null; sidecar path is derived", () => {
   const dir = freshDir();
   try {
@@ -633,6 +664,7 @@ test("readAutomationPolicy: missing file returns null; sidecar path is derived",
 // Second fix pass regressions (items 1-6).
 // ---------------------------------------------------------------------------
 
+// Why: Deleting signed claims after issuance must not reset the attempt ledger.
 test("item 1: deleting the claims file after issuance fails closed (rollback guard)", () => {
   const dir = freshDir();
   try {
@@ -653,6 +685,7 @@ test("item 1: deleting the claims file after issuance fails closed (rollback gua
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: An older valid signature must not allow rollback of claim history.
 test("item 1: replay of an older CORRECTLY SIGNED claims state is rejected", () => {
   const dir = freshDir();
   try {
@@ -678,6 +711,7 @@ test("item 1: replay of an older CORRECTLY SIGNED claims state is rejected", () 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: A caller cannot redirect an assignment outside the accepted repositories.
 test("item 4: a repository override outside acceptedRepositories is rejected", () => {
   const dir = freshDir();
   try {
@@ -692,6 +726,7 @@ test("item 4: a repository override outside acceptedRepositories is rejected", (
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: The default repository also needs explicit policy acceptance.
 test("item 4: the default repository must also be on acceptedRepositories", () => {
   const dir = freshDir();
   try {
@@ -703,6 +738,7 @@ test("item 4: the default repository must also be on acceptedRepositories", () =
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Execution must start at the declared base rather than a moving branch tip.
 test("item 4: work starts from the declared base revision — startingRevision IS the base", () => {
   const dir = freshDir();
   try {
@@ -717,6 +753,7 @@ test("item 4: work starts from the declared base revision — startingRevision I
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Execution must revalidate the envelope at the last trusted boundary.
 test("item 2: validateEnvelopeForExecution — the authoritative execution boundary", () => {
   const dir = freshDir();
   try {
@@ -739,6 +776,7 @@ test("item 2: validateEnvelopeForExecution — the authoritative execution bound
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Expiry and repository or revision drift must refuse execution.
 test("item 2: validateEnvelopeForExecution — expiry, repository drift, revision drift", () => {
   const dir = freshDir();
   try {
@@ -766,6 +804,7 @@ test("item 2: validateEnvelopeForExecution — expiry, repository drift, revisio
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Completion must consume the exact single-use attempt.
 test("item 2: consumeEnvelope — completion consumption and single-attempt enforcement", () => {
   const dir = freshDir();
   try {
@@ -792,6 +831,7 @@ test("item 2: consumeEnvelope — completion consumption and single-attempt enfo
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Extra claim and envelope fields must not change authenticated semantics.
 test("item 6: strict shapes — unknown fields in claim/transaction/envelope records fail closed", () => {
   const dir = freshDir();
   try {
@@ -828,6 +868,7 @@ test("item 6: strict shapes — unknown fields in claim/transaction/envelope rec
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Independent processes must not win the same writer lock concurrently.
 test("item 5: genuine multi-process race — two OS processes contend on the same lock", async () => {
   const dir = freshDir();
   try {
@@ -855,6 +896,7 @@ writeFileSync(${JSON.stringify(join(dir, "RESULT-A"))}, JSON.stringify({ ok: r.o
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: A journey must refuse invalid envelopes before prompting a worker.
 test("item 2/3: journey wiring — an invalid envelope refuses execution before any work", async () => {
   const { runWorkerJourney } = await import("../scripts/enforcement/herdr_async_dispatch_pi.js");
   const dir = freshDir();
@@ -888,6 +930,7 @@ function idleCommunicationFixture(repository, onAction = () => {}) {
   };
 }
 
+// Why: Caller edits to an issued envelope must not override the signed claim.
 test("final: caller-modified envelope fields are rejected against the authenticated claim", () => {
   const dir = freshDir();
   try {
@@ -909,6 +952,7 @@ test("final: caller-modified envelope fields are rejected against the authentica
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Branch setup must be single-use and later branch drift must refuse execution.
 test("final: assigned branch is prepared once and later branch drift is refused", () => {
   const dir = freshDir();
   try {
@@ -926,8 +970,9 @@ test("final: assigned branch is prepared once and later branch drift is refused"
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: every terminal journey reason must be accepted by the board claim ledger.
 test("final: every terminal board journey consumes its envelope", async () => {
-  const { runWorkerJourney } = await import("../scripts/enforcement/herdr_async_dispatch_pi.js");
+  const { runWorkerJourney, WORKER_DISPATCH_TERMINAL_STATES } = await import("../scripts/enforcement/herdr_async_dispatch_pi.js");
   const dir = freshDir();
   try {
     const { boardPath, second } = fixtureBoard(dir);
@@ -940,9 +985,16 @@ test("final: every terminal board journey consumes its envelope", async () => {
     );
     assert.equal(journey.status, "exhausted");
     assert.equal(isEnvelopeConsumed(boardPath, r.envelope.envelopeId), true);
+    for (const reason of WORKER_DISPATCH_TERMINAL_STATES) {
+      const next = claimCard({ boardPath, role: "implementer", cardId: second });
+      assert.equal(next.ok, true, reason);
+      assert.equal(consumeEnvelope({ boardPath, envelopeId: next.envelope.envelopeId, reason }).ok, true, reason);
+      assert.equal(readClaimsState(boardPath).state.consumedClaims.at(-1).reason, reason);
+    }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Card drift during a journey must stop the prompt and consume the attempt.
 test("final: mid-journey card drift is caught before prompt and the attempt is consumed", async () => {
   const { runWorkerJourney } = await import("../scripts/enforcement/herdr_async_dispatch_pi.js");
   const dir = freshDir();
@@ -967,6 +1019,7 @@ test("final: mid-journey card drift is caught before prompt and the attempt is c
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: A failed consume operation must turn an apparent terminal success into failure.
 test("final: envelope consumption failure makes a terminal result fail closed", async () => {
   const { runWorkerJourney } = await import("../scripts/enforcement/herdr_async_dispatch_pi.js");
   const dir = freshDir();
@@ -989,6 +1042,7 @@ test("final: envelope consumption failure makes a terminal result fail closed", 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Each crash window must roll forward the staged authenticated claim state.
 test("final: both claims-anchor crash windows roll forward the staged signed state", () => {
   for (const claimsWritten of [false, true]) {
     const dir = freshDir();
@@ -1018,6 +1072,7 @@ test("final: both claims-anchor crash windows roll forward the staged signed sta
   }
 });
 
+// Why: Attempt replacement must atomically retire the old envelope and issue a new one.
 test("replaceAttempt: replaces the active attempt with a fresh envelope under one lock", () => {
   const dir = freshDir();
   try {
@@ -1035,6 +1090,7 @@ test("replaceAttempt: replaces the active attempt with a fresh envelope under on
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Replacement must refuse changed cards, reused attempts, and invalid policy.
 test("replaceAttempt: drift, reuse, and policy refusal fail closed without mutation", () => {
   const dir = freshDir();
   try {
@@ -1060,6 +1116,7 @@ test("replaceAttempt: drift, reuse, and policy refusal fail closed without mutat
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Replacement recovery must roll forward both claims-anchor crash windows.
 test("replaceAttempt: crash-injection in both claims-anchor windows rolls forward the staged signed replacement", () => {
   for (const claimsWritten of [false, true]) {
     const dir = freshDir();
@@ -1116,6 +1173,7 @@ test("replaceAttempt: crash-injection in both claims-anchor windows rolls forwar
   }
 });
 
+// Why: Board actions, completion checks, and mirror state must stay linked after edits.
 test("card action chain, manual re-sign, DoD re-check and derived mirror", () => {
   const dir = freshDir();
   try {
@@ -1155,6 +1213,7 @@ test("card action chain, manual re-sign, DoD re-check and derived mirror", () =>
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// Why: Failed completion validation must retain the claimant and its unchanged card.
 test("authorized done update checks drift without releasing the claimant on failure", () => {
   const dir = freshDir();
   try {
