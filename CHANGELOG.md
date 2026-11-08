@@ -1,6 +1,12 @@
 ## 3.1.4
 
-- Accept review_requested and blocked as journey consume reasons; repair reservations and keep both held on unverified spawn; allow durable cancel to take a late receipt; wait for done === true before dispatching dependents; add REST and MCP commands for those fixed machines; start workers when mixed-case Git checkout paths refer to the same folder; restore the shipped-features and router-configuration catalogs in the README to single tables.
+- Accept `review_requested` and `blocked` as journey consume reasons.
+- Repair reservations and keep both held on unverified spawn.
+- Allow durable cancel to take a late receipt.
+- Wait for `done === true` before dispatching dependent cards.
+- Add REST and MCP commands for those fixed machines.
+- Start workers when mixed-case Git checkout paths refer to the same folder.
+- Restore the shipped-features and router-configuration catalogs in the README to single tables.
 
 ## 3.1.3
 
