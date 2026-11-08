@@ -6,6 +6,7 @@
 - Wait for `done === true` before dispatching dependent cards.
 - Add REST and MCP commands for those fixed machines.
 - Start workers when mixed-case Git checkout paths refer to the same folder.
+- Disable repository pre-registration as a gate for guarded Herdr spawn; start a guarded worker without registering the repository first.
 - Restore the shipped-features and router-configuration catalogs in the README to single tables.
 
 ## 3.1.3

@@ -8,7 +8,7 @@
 // allowlist constant. Pane placement uses pane split directly; tab placement
 // uses tab create. Both capture the returned pane identity and start once.
 import { createHash } from "node:crypto";
-import { accessSync, constants as fsConstants, readFileSync, realpathSync, statSync, lstatSync, writeFileSync, copyFileSync } from "node:fs";
+import { accessSync, constants as fsConstants, readFileSync, realpathSync, statSync, lstatSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -17,7 +17,7 @@ import {
   HERDR_ROLE_POLICY,
   resolveTrustedHerdrExecutable,
 } from "./herdr_communication_pi.js";
-import { isAttendedElectronContext, isNativeTuiContext } from "./native_tui_context.js";
+import { isAttendedElectronContext } from "./native_tui_context.js";
 import { reserveApprovalUse, recordApprovalUse, authorizeApproval, checkRelayRequests } from "./approval_ledger_pi.js";
 import { needsOwner } from "./attended_authority_guard.js";
 
@@ -31,8 +31,6 @@ export const SPAWN_PLACEMENTS = Object.freeze(["tab", "right", "below"]);
 const HERDR_DIRECTIONS = Object.freeze({ right: "right", below: "down" });
 // Applied to the pane-move --split value (user placement right|below → Herdr
 // split right|down); never forwarded as a placement.
-const WORKER_REPOSITORY_REGISTRY = "config/herdr-worker-repositories.v1.json";
-const WORKER_REPOSITORY_SCHEMA = "agentic-driver.herdr-worker-repositories.v1";
 const ROLE_REGEXP = new RegExp(HERDR_ROLE_PATTERN);
 const SAFE_NAME_REGEXP = ROLE_REGEXP;
 const MAX_FIELD_BYTES = 4 * 1024;
@@ -405,35 +403,7 @@ function readBackPane(raw, expectedPaneId, canonicalRoot) {
   return paneId;
 }
 
-// --- Trusted repository resolution (registry + realpath + Git root) ---------
-function validateRegistry(registryPath) {
-  let raw;
-  try {
-    raw = readFileSync(registryPath, "utf8");
-  } catch {
-    throw lifecycleError("worker_registry_invalid", "the Herdr worker repository registry could not be read");
-  }
-  let registry;
-  try {
-    registry = JSON.parse(raw);
-  } catch {
-    throw lifecycleError("worker_registry_invalid", "the Herdr worker repository registry is invalid");
-  }
-  const keys = isPlainObject(registry) ? Object.keys(registry) : [];
-  if (!isPlainObject(registry)
-      || keys.length !== 2
-      || !keys.includes("schema") || !keys.includes("repositories")
-      || registry.schema !== WORKER_REPOSITORY_SCHEMA
-      || !Array.isArray(registry.repositories)
-      || registry.repositories.length < 1
-      || registry.repositories.length > 32
-      || new Set(registry.repositories).size !== registry.repositories.length
-      || registry.repositories.some((name) => typeof name !== "string"
-        || name.length < 1 || name.length > 64 || !SAFE_NAME_REGEXP.test(name))) {
-    throw lifecycleError("worker_registry_invalid", "the Herdr worker repository registry is not trusted");
-  }
-  return registry.repositories;
-}
+// --- Trusted repository resolution (realpath + Git root) --------------------
 
 const GIT_PROBE_TIMEOUT_MS = 10_000;
 
@@ -1655,82 +1625,12 @@ export async function executeHerdrSpawnWorkerAttendedElectron(params, context, o
   }
 }
 
-export async function executeHerdrRegisterRepository({ name, ledgerId }, context, options = {}) {
-  const refusal = (reason, tier = 2) => ({ schema: HERDR_LIFECYCLE_SCHEMA, ok: false, code: "registration_refused", reason, ...needsOwner(tier, [reason], name), nonAuthorizing: true });
-  if (typeof name !== "string" || !SAFE_NAME_REGEXP.test(name) || name.length > 64 || (ledgerId !== undefined && (typeof ledgerId !== "string" || !ledgerId))) return refusal("valid repository name and optional ledger id");
-  if (ledgerId === undefined && !isNativeTuiContext(context)) return { ...refusal("native owner confirmation required"), code: "native_confirmation_required" };
-  const profile = resolveProfileConfigPath(".").base;
-  let config;
-  try { config = JSON.parse(readFileSync(resolve(profile, "config/relay-authority.v1.json"), "utf8")); }
-  catch { return refusal("trusted relayer configuration"); }
-  const owner = config.githubOwner;
-  if (typeof owner !== "string" || !/^[a-z][a-z0-9-]{0,38}$/.test(owner)) return refusal("configured GitHub owner");
-  if (config.denyRepositories?.some((pattern) => pattern === name || (pattern.endsWith("*") && name.startsWith(pattern.slice(0, -1))))) return refusal("repository excluded by policy", 3);
-  let root;
-  let registryWritten = false;
-  try {
-    const coordinator = realpathSync(context.cwd);
-    root = resolve(coordinator, "..", name);
-    if (lstatSync(root).isSymbolicLink() || !lstatSync(root).isDirectory() || realpathSync(root) !== root || gitRoot(root) !== root) return refusal("canonical sibling Git checkout");
-    const dotGit = join(root, ".git");
-    if (!lstatSync(dotGit).isDirectory() || realpathSync(dotGit) !== dotGit) return refusal("verified origin and non-worktree clone");
-    const primaryIdentity = statIdentity(root, "registration_refused", "registration clone");
-    const gitIdentity = statIdentity(dotGit, "registration_refused", "registration Git directory");
-    let common;
-    let origin;
-    try {
-      common = gitProbe(root, ["rev-parse", "--git-common-dir"]);
-      origin = gitProbe(root, ["remote", "get-url", "origin"]);
-    } catch { return refusal("verified origin and non-worktree clone"); }
-    if (common !== ".git" || ![`git@github.com:${owner}/${name}`, `https://github.com/${owner}/${name}`].includes(origin.replace(/\.git$/, ""))) return refusal("verified origin and non-worktree clone");
-    const gh = (options.runGh ?? spawnSync)("gh", ["repo", "view", `${owner}/${name}`, "--json", "nameWithOwner,visibility"], { encoding: "utf8", timeout: 15000 });
-    const repo = JSON.parse(gh.stdout);
-    if (gh.status !== 0 || repo.nameWithOwner !== `${owner}/${name}` || repo.visibility !== "PRIVATE") return refusal("verified private repository", 3);
-    const registryPath = resolve(profile, WORKER_REPOSITORY_REGISTRY);
-    const repositories = validateRegistry(registryPath);
-    if (ledgerId !== undefined) authorizeApproval(profile, ledgerId, { tier: 2, repository: name, action: "register" });
-    if (repositories.includes(name)) return { schema: HERDR_LIFECYCLE_SCHEMA, ok: true, status: "already-registered", name };
-    if (repositories.length >= 32) return refusal("registry capacity");
-    const commit = () => {
-      const current = validateRegistry(registryPath);
-      if (current.includes(name)) return { schema: HERDR_LIFECYCLE_SCHEMA, ok: true, status: "already-registered", name };
-      if (current.length >= 32) throw lifecycleError("registry_capacity", "registry capacity reached");
-      // Reservation can wait on the ledger lock. Reobserve the same physical
-      // primary clone and current trust here, with no await before the write.
-      const currentConfig = JSON.parse(readFileSync(resolve(profile, "config/relay-authority.v1.json"), "utf8"));
-      if (currentConfig.githubOwner !== owner) return refusal("configured GitHub owner changed");
-      if (currentConfig.denyRepositories?.some((pattern) => pattern === name || (pattern.endsWith("*") && name.startsWith(pattern.slice(0, -1))))) return refusal("repository excluded by policy", 3);
-      const currentGh = (options.runGh ?? spawnSync)("gh", ["repo", "view", `${owner}/${name}`, "--json", "nameWithOwner,visibility"], { encoding: "utf8", timeout: 15000 });
-      const currentRepo = JSON.parse(currentGh.stdout);
-      if (currentGh.status !== 0 || currentRepo.nameWithOwner !== `${owner}/${name}` || currentRepo.visibility !== "PRIVATE") return refusal("verified private repository", 3);
-      if (lstatSync(root).isSymbolicLink() || realpathSync(root) !== root
-          || statIdentity(root, "registration_refused", "registration clone") !== primaryIdentity
-          || !lstatSync(dotGit).isDirectory() || realpathSync(dotGit) !== dotGit
-          || statIdentity(dotGit, "registration_refused", "registration Git directory") !== gitIdentity
-          || gitRoot(root) !== root) return refusal("canonical sibling Git checkout changed");
-      if (gitProbe(root, ["rev-parse", "--git-common-dir"]) !== common
-          || gitProbe(root, ["remote", "get-url", "origin"]) !== origin) return refusal("verified origin and non-worktree clone changed");
-      copyFileSync(registryPath, `${registryPath}.${new Date().toISOString().replaceAll(":", "-")}.bak`, fsConstants.COPYFILE_EXCL);
-      writeFileSync(registryPath, JSON.stringify({ schema: WORKER_REPOSITORY_SCHEMA, repositories: [...current, name] }, null, 2) + "\n");
-      registryWritten = true;
-      return { schema: HERDR_LIFECYCLE_SCHEMA, ok: true, status: "registered", name };
-    };
-    let result;
-    if (ledgerId !== undefined) {
-      result = await reserveApprovalUse(profile, ledgerId, { tier: 2, repository: name, action: "register" }, commit);
-      if (result.status === "registered") await recordApprovalUse(profile, ledgerId, "register", name, "registered");
-    } else {
-      // The native Pi TUI owns this confirmation; no ledger grant is inferred or manufactured.
-      const confirmed = await context.ui.confirm("Register Herdr worker repository", [
-        `Register the private repository ${owner}/${name} for Herdr workers?`,
-        `Verified checkout: ${root}`,
-        "This changes the trusted worker repository registry. Only confirm if you requested this registration.",
-      ].join("\n"));
-      if (confirmed !== true) return refusal("owner declined repository registration");
-      result = commit();
-    }
-    return result;
-  } catch (error) { return registryWritten ? { schema: HERDR_LIFECYCLE_SCHEMA, ok: false, status: "partial", reason: error.message, name } : refusal(error.message); }
+export async function executeHerdrRegisterRepository({ name }) {
+  return {
+    schema: HERDR_LIFECYCLE_SCHEMA, ok: true, status: "registration-disabled", name,
+    reason: "Repository pre-registration is disabled; start a guarded worker directly.",
+    nonAuthorizing: true, authorityCreated: false,
+  };
 }
 
 export function registerHerdrLifecycleInterface(pi, options = {}) {
@@ -1751,7 +1651,7 @@ export function registerHerdrLifecycleInterface(pi, options = {}) {
   pi.registerTool({
     name: "agentic_herdr_register_repository",
     label: "Herdr Register Repository",
-    description: "Register a verified private sibling clone with a covering Tier 2 approval or native owner confirmation in the Pi TUI.",
+    description: "Repository pre-registration is disabled and unnecessary. Start a guarded worker directly; this tool does not confirm or write a registry.",
     parameters: { type: "object", additionalProperties: false, properties: { name: { type: "string" }, ledgerId: { type: "string" } }, required: ["name"] },
     async execute(_id, params, _signal, _update, context) { return toolResult(await executeHerdrRegisterRepository(params, context, options)); },
   });
@@ -1759,7 +1659,7 @@ export function registerHerdrLifecycleInterface(pi, options = {}) {
     name: HERDR_SPAWN_WORKER_TOOL,
     label: "Herdr Spawn Worker",
     description: "One guarded composite spawn into the caller's Herdr session: create one worker tab in a trusted repository, then start and verify one Pi agent there. No spawn confirmation is required; bounded read-back and partial-failure reporting remain.",
-    promptSnippet: "Use agentic_herdr_spawn_worker to start one guarded worker tab in a trusted registry repository; it exposes no raw Herdr management verbs and no terminal remote control.",
+    promptSnippet: "Use agentic_herdr_spawn_worker to start one guarded worker tab in a verified sibling Git checkout without pre-registering it; no raw Herdr management verbs or terminal remote control.",
     promptGuidelines: [
       "Roles are free-form safe names except the coordinator class; models must resolve against the installed Pi model roll.",
       "A failed start leaves the created tab for human cleanup; no automatic close is performed.",

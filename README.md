@@ -51,7 +51,7 @@ proofs for agentic workflows.
 
 Use `agentic_herdr_spawn_worker` to start Pi worker tabs and panes. Do not run Herdr commands from a bot shell. The guard blocks direct agent starts, prompts, reads, waits, and pane send-keys. Use `agentic_herdr_communication` to talk to a running worker.
 
-In an eligible repository, you do not need to register the repository, create a named workspace, or approve each spawn. Restart Pi after installation to load the updated tool.
+Repository pre-registration is disabled. Start a guarded worker directly in an eligible sibling Git checkout without registering it first. The registration tool no longer opens a confirmation or changes the worker registry. Spawn still checks the checkout, origin, exclusion policy, and its own approval boundary. Restart Pi after installation to load the updated tool.
 
 For trusted GitHub origins, use the repository name with its GitHub capitalization (for example, `MixedCaseRepo`). This works with SSH and HTTPS. The tool uses your configured default Pi model unless you choose another.
 

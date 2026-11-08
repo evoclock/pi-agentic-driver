@@ -92,12 +92,13 @@ test("an explicit empty roles or models list covers any role or model", async ()
   assert.throws(() => authorizeApproval(root, anyRole.id, { ...check, role: "x", action: "merge" }), /does not cover/);
 });
 // Why: one recorded standing grant must never extend to a repository or effect outside its snapshot.
-test("a standing spawn grant covers only enumerated registered repositories", async () => {
+test("a standing spawn grant covers only enumerated repositories without registry membership", async () => {
   const root = fixture();
-  const scope = { repo: "*", repositories: ["example", "second"], actions: ["spawn"], models: [], roles: [] };
+  const scope = { repo: "*", repositories: ["example", "unregistered"], actions: ["spawn"], models: [], roles: [] };
+  writeFileSync(join(root, "config/herdr-worker-repositories.v1.json"), "not a registry");
   let entry;
   await assert.doesNotReject(async () => { entry = await recordApproval(root, { ...input(), kind: "standing", scope }); });
-  const request = { tier: 1, repository: "second", action: "spawn", model: "local/another", role: "another-bot" };
+  const request = { tier: 1, repository: "unregistered", action: "spawn", model: "local/another", role: "another-bot" };
   assert.equal(authorizeApproval(root, entry.id, request).id, entry.id);
   assert.throws(() => authorizeApproval(root, entry.id, { ...request, repository: "new-repository" }), /does not cover/);
   assert.throws(() => authorizeApproval(root, entry.id, { ...request, action: "publish" }), /does not cover/);
@@ -116,7 +117,7 @@ test("grouped grants reject unbounded, forged, or non-spawn scope", async () => 
     { tier: 2 },
     { scope: { ...scope, repositories: [] } },
     { scope: { ...scope, repositories: ["*"] } },
-    { scope: { ...scope, repositories: ["not-registered"] } },
+    { scope: { ...scope, repositories: ["Invalid-Name"] } },
     { scope: { ...scope, actions: ["spawn", "merge"] } },
     { scope: { ...scope, models: undefined } },
   ]) {
