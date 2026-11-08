@@ -398,6 +398,28 @@ test("snapshot-fail-closed-and-revalidation", async () => {
   const f = exchangeFixture({ statuses: ["idle", "working"] }); r = await executeHerdrPromptExchange({ action: "prompt", role: "reviewer", prompt: "x", timeoutMs: 100 }, { cwd: root }, { runProcess: f.runProcess }); assert.equal(r.code, "role_not_promptable"); assert.equal(f.calls.filter(c => c.action === "prompt").length, 0);
 });
 
+// Why: pane-free callers can exchange one prompt and read its reply by role alone.
+test("pane-free prompt round trip and specific missing-agent error", async () => {
+  const previous = process.env.HERDR_PANE_ID;
+  delete process.env.HERDR_PANE_ID;
+  try {
+    const f = exchangeFixture();
+    const request = { action: "prompt", role: "reviewer", prompt: "one question", timeoutMs: 1000 };
+    const result = await executeHerdrPromptExchange(request, { cwd: root }, { runProcess: f.runProcess });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.match(result.report, /report-reviewer/);
+    assert.deepEqual(f.calls.map(({ action }) => action), ["get", "read", "get", "prompt", "read"]);
+    const missing = await executeHerdrPromptExchange(request, { cwd: root }, { runProcess: async () => ({
+      code: 1, stdout: JSON.stringify({ error: { code: "agent_not_found", message: "worker does not exist" } }),
+    }) });
+    assert.equal(missing.code, "agent_not_found");
+    assert.match(missing.reason, /worker does not exist/);
+  } finally {
+    if (previous === undefined) delete process.env.HERDR_PANE_ID;
+    else process.env.HERDR_PANE_ID = previous;
+  }
+});
+
 // Why: bounded report observation must not add unbounded reads.
 test("two-read-latency-contract", async () => {
   const f = exchangeFixture(); const r = await executeHerdrPromptExchange({ action: "prompt", role: "reviewer", prompt: "x", timeoutMs: 100 }, { cwd: root }, { runProcess: f.runProcess });

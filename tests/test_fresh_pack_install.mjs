@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { stripTypeScriptTypes } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { DefaultResourceLoader, SettingsManager } from "@earendil-works/pi-coding-agent";
@@ -60,6 +61,24 @@ test("fresh offline packed install loads all configured skills and imports", asy
     });
     const installed = join(consumer, "node_modules/@evoclock/pi-agentic-driver");
     const manifest = JSON.parse(readFileSync(join(installed, "package.json"), "utf8"));
+    // Private vendored guards ship only from trees that contain their sources.
+    for (const name of ["env-guard", "pr-merge-guard", "pr-message-guard"]) {
+      const path = `pi/extensions/${name}.ts`;
+      const present = existsSync(join(repo, path));
+      const entry = `./${path}`;
+      assert.equal(manifest.pi.extensions.includes(entry), present, `guard registration mismatch: ${entry}`);
+      assert.equal(manifest.files.includes(path), present, `guard file list mismatch: ${path}`);
+      const file = join(installed, path);
+      assert.equal(existsSync(file), present, `guard install mismatch: ${path}`);
+      if (!present) continue;
+      // Node refuses native TS type stripping inside node_modules; Pi uses its own TS loader.
+      const guard = await import(`data:text/javascript,${encodeURIComponent(stripTypeScriptTypes(readFileSync(file, "utf8")))}`);
+      const events = [];
+      guard.default({ on(event, handler) { events.push({ event, handler }); } });
+      assert.equal(events.length, 1);
+      assert.equal(events[0].event, "tool_call");
+      assert.equal(typeof events[0].handler, "function");
+    }
     const expected = manifest.pi.skills.map((entry) => entry.split("/").at(-1));
     const sourceSkills = sourceManifest.pi.skills.map((entry) => entry.split("/").at(-1));
     assert.deepEqual([...expected].sort(), sourceSkills.sort(), "the packed manifest must preserve package.json skill registration");

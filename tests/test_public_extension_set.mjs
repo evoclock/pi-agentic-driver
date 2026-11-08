@@ -54,6 +54,20 @@ test("published files contain no legacy board-client name", () => {
   }
 });
 
+// Why: only guards present in this tree may be registered or packaged.
+test("vendored guard registration matches source presence without duplicate extension paths", () => {
+  const pkg = JSON.parse(readFileSync(process.env.PACKAGE_MANIFEST || join(REPO_ROOT, "package.json"), "utf8"));
+  const guards = ["env-guard", "pr-merge-guard", "pr-message-guard"];
+  assert.ok(pkg.pi.extensions.includes("./extensions"));
+  assert.equal(new Set(pkg.pi.extensions).size, pkg.pi.extensions.length);
+  for (const name of guards) {
+    const path = `pi/extensions/${name}.ts`;
+    const present = existsSync(join(REPO_ROOT, path));
+    assert.equal(pkg.files.includes(path), present, `guard file list mismatch: ${path}`);
+    assert.equal(pkg.pi.extensions.includes(`./${path}`), present, `guard registration mismatch: ${path}`);
+  }
+});
+
 // Why: missing entry points or dependencies make the installed package unusable.
 test("package file list matches the public extension set", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -201,6 +215,11 @@ test("packed tarball retains the offline Durable module without private scratch"
     assert.ok(files.has("scripts/enforcement/storage_owner_lock_pi.js"));
     assert.ok(files.has("scripts/enforcement/durable_driver_pi.d.ts"));
     assert.ok(files.has("extensions/loop-until-done.ts"));
+    // Private guard sources, when present, must survive packing; absent ones must not ship.
+    for (const name of ["env-guard", "pr-merge-guard", "pr-message-guard"]) {
+      const path = `pi/extensions/${name}.ts`;
+      assert.equal(files.has(path), existsSync(join(REPO_ROOT, path)), `packed guard mismatch: ${path}`);
+    }
     assert.ok(files.has("scripts/enforcement/loop_until_done_pi.js"));
     assert.ok(files.has("scripts/enforcement/loop_until_done_guide.md"));
     assert.ok(files.has(".agentic-driver/loop-until-done.defaults.json"));
