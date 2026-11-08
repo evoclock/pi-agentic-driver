@@ -61,12 +61,16 @@ test("fresh offline packed install loads all configured skills and imports", asy
     });
     const installed = join(consumer, "node_modules/@evoclock/pi-agentic-driver");
     const manifest = JSON.parse(readFileSync(join(installed, "package.json"), "utf8"));
-    // Why: a fresh consumer must receive importable guards at the paths declared to Pi.
+    // Private vendored guards ship only from trees that contain their sources.
     for (const name of ["env-guard", "pr-merge-guard", "pr-message-guard"]) {
-      const entry = `./pi/extensions/${name}.ts`;
-      assert.ok(manifest.pi.extensions.includes(entry), `guard not discoverable: ${entry}`);
-      const file = join(installed, entry);
-      assert.ok(existsSync(file), `guard not installed: ${entry}`);
+      const path = `pi/extensions/${name}.ts`;
+      const present = existsSync(join(repo, path));
+      const entry = `./${path}`;
+      assert.equal(manifest.pi.extensions.includes(entry), present, `guard registration mismatch: ${entry}`);
+      assert.equal(manifest.files.includes(path), present, `guard file list mismatch: ${path}`);
+      const file = join(installed, path);
+      assert.equal(existsSync(file), present, `guard install mismatch: ${path}`);
+      if (!present) continue;
       // Node refuses native TS type stripping inside node_modules; Pi uses its own TS loader.
       const guard = await import(`data:text/javascript,${encodeURIComponent(stripTypeScriptTypes(readFileSync(file, "utf8")))}`);
       const events = [];

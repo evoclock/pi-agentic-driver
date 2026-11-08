@@ -54,16 +54,17 @@ test("published files contain no legacy board-client name", () => {
   }
 });
 
-// Why: each vendored guard must be both discoverable by Pi and present in the published archive.
-test("vendored guards are registered and packaged without duplicate extension paths", () => {
+// Why: only guards present in this tree may be registered or packaged.
+test("vendored guard registration matches source presence without duplicate extension paths", () => {
   const pkg = JSON.parse(readFileSync(process.env.PACKAGE_MANIFEST || join(REPO_ROOT, "package.json"), "utf8"));
   const guards = ["env-guard", "pr-merge-guard", "pr-message-guard"];
   assert.ok(pkg.pi.extensions.includes("./extensions"));
   assert.equal(new Set(pkg.pi.extensions).size, pkg.pi.extensions.length);
   for (const name of guards) {
     const path = `pi/extensions/${name}.ts`;
-    assert.ok(pkg.files.includes(path), `not packaged: ${path}`);
-    assert.ok(pkg.pi.extensions.includes(`./${path}`), `not registered: ${path}`);
+    const present = existsSync(join(REPO_ROOT, path));
+    assert.equal(pkg.files.includes(path), present, `guard file list mismatch: ${path}`);
+    assert.equal(pkg.pi.extensions.includes(`./${path}`), present, `guard registration mismatch: ${path}`);
   }
 });
 
@@ -214,10 +215,10 @@ test("packed tarball retains the offline Durable module without private scratch"
     assert.ok(files.has("scripts/enforcement/storage_owner_lock_pi.js"));
     assert.ok(files.has("scripts/enforcement/durable_driver_pi.d.ts"));
     assert.ok(files.has("extensions/loop-until-done.ts"));
-    // The original vault copies stay in pi/extensions; explicit Pi entries load them from there.
+    // Private guard sources, when present, must survive packing; absent ones must not ship.
     for (const name of ["env-guard", "pr-merge-guard", "pr-message-guard"]) {
       const path = `pi/extensions/${name}.ts`;
-      assert.ok(files.has(path), `missing packed guard: ${path}`);
+      assert.equal(files.has(path), existsSync(join(REPO_ROOT, path)), `packed guard mismatch: ${path}`);
     }
     assert.ok(files.has("scripts/enforcement/loop_until_done_pi.js"));
     assert.ok(files.has("scripts/enforcement/loop_until_done_guide.md"));
