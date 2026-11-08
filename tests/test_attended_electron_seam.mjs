@@ -59,6 +59,7 @@ if (command === "agent" && argv[1] === "list") {
   else emit({ agents: [] });
   process.exit(0);
 }
+if (command === "tab" && argv[1] === "list") { emit({ tabs: [] }); process.exit(0); }
 if (command === "tab" && argv[1] === "create") {
   if (mode === "tab-fail") fail("layout_failed", "the layout could not be created");
   emit({ id: 41, result: { root_pane: { pane_id: "w7:p10" }, tab: { tab_id: "w7:t3" } } });
@@ -209,7 +210,7 @@ test("preflight verifies every prerequisite read-only and observes duplicates on
     assert.equal(result.repository, realpathSync(f.workerRoot));
     assert.equal(result.nonAuthorizing, true);
     assert.equal(result.authorityCreated, false);
-    assert.deepEqual(readLog(f.log), [["agent", "list"]], "preflight only observes");
+    assert.deepEqual(readLog(f.log), [["agent", "list"], ["tab", "list"]], "preflight only observes");
   } finally {
     cleanup(f.root);
   }
@@ -236,7 +237,7 @@ test("preflight accepts an eligible checkout with no prior registry", async () =
   try {
     const result = await preflightAttendedElectronSpawn(f.params, f.context, f.herdrOptions);
     assert.equal(result.status, "preflight-verified", JSON.stringify(result));
-    assert.deepEqual(readLog(f.log), [["agent", "list"]]);
+    assert.deepEqual(readLog(f.log), [["agent", "list"], ["tab", "list"]]);
   } finally {
     cleanup(f.root);
   }
@@ -325,6 +326,7 @@ test("the commit stage starts headless without a ledger or confirmation and veri
     assert.equal(result.authorityCreated, false);
     assert.deepEqual(readLog(f.log), [
       ["agent", "list"],
+      ["tab", "list"],
       ["tab", "create", "--workspace", "w7", "--cwd", realpathSync(f.workerRoot), "--no-focus", "--label", "worker"],
       ["agent", "start", "worker", "--kind", "pi", "--pane", "w7:p10", "--timeout", "120000", "--", "--model", MODEL],
       ["agent", "get", "worker"],
@@ -412,7 +414,7 @@ test("a tab-creation failure is one attempt only and reports a partial", async (
     assert.equal(result.status, "partial");
     assert.equal(result.partial, "tab_created");
     assert.equal(result.code, "herdr_process_failed");
-    const tabs = readLog(f.log).filter((argv) => argv[0] === "tab");
+    const tabs = readLog(f.log).filter((argv) => argv[0] === "tab" && argv[1] === "create");
     assert.equal(tabs.length, 1, "exactly one tab-creation attempt");
   } finally {
     cleanup(f.root);

@@ -18,7 +18,7 @@ import {
   ASYNC_RECEIPT_SCHEMA,
   ASYNC_TERMINAL_STATES,
 } from "../scripts/enforcement/herdr_async_seam_pi.js";
-import { registerHerdrCommunicationInterface } from "../scripts/enforcement/herdr_communication_pi.js";
+import { executeHerdrCommunication, registerHerdrCommunicationInterface } from "../scripts/enforcement/herdr_communication_pi.js";
 
 const root = process.cwd();
 
@@ -65,6 +65,7 @@ async function seamStore(t) {
   return { store, directory };
 }
 
+// Why: an offline receipt must not turn an unrelated report into completion after restart.
 test("offline async receipt binds a delivery, idle cannot complete, and lost restart attribution holds", async (t) => {
   const { store, directory } = await seamStore(t);
   const f = fixture();
@@ -95,6 +96,7 @@ test("offline async receipt binds a delivery, idle cannot complete, and lost res
   assert.deepEqual(f.calls, []);
 });
 
+// Why: only a correlated answer may survive a store reopen.
 test("offline async read returns only proven correlated text and retains it across reopen", async (t) => {
   const { store, directory } = await seamStore(t);
   const f = fixture();
@@ -124,6 +126,7 @@ test("offline async read returns only proven correlated text and retains it acro
   assert.deepEqual(f.calls, []);
 });
 
+// Why: missing transport and conflicting identity must not produce another handoff.
 test("offline async rejects missing fake transport and conflicting request identity without a new send", async (t) => {
   const { store } = await seamStore(t);
   const request = { role: "worker", prompt: "bound async brief" };
@@ -137,6 +140,7 @@ test("offline async rejects missing fake transport and conflicting request ident
   assert.deepEqual(f.calls, []);
 });
 
+// Why: concurrent identical requests must retain one submission and one send.
 test("offline concurrent identical submissions hand off once and retain the same identity", async (t) => {
   const { store } = await seamStore(t);
   const f = fixture();
@@ -160,6 +164,7 @@ test("offline concurrent identical submissions hand off once and retain the same
   assert.equal(f.calls.filter((c) => c.action === "prompt").length, 1);
 });
 
+// Why: cancellation and failed acknowledgement must never trigger a second send.
 test("offline cancellation observed before handoff and failed ack persistence cannot cause resend", async (t) => {
   const { store } = await seamStore(t);
   const f = fixture();
@@ -190,6 +195,7 @@ test("offline cancellation observed before handoff and failed ack persistence ca
   assert.equal(f.calls.filter((c) => c.action === "prompt").length, 1);
 });
 
+// Why: persistent requests must use canonical repository identity and reject oversized briefs.
 test("packaged persistence shares repository precedence and preserves validation errors", async (t) => {
   const { store } = await seamStore(t);
   const f = fixture();
@@ -205,6 +211,7 @@ test("packaged persistence shares repository precedence and preserves validation
   assert.deepEqual(f.calls, []);
 });
 
+// Why: registration must expose exactly the expected tool names.
 test("the async seam registers exactly one new tool", () => {
   const registered = [];
   const pi = { registerTool: (tool) => registered.push(tool.name) };
@@ -213,6 +220,7 @@ test("the async seam registers exactly one new tool", () => {
   assert.deepEqual(registered, ["agentic_worker_dispatch_async", "agentic_herdr_communication"]);
 });
 
+// Why: loading the extension must make both dispatch operations available.
 test("the herdr-dispatch extension default export registers both dispatch tools", async () => {
   const registered = [];
   const pi = { registerTool: (tool) => registered.push(tool.name) };
@@ -222,6 +230,7 @@ test("the herdr-dispatch extension default export registers both dispatch tools"
   assert.ok(registered.includes("agentic_worker_dispatch_async"));
 });
 
+// Why: submission acknowledges handoff without waiting for a worker answer.
 test("submit returns a receipt immediately without waiting for settlement", async () => {
   const f = fixture();
   const submitted = await submitAsyncDispatch({ role: "worker", prompt: "progress the sequence" }, context(), { runProcess: f.runProcess });
@@ -254,6 +263,7 @@ test("submit returns a receipt immediately without waiting for settlement", asyn
   assert.ok(!promptCall.argv.includes("--timeout"));
 });
 
+// Why: duplicate submissions cannot resend an already accepted brief.
 test("an identical submit returns the original receipt without a duplicate prompt", async () => {
   const f = fixture();
   const first = await submitAsyncDispatch({ role: "worker", prompt: "same brief" }, context(), { runProcess: f.runProcess });
@@ -268,6 +278,7 @@ test("an identical submit returns the original receipt without a duplicate promp
   assert.equal(f.calls.filter((call) => call.action === "prompt").length, 1, "no duplicate prompt may be sent");
 });
 
+// Why: concurrent requests must reserve once before the first asynchronous handoff.
 test("concurrent identical submits reserve before the await and prompt once", async () => {
   let releasePrompt;
   const promptGate = new Promise((resolve) => { releasePrompt = resolve; });
@@ -290,6 +301,7 @@ test("concurrent identical submits reserve before the await and prompt once", as
   assert.equal(f.calls.filter((call) => call.action === "prompt").length, 1);
 });
 
+// Why: polling must observe progress without another send or report read.
 test("poll observes state as a separate operation and never prompts or reads", async () => {
   const f = fixture();
   const submitted = await submitAsyncDispatch({ role: "worker", prompt: "x" }, context(), { runProcess: f.runProcess });
@@ -302,6 +314,7 @@ test("poll observes state as a separate operation and never prompts or reads", a
   assert.deepEqual(f.calls.map((call) => call.action), ["get"], "poll is a single get observation");
 });
 
+// Why: observation must remain a single read-only status lookup.
 test("observe is a separate get-only operation", async () => {
   const f = fixture({ status: "idle" });
   const submitted = await submitAsyncDispatch({ role: "worker", prompt: "x" }, context(), { runProcess: f.runProcess });
@@ -313,6 +326,7 @@ test("observe is a separate get-only operation", async () => {
   assert.deepEqual(f.calls.map((call) => call.action), ["get"]);
 });
 
+// Why: reading should expose a complete report with its markers.
 test("read returns the latest marked report and normalizes terminal states", async () => {
   const f = fixture({ status: "idle", report: "final journey report" });
   const submitted = await submitAsyncDispatch({ role: "worker", prompt: "x" }, context(), { runProcess: f.runProcess });
@@ -322,9 +336,10 @@ test("read returns the latest marked report and normalizes terminal states", asy
   assert.equal(read.report, "final journey report");
   assert.equal(read.reportMarkers.open, "[WORKER_REPORT_BEGIN]");
   assert.equal(read.reportMarkers.close, "[WORKER_REPORT_END]");
-  assert.deepEqual(f.calls.map((call) => call.action), ["read"]);
+  assert.deepEqual(f.calls.map((call) => call.action), ["get", "read"]);
 });
 
+// Why: incomplete reports must not be presented as finished work.
 test("read fails closed as report-not-ready when no complete report exists", async () => {
   const f = fixture({ failRead: true });
   const submitted = await submitAsyncDispatch({ role: "worker", prompt: "x" }, context(), { runProcess: f.runProcess });
@@ -332,9 +347,10 @@ test("read fails closed as report-not-ready when no complete report exists", asy
   const read = await readAsyncDispatch({ submissionId: submitted.receipt.submissionId }, context(), { runProcess: f.runProcess });
   assert.equal(read.ok, false);
   assert.equal(read.code, "report-not-ready");
-  assert.deepEqual(f.calls.map((call) => call.action), ["read"], "exactly one read attempt, no retry");
+  assert.deepEqual(f.calls.map((call) => call.action), ["get", "read"], "exactly one read attempt, no retry");
 });
 
+// Why: a failed handoff cannot create a live submission or be resent.
 test("terminal failure: a failed submission is explicit and stores nothing", async () => {
   const f = fixture({ failPrompt: true });
   const submitted = await submitAsyncDispatch({ role: "worker", prompt: "x" }, context(), { runProcess: f.runProcess });
@@ -349,6 +365,7 @@ test("terminal failure: a failed submission is explicit and stores nothing", asy
   assert.equal(f.calls.filter((call) => call.action === "prompt").length, 1, "one failed submission is never retried or resent");
 });
 
+// Why: eviction must count submissions rather than implementation map entries.
 test("the in-memory store retains 64 submissions rather than 32 map entries", async () => {
   const f = fixture();
   const receipts = [];
@@ -363,6 +380,7 @@ test("the in-memory store retains 64 submissions rather than 32 map entries", as
   assert.equal(second.ok, true);
 });
 
+// Why: invalid submission identities must be rejected without transport traffic.
 test("poll and read reject unknown submission ids without any Herdr call", async () => {
   const f = fixture();
   for (const operation of [pollAsyncDispatch, observeAsyncDispatch, readAsyncDispatch]) {
@@ -376,10 +394,12 @@ test("poll and read reject unknown submission ids without any Herdr call", async
   assert.deepEqual(f.calls, [], "no Herdr traffic may occur for unknown submissions");
 });
 
+// Why: terminal states must remain a closed and stable set.
 test("normalized lifecycle states cover terminal and non-terminal sets", () => {
   assert.deepEqual([...ASYNC_TERMINAL_STATES], ["completed", "exhausted", "review_requested", "failed", "cancelled"]);
 });
 
+// Why: oversized briefs must fail before any handoff or submission storage.
 test("a brief exceeding the bounded prompt size fails closed without any Herdr call", async () => {
   // The transport enforces MAX_PROMPT_BYTES (32 KiB) including the mandatory
   // report contract; the seam must surface that as a typed fail-closed result
@@ -400,6 +420,49 @@ test("a brief exceeding the bounded prompt size fails closed without any Herdr c
   assert.equal(polled.code, "unknown-submission");
 });
 
+// Why: done and interactive-ready workers accept a next brief, but busy and unreadable workers do not.
+test("done workers accept follow-up briefs while working, blocked and unreadiness remain queued or refused", async () => {
+  let status = "done";
+  let interactiveReady = true;
+  let launchPending = false;
+  let sends = 0;
+  const runProcess = async ({ argv }) => {
+    if (argv[1] === "get") return { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: {
+      name: "worker", agent: "pi", status, interactive_ready: interactiveReady,
+      launch_pending: launchPending, repository: root,
+    } }) };
+    if (argv[1] === "read") return { code: 0, stdout: "history" };
+    if (argv[1] === "prompt") {
+      sends += 1;
+      return { code: 0, stdout: JSON.stringify({ type: "agent_prompted", agent: {
+        name: "worker", agent: "pi", status: "working", repository: root,
+      } }) };
+    }
+    throw new Error(`unexpected ${argv}`);
+  };
+  const submit = (prompt) => executeHerdrCommunication(
+    { action: "submit", role: "worker", prompt, timeoutMs: 1000 }, context(), { runProcess },
+  );
+  const done = await submit("next brief");
+  assert.equal(done.deliveryState, "delivered", JSON.stringify(done));
+  assert.equal(sends, 1);
+  for (const busy of ["working", "blocked"]) {
+    status = busy;
+    const queued = await submit(`${busy} brief`);
+    assert.equal(queued.deliveryState, "queued", JSON.stringify(queued));
+    assert.equal(queued.promptSent, false);
+    assert.equal(sends, 1);
+  }
+  status = "done";
+  interactiveReady = false;
+  assert.equal((await submit("not interactive")).code, "stale_role_mapping");
+  interactiveReady = true;
+  launchPending = true;
+  assert.equal((await submit("launch pending")).code, "stale_role_mapping");
+  assert.equal(sends, 1);
+});
+
+// Why: the registered tool must preserve the same submit and poll behavior.
 test("the registered tool executes the full submit-then-poll-then-read flow", async () => {
   const f = fixture();
   const tools = [];

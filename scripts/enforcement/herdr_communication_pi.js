@@ -81,7 +81,7 @@ const REPORT_MARKERS = HERDR_REPORT_MARKERS;
 const REPORT_CONTRACT_LINE = "Return exactly one complete role report, and no additional report, bounded by these literal markers:";
 const AGENT_STATUSES = new Set(["idle", "working", "blocked", "done", "unknown"]);
 const WAIT_STATUSES = new Set(["idle", "done", "blocked"]);
-const PROMPTABLE_STATUSES = new Set(["idle"]);
+const PROMPTABLE_STATUSES = new Set(["idle", "done"]);
 const REGISTRATIONS = new WeakSet();
 
 export const HERDR_COMMUNICATION_PARAMETERS = Object.freeze({
@@ -320,6 +320,10 @@ function repositoryAllowed(value, repositories) {
     || worktreeRepository(observed, repositories) !== undefined;
 }
 
+function isLinkedWorktree(value) {
+  try { return lstatSync(join(value, ".git")).isFile(); } catch { return false; }
+}
+
 function sameWorkerRepository(left, right, repositories) {
   if (sameRepository(left, right)) return true;
   return [...repositories.roots].some((root) =>
@@ -365,7 +369,7 @@ function validateParams(params) {
     get: { required: ["role"], allowed: new Set(["action", "role"]) },
     prompt: { required: ["role", "prompt", "timeoutMs"], allowed: new Set(["action", "role", "prompt", "timeoutMs"]) },
     submit: { required: ["role", "prompt", "timeoutMs"], allowed: new Set(["action", "role", "prompt", "timeoutMs"]) },
-    delivery: { required: ["deliveryId"], allowed: new Set(["action", "deliveryId"]) },
+    delivery: { required: ["deliveryId"], allowed: new Set(["action", "deliveryId", "role"]) },
     wait: { required: ["role", "timeoutMs"], allowed: new Set(["action", "role", "timeoutMs"]) },
     read: { required: ["role"], allowed: new Set(["action", "role"]) },
   }[action];
@@ -375,7 +379,7 @@ function validateParams(params) {
   for (const field of contracts.required) {
     if (params[field] === undefined) throw communicationError("missing_parameter", `${action} requires ${field}`, "denied");
   }
-  if (action !== "list" && action !== "delivery") requireRole(params.role);
+  if (action !== "list" && (action !== "delivery" || params.role !== undefined)) requireRole(params.role);
   if (action === "prompt" || action === "submit") {
     if (typeof params.prompt !== "string" || !params.prompt.trim()) {
       throw communicationError("prompt_required", "prompt must be non-empty text", "denied");
@@ -454,11 +458,15 @@ function fixedArgv(action, params) {
   switch (action) {
     case "list":
       return ["agent", "list"];
+    case "tabs":
+      return ["tab", "list"];
+    case "pane":
+      return ["pane", "get", params.paneId];
     case "get":
-      return ["agent", "get", params.role];
+      return ["agent", "get", params.target ?? params.role];
     case "prompt":
       return [
-        "agent", "prompt", params.role, promptWithReportRequirement(params.role, params.prompt),
+        "agent", "prompt", params.target ?? params.role, promptWithReportRequirement(params.role, params.prompt),
         "--wait",
         "--until", "idle", "--until", "done", "--until", "blocked",
       ];
@@ -472,17 +480,17 @@ function fixedArgv(action, params) {
         ? params.sentPrompt
         : promptWithReportRequirement(params.role, params.prompt);
       return [
-        "agent", "prompt", params.role, text,
+        "agent", "prompt", params.target ?? params.role, text,
       ];
     }
     case "wait":
       return [
-        "agent", "wait", params.role,
+        "agent", "wait", params.target ?? params.role,
         "--until", "idle", "--until", "done", "--until", "blocked",
       ];
     case "read":
       return [
-        "agent", "read", params.role,
+        "agent", "read", params.target ?? params.role,
         "--source", "recent-unwrapped", "--lines", String(params.readLines ?? MAX_READ_LINES),
         "--format", "text",
       ];
@@ -533,8 +541,8 @@ function processFailure(code, status = "blocked", diagnostic) {
   let failure;
   if (code === "timeout" || code === "timed_out" || code === "process_timeout") {
     failure = communicationError("process_timeout", "Herdr communication timed out", "timeout");
-  } else if (code === "agent_name_not_found" || code === "agent_not_running" || code === "target_not_found") {
-    failure = communicationError("stale_role_mapping", "the configured role is no longer mapped to the expected live agent");
+  } else if (code === "agent_not_found" || code === "agent_name_not_found" || code === "agent_not_running" || code === "target_not_found") {
+    failure = communicationError(code, boundedFailureDiagnostic(diagnostic) || "the role is no longer mapped to a live agent");
   } else if (code === "agent_prompt_stalled") {
     failure = communicationError("prompt_stalled", "Herdr did not observe the prompted role advance");
   } else if (code === "agent_blocked") {
@@ -687,7 +695,8 @@ function awaitBounded(pending, timeoutMs, signal) {
 async function invokeHerdr(action, params, context, options = {}, signal) {
   if (signal?.aborted) throw communicationError("aborted", "Herdr communication was aborted");
   const executable = executableFor(options);
-  const argv = fixedArgv(action, params);
+  const target = options.roleTargets?.get(params.role);
+  const argv = fixedArgv(action, target ? { ...params, target } : params);
   const expectedCwd = expectedRepository(context);
   const requestedTimeout = action === "wait" || action === "prompt"
     ? params.timeoutMs
@@ -738,7 +747,10 @@ async function invokeHerdr(action, params, context, options = {}, signal) {
     // A failed raw-text read is still a process failure; do not reinterpret
     // its terminal text as a JSON error envelope. Preserve bounded stderr so
     // parallel failures remain diagnosable without becoming authority.
-    if (action === "read") throw processFailure(undefined, "blocked", normalized.stderr);
+    if (action === "read") {
+      const code = /\b(agent_not_found|agent_name_not_found|agent_not_running|target_not_found)\b/.exec(normalized.stderr)?.[1];
+      throw processFailure(code, "blocked", normalized.stderr);
+    }
     let external;
     try {
       const parsed = JSON.parse(normalized.stdout || "{}");
@@ -749,9 +761,9 @@ async function invokeHerdr(action, params, context, options = {}, signal) {
     // Herdr sometimes reports a stale role mapping only on stderr for a
     // non-zero exit with no JSON error envelope; map it only when the error
     // is identifiable (Tranche 04 mapping table).
-    if (external.code === undefined
-        && /agent_name_not_found|agent_not_running|target_not_found/.test(normalized.stderr)) {
-      external.code = "agent_name_not_found";
+    if (external.code === undefined || external.code === "herdr_process_failed") {
+      external.code = /\b(agent_not_found|agent_name_not_found|agent_not_running|target_not_found)\b/
+        .exec(`${external.message ?? ""} ${normalized.stderr}`)?.[1] ?? external.code;
     }
     throw processFailure(
       external.code,
@@ -878,11 +890,12 @@ function publicAgentObservation(value, role, repositories, { requirePromptable =
   if (!AGENT_STATUSES.has(status)) throw communicationError("status_invalid", "Herdr returned an unsupported agent status");
   const explicitRepository = oneConsistent(collectStringValues(value, ["repository", "repo"]), "repository");
   const workingDirectories = collectStringValues(value, ["cwd", "foreground_cwd"]);
-  const repo = explicitRepository || oneConsistent(workingDirectories, "repository");
+  const repo = oneConsistent(workingDirectories, "repository") || explicitRepository;
   if (!repo || !repositoryAllowed(repo, repositories)) {
     throw communicationError("repository_mismatch", "the configured role is not in a trusted repository");
   }
-  if (explicitRepository && workingDirectories.some((candidate) => !sameWorkerRepository(candidate, repo, repositories))) {
+  if (explicitRepository && (workingDirectories.some((candidate) => !sameWorkerRepository(candidate, explicitRepository, repositories))
+      || (isLinkedWorktree(explicitRepository) && !sameRepository(explicitRepository, repo)))) {
     throw communicationError("repository_mismatch", "the configured role reported a different working repository");
   }
   if (value.interactive_ready !== undefined && typeof value.interactive_ready !== "boolean") {
@@ -926,6 +939,61 @@ function listAgents(value) {
     throw communicationError("unexpected_result", "Herdr returned an invalid bounded agent list");
   }
   return result.agents.map((item) => validateAgentInfoShape(item));
+}
+
+// A refreshed session may retain its tab and Pi pane after the named agent
+// registry is lost. Only a unique tab label plus a live pane read-back can
+// re-establish the observation; terminal labels alone never authorize a target.
+async function labeledPane(role, context, options, signal, repositories) {
+  const raw = unwrapResponse(await invokeHerdr("tabs", {}, context, options, signal));
+  const tabs = raw?.tabs;
+  if (!Array.isArray(tabs) || tabs.length > 64) throw communicationError("unexpected_result", "Herdr returned an invalid tab list");
+  const matches = tabs.filter((tab) => tab?.label === role);
+  if (matches.length > 1) throw communicationError("ambiguous_target_role", "more than one tab has this role label");
+  if (!matches.length) return undefined;
+  const tab = matches[0];
+  const paneId = tab.root_pane_id ?? tab.root_pane?.pane_id ?? tab.pane_id;
+  if (typeof paneId !== "string" || !/^w[A-Za-z0-9]+:p[A-Za-z0-9]+$/.test(paneId)) {
+    throw communicationError("unexpected_result", "the labeled tab has no valid root pane");
+  }
+  const paneRaw = unwrapResponse(await invokeHerdr("pane", { paneId }, context, options, signal));
+  const pane = paneRaw?.pane ?? paneRaw;
+  if (pane?.pane_id !== paneId || pane?.tab_id !== tab.tab_id) {
+    throw communicationError("ambiguous_target_role", "the labeled tab did not match its pane");
+  }
+  const value = { name: role, agent: pane.agent ?? pane.agent_kind ?? pane.kind,
+    status: pane.agent_status ?? pane.status, cwd: pane.cwd, foreground_cwd: pane.foreground_cwd,
+    pane_id: paneId, tab_id: tab.tab_id, state_change_seq: pane.state_change_seq };
+  return { paneId, observation: publicAgentObservation(value, role, repositories), value };
+}
+
+async function observeRole(role, context, options, signal, repositories) {
+  requireRole(role);
+  try {
+    const raw = await invokeHerdr("get", { role }, context, options, signal);
+    const value = extractAgent(raw, "agent_info");
+    const observation = publicAgentObservation(value, role, repositories);
+    // Check an available tab label for a conflicting second pane. A tab on
+    // the same pane is merely another view of this registered agent.
+    if (value.pane_id) {
+      const tab = await labeledPane(role, context, options, signal, repositories);
+      if (tab && tab.paneId !== value.pane_id) {
+        throw communicationError("ambiguous_target_role", "the agent and tab label refer to different panes");
+      }
+    }
+    return { raw, observation };
+  } catch (error) {
+    if (!(error instanceof HerdrCommunicationError) || !["agent_not_found", "agent_name_not_found", "agent_not_running", "target_not_found"].includes(error.code)) throw error;
+    let pane;
+    try { pane = await labeledPane(role, context, options, signal, repositories); }
+    catch (fallbackError) {
+      if (fallbackError?.code === "ambiguous_target_role" || fallbackError?.code === "repository_mismatch") throw fallbackError;
+      throw error;
+    }
+    if (!pane) throw error;
+    options.roleTargets.set(role, pane.paneId);
+    return { raw: { type: "agent_info", agent: pane.value }, observation: pane.observation };
+  }
 }
 
 function resolveConfiguredRoles(values, repositories) {
@@ -1412,6 +1480,7 @@ async function deliverPrompt(operation, request, context, options, signal, repos
         operation,
         deliveryId: duplicate.deliveryId,
         role,
+        repository: duplicate.repository,
         deliveryState: "queued",
         duplicate: true,
         deduplicated: true,
@@ -1440,14 +1509,14 @@ async function deliverPrompt(operation, request, context, options, signal, repos
     // Preflight: the role must map to a live Pi agent in a trusted
     // repository. A busy role holds the brief until an idle delivery query;
     // there is no fallback target, retry, or mid-run pane write.
-    const current = await invokeHerdr("get", { action: "get", role }, context, options, signal);
-    const preflight = publicAgentObservation(extractAgent(current, "agent_info"), role, repositories);
+    const { raw: current, observation: preflight } = await observeRole(role, context, options, signal, repositories);
     if (!PROMPTABLE_STATUSES.has(preflight.status)) {
       record = createDelivery(role, request.prompt, undefined, undefined, options);
+      record.repository = preflight.repository;
       record.waitingForIdle = true;
       return {
         schema: HERDR_COMMUNICATION_SCHEMA, ok: true, status: "accepted", operation,
-        deliveryId: record.deliveryId, role, deliveryState: "queued", promptSent: false,
+        deliveryId: record.deliveryId, role, repository: record.repository, deliveryState: "queued", promptSent: false,
         nonAuthorizing: true, authorityCreated: false,
       };
     }
@@ -1461,6 +1530,7 @@ async function deliverPrompt(operation, request, context, options, signal, repos
       pre = undefined;
     }
     record = createDelivery(role, request.prompt, pre, stateChangeSeq(current), options);
+    record.repository = preflight.repository;
     if (options.offlinePersistence) {
       const latest = await options.offlinePersistence.get("delivery", record.deliveryId);
       if (latest?.state !== "queued") throw communicationError("delivery_held", "persisted delivery is held; no handoff started");
@@ -1482,6 +1552,7 @@ async function deliverPrompt(operation, request, context, options, signal, repos
       operation,
       deliveryId: record.deliveryId,
       role,
+      repository: observation.repository,
       deliveryState: "delivered",
       agentStatus: observation.status,
       acceptedAt: record.acceptedAt,
@@ -1616,14 +1687,18 @@ function reportRegionsAfter(text, role, fromIndex) {
   return regions;
 }
 
-// Canonical correlation shape: exactly one newline after the opening marker,
-// then the unindented Delivery line and one newline. Identification and
-// stripping use this same helper; variants remain un-attributed.
+// Only the first line after the marker identifies a delivery. Accept bounded
+// terminal padding and an optional box border, but never search later lines.
 function stripLeadingDeliveryLine(rawBody, correlationLine) {
-  const prefix = `\n${correlationLine}\n`;
-  const normalized = rawBody.replace(/^\r\n/, "\n");
-  if (!normalized.startsWith(prefix)) return undefined;
-  return normalized.slice(prefix.length);
+  const match = /^\r?\n([^\r\n]*)\r?\n/.exec(rawBody);
+  if (!match) return undefined;
+  const line = match[1];
+  const prefix = /^[ \t]{0,512}(?:│[ \t]{0,512})?/.exec(line)[0];
+  if (!line.slice(prefix.length).startsWith(correlationLine)) return undefined;
+  const suffix = line.slice(prefix.length + correlationLine.length);
+  if (Buffer.byteLength(prefix + suffix, "utf8") > MAX_MARKER_HORIZONTAL_WHITESPACE
+      || !/^[ \t]*(?:│)?[ \t]*$/.test(suffix)) return undefined;
+  return rawBody.slice(match[0].length);
 }
 
 function regionBody(text, role, region, correlationLine) {
@@ -1649,8 +1724,23 @@ function regionBody(text, role, region, correlationLine) {
 async function queryDelivery(request, context, options, signal, repositories) {
   const record = typeof request.deliveryId === "string" ? deliveryRecords(options).get(request.deliveryId) : undefined;
   if (!record) {
-    return deliveryRefusal("delivery", communicationError("delivery_unknown", "no live delivery record is known for this deliveryId (bounded, in-memory)"));
+    if (!request.role) return deliveryRefusal("delivery", communicationError("role_required", "recovering an unknown delivery requires its role", "denied"));
+    const { observation } = await observeRole(request.role, context, options, signal, repositories);
+    let text = readText(await invokeHerdr("read", { role: request.role, readLines: MAX_REPORT_READ_LINES }, context, options, signal));
+    const regions = reportRegionsAfter(text, request.role, 0);
+    for (const region of regions) {
+      if (stripLeadingDeliveryLine(text.slice(region.open.end, region.close.index), `Delivery: ${request.deliveryId}`) === undefined) continue;
+      try {
+        const report = regionBody(text, request.role, region, `Delivery: ${request.deliveryId}`);
+        return successResult("delivery", { role: request.role, deliveryId: request.deliveryId,
+          deliveryState: "answered", report, reportMarkers: reportMarkersForRole(request.role),
+          repository: observation.repository, nonAuthorizing: true, authorityCreated: false });
+      } catch { // A malformed candidate cannot claim the delivery.
+      }
+    }
+    return deliveryRefusal("delivery", communicationError("delivery_unknown", "no self-identified report for this role and deliveryId is observable"));
   }
+  if (request.role && request.role !== record.role) return deliveryRefusal("delivery", communicationError("role_mismatch", "delivery belongs to another role", "denied"));
   if (record.state === "answered") {
     return deliverySnapshot(record, { report: record.report, reportMarkers: record.reportMarkers, answeredAt: record.answeredAt });
   }
@@ -1666,8 +1756,7 @@ async function queryDelivery(request, context, options, signal, repositories) {
     if (record.handoffPending) return deliverySnapshot(record);
     record.handoffPending = true;
     try {
-      const current = await invokeHerdr("get", { action: "get", role: record.role }, context, options, signal);
-      const observation = publicAgentObservation(extractAgent(current, "agent_info"), record.role, repositories);
+      const { raw: current, observation } = await observeRole(record.role, context, options, signal, repositories);
       if (!PROMPTABLE_STATUSES.has(observation.status)) return deliverySnapshot(record);
       record.pre = readText(await invokeHerdr("read", { action: "read", role: record.role }, context, options, signal));
       record.seqBefore = stateChangeSeq(current);
@@ -1704,8 +1793,7 @@ async function queryDelivery(request, context, options, signal, repositories) {
   // itself. No advance since the handoff means nothing new can have been
   // answered, so the query skips the read entirely.
   try {
-    const current = await invokeHerdr("get", { action: "get", role: record.role }, context, options, signal);
-    publicAgentObservation(extractAgent(current, "agent_info"), record.role, repositories);
+    const { raw: current } = await observeRole(record.role, context, options, signal, repositories);
     const seqNow = stateChangeSeq(current);
     if (seqNow !== undefined && record.seqBefore !== undefined && seqNow === record.seqBefore) {
       return deliverySnapshot(record, { reason: "the role shows no activity since the handoff boundary" });
@@ -1915,14 +2003,30 @@ export async function executeHerdrCommunication(params, context, options = {}, s
     await loadWorktreeResolver();
     const repository = expectedRepository(context);
     const repositories = trustedRepositories(repository, options);
+    options = { ...options, roleTargets: new Map() };
     if (operation === "list") {
       const raw = await invokeHerdr(operation, request, context, options, signal);
-      return successResult(operation, { roles: resolveConfiguredRoles(listAgents(raw), repositories) });
+      const agents = listAgents(raw);
+      const roles = resolveConfiguredRoles(agents, repositories);
+      const tabsRaw = unwrapResponse(await invokeHerdr("tabs", {}, context, options, signal));
+      if (!Array.isArray(tabsRaw?.tabs) || tabsRaw.tabs.length > 64) throw communicationError("unexpected_result", "Herdr returned an invalid tab list");
+      const labels = new Set(tabsRaw.tabs.map((tab) => tab?.label)
+        .filter((label) => typeof label === "string" && HERDR_ROLE_REGEXP.test(label) && !isCoordinatorRole(label)));
+      for (const label of labels) {
+        const pane = await labeledPane(label, context, options, signal, repositories);
+        if (roles.some((item) => item.role === label)) {
+          const registered = agents.find((item) => item.name === label || item.role === label);
+          if (registered?.pane_id !== pane.paneId) {
+            throw communicationError("ambiguous_target_role", "a registered agent and a labeled tab claim different panes");
+          }
+        } else roles.push(pane.observation);
+      }
+      return successResult(operation, { roles: roles.sort((a, b) => a.role.localeCompare(b.role)) });
     }
     const role = request.role;
     if (operation === "get") {
-      const raw = await invokeHerdr(operation, request, context, options, signal);
-      return successResult(operation, { role, observation: publicAgentObservation(extractAgent(raw, "agent_info"), role, repositories) });
+      const { observation } = await observeRole(role, context, options, signal, repositories);
+      return successResult(operation, { role, observation });
     }
     if (operation === "prompt" || operation === "submit") {
       // Async delivery: hand the brief to the role's terminal queue and
@@ -1941,13 +2045,15 @@ export async function executeHerdrCommunication(params, context, options = {}, s
         : await queryDelivery(request, context, options, signal, repositories);
     }
     if (operation === "wait") {
+      const { observation } = await observeRole(role, context, options, signal, repositories);
       const raw = await invokeHerdr(operation, request, context, options, signal);
       const status = waitStatus(raw, role, repositories);
       if (status === "blocked") {
         return errorResult(operation, communicationError("role_blocked", "the configured role reached blocked state", "blocked"));
       }
-      return successResult(operation, { role, status, agentStatus: status, repository });
+      return successResult(operation, { role, status, agentStatus: status, repository: observation.repository });
     }
+    const { observation } = await observeRole(role, context, options, signal, repositories);
     let raw = await invokeHerdr(operation, request, context, options, signal);
     let report;
     try {
@@ -1961,7 +2067,7 @@ export async function executeHerdrCommunication(params, context, options = {}, s
       role,
       report,
       reportMarkers: reportMarkersForRole(role),
-      repository,
+      repository: observation.repository,
     });
   } catch (error) {
     const failedOperation = operation || params?.action;

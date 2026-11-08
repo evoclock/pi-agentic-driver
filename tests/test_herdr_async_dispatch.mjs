@@ -96,7 +96,7 @@ test("pulse observes liveness, state, and eligibility without authority", async 
 
   await assert.rejects(
     () => workerPulse("worker", { cwd: root }, { runProcess: async () => ({ code: 2, stdout: "", stderr: "agent_name_not_found" }) }),
-    (error) => error.code === "stale_role_mapping",
+    (error) => error.code === "agent_name_not_found",
   );
 });
 

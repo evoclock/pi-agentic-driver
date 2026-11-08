@@ -410,7 +410,7 @@ for (const revokedAuthority of ["lease", "origin"]) {
     assert.match(result.cleanup, /worker agent is live/);
     const calls = readFileSync(f.log, "utf8").split("\n").filter(Boolean).map(JSON.parse);
     assert.deepEqual(calls.map((argv) => argv.slice(0, 2)), [
-      ["agent", "list"], ["pane", "current"], ["tab", "create"], ["agent", "start"], ["agent", "get"], ["pane", "get"],
+      ["agent", "list"], ["tab", "list"], ["pane", "current"], ["tab", "create"], ["agent", "start"], ["agent", "get"], ["pane", "get"],
     ], "no retry or automatic cleanup after the agent starts");
   });
 }

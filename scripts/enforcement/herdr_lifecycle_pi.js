@@ -1271,10 +1271,7 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
     }
 
     // Duplicate live names are denied at spawn (read-only observation).
-    const listed = await invokeHerdr(agentListArgv(), canonicalRoot, options, signal);
-    if (duplicateRoleExists(listed, role)) {
-      throw lifecycleError("duplicate_worker_name", "a live agent already holds this name", "denied");
-    }
+    await observeDuplicateRole(canonicalRoot, role, options, signal);
     // Explicit selection is independent of caller pane and must match the live list.
     // Without selection, preserve the existing caller-pane workspace behavior.
     const coordinator = request.workspace ? null
@@ -1514,6 +1511,11 @@ async function observeDuplicateRole(canonicalRoot, role, options, signal) {
   const listed = await invokeHerdr(agentListArgv(), canonicalRoot, options, signal);
   if (duplicateRoleExists(listed, role)) {
     throw lifecycleError("duplicate_worker_name", "a live agent already holds this name", "denied");
+  }
+  const tabs = parseJsonEnvelope(await invokeHerdr(["tab", "list"], canonicalRoot, options, signal), "tab list").tabs;
+  if (!Array.isArray(tabs) || tabs.length > 64) throw lifecycleError("unexpected_result", "tab list returned an invalid bounded list");
+  if (tabs.some((tab) => isPlainObject(tab) && tab.label === role)) {
+    throw lifecycleError("duplicate_worker_name", "a live tab already holds this worker name", "denied");
   }
 }
 
