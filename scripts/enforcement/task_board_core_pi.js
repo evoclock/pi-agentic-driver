@@ -1325,6 +1325,8 @@ export function isDispatchable(card, boardIndex) {
       failed.push(`dependency "${dep}" is in lane "${depCard.lane}", not "done"`);
     } else if ((depCard.flags ?? []).includes("cancelled")) {
       failed.push(`dependency "${dep}" is cancelled`);
+    } else if (depCard.done !== true) {
+      failed.push(`dependency "${dep}" is not completed`);
     }
   }
   return { dispatchable: failed.length === 0, failedConditions: failed };
@@ -1486,7 +1488,7 @@ const V2_CLAIM_FIELDS = Object.freeze(["cardId", "claimedAt", "role", "envelopeI
 const CONSUMED_FIELDS = Object.freeze(["cardId", "envelopeId", "consumedAt", "reason"]);
 const CONSUMED_REASONS = Object.freeze([
   "expired", "reclaimed", "completed", "exhausted", "cancelled", "failed",
-  "waiting-approval", "role-blocked", "worker-unresponsive",
+  "waiting-approval", "role-blocked", "worker-unresponsive", "review_requested", "blocked",
 ]);
 const TRANSACTION_FIELDS = Object.freeze(["op", "cardId", "envelopeId", "at", "phase"]);
 const REPLACE_TRANSACTION_FIELDS = Object.freeze(["op", "cardId", "envelopeId", "at", "phase", "oldEnvelopeId", "oldReason"]);
@@ -1561,7 +1563,7 @@ export function verifyCardActionChain(events) {
     const event = events[index];
     if (!event || typeof event !== "object" || Array.isArray(event)) return { ok: false, index, reason: "malformed event" };
     const { digest, ...body } = event;
-    if (!ISO_TS_RE.test(body.at) || !["claim", "complete", "edit", "dod-drift"].includes(body.action)
+    if (!ISO_TS_RE.test(body.at) || !["claim", "complete", "edit", "dod-drift", "settle"].includes(body.action)
       || body.previousDigest !== previous || digest !== sha256Hex(canonicalJsonString(body))) {
       return { ok: false, index, reason: "event digest chain breaks" };
     }
@@ -2537,7 +2539,10 @@ function validateEnvelopeForExecutionLocked({ boardPath, envelope, now = null, r
 // Item 2: completion consumption — when the work reaches its stopping point,
 // the envelope attempt is consumed ("completed") and its claim released.
 // Never marks the card done (completion is human-only, §3.1).
-export function consumeEnvelope({ boardPath, envelopeId, reason = "completed", recheck = null } = {}) {
+export function consumeEnvelope({ boardPath, envelopeId, reason = "completed", recheck = null, settleKey = null } = {}) {
+  if (settleKey !== null && (typeof settleKey !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(settleKey))) {
+    throw Object.assign(new Error("invalid settlement key"), { code: "invalid-input" });
+  }
   if (typeof boardPath !== "string" || boardPath === "") {
     throw Object.assign(new Error("boardPath is required"), { code: "board-path-required" });
   }
@@ -2553,8 +2558,14 @@ export function consumeEnvelope({ boardPath, envelopeId, reason = "completed", r
     if (reconciliation?.failed) {
       return { ok: false, code: "recovery-failed", recoverable: true, reason: reconciliation.reason };
     }
+    if (settleKey && read.state.events.some((event) => event.action === "settle" && event.key === settleKey
+      && (event.envelopeId !== envelopeId || event.reason !== reason))) {
+      return { ok: false, code: "idempotency-conflict", reason: "settlement key already belongs to a different attempt or reason" };
+    }
     const claim = read.state.claims.find((entry) => entry.envelopeId === envelopeId);
     if (!claim) {
+      const prior = read.state.events.findLast((event) => event.action === "settle" && event.envelopeId === envelopeId);
+      if (settleKey && prior?.key === settleKey && prior.reason === reason) return { ok: true, consumed: true, idempotent: true, envelopeId, reason };
       return { ok: false, code: "envelope-not-active", reason: "the envelope has no active claim to consume" };
     }
     const oldDod = read.state.events.findLast((event) => event.action === "claim" && event.envelopeId === envelopeId)?.dodDigest
@@ -2585,7 +2596,7 @@ export function consumeEnvelope({ boardPath, envelopeId, reason = "completed", r
     writeClaims(boardPath, kept, { consumedClaims, actions: reason === "completed"
       ? [...driftAction, { action: "complete", at: new Date().toISOString(), cardId: claim.cardId, envelopeId,
         specDigest: card.specText == null ? null : computeSpecHash(card.specText), dodDigest: newDod }]
-      : [] });
+      : settleKey ? [{ action: "settle", at: new Date().toISOString(), cardId: claim.cardId, envelopeId, reason, key: settleKey }] : [] });
     if (existsSync(boardPath)) {
       const validated = validateBoard(readFileSync(boardPath, "utf8"), {});
       if (validated.ok) writeProjection(boardPath, validated.cards, kept);

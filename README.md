@@ -51,9 +51,9 @@ proofs for agentic workflows.
 
 Use `agentic_herdr_spawn_worker` to start Pi worker tabs and panes. Do not run Herdr commands from a bot shell. The guard blocks direct agent starts, prompts, reads, waits, and pane send-keys. Use `agentic_herdr_communication` to talk to a running worker.
 
-In an eligible repository, you do not need to register the repository, create a named workspace, or approve each spawn. Restart Pi after installation to load the updated tool.
+Repository pre-registration is disabled. Start a guarded worker directly in an eligible sibling Git checkout without registering it first. The registration tool no longer opens a confirmation or changes the worker registry. Spawn still checks the checkout, origin, exclusion policy, and its own approval boundary. Restart Pi after installation to load the updated tool.
 
-For trusted GitHub origins, use the repository name with its GitHub capitalization (for example, `OpenMausBot`). This works with SSH and HTTPS. The tool uses your configured default Pi model unless you choose another.
+For trusted GitHub origins, use the repository name with its GitHub capitalization (for example, `MixedCaseRepo`). This works with SSH and HTTPS. The tool uses your configured default Pi model unless you choose another.
 
 Already have an `AGENTS.md`? If you want this spawn path in it, copy the optional guidance from [`templates/AGENTS.md`](templates/AGENTS.md). See [`extensions/herdr-lifecycle.ts`](extensions/herdr-lifecycle.ts) and [`extensions/attended-authority-guard.ts`](extensions/attended-authority-guard.ts) for the implementation.
 
@@ -61,7 +61,7 @@ Already have an `AGENTS.md`? If you want this spawn path in it, copy the optiona
 
 Interactive confirmations are off by default. The attended-authority guard can ask before destructive actions, such as `git push` or overwriting a file. Use `agentic_interactive_safeguards_toggle` with `enabled: true` or `false` to change the setting. In the TUI, **Alt+Shift+S** changes the same setting and shows its state in the status bar. The shortcut does not open a settings dialog.
 
-The toggle saves the setting at `$PI_CODING_AGENT_DIR/config/interactive-safeguards.v1.json`, or `~/.pi/agent/config/interactive-safeguards.v1.json` by default. You do not need to create this file to use the toggle. See `config/interactive-safeguards.v1.example.json` for an example. Turning the toggle off also clears saved command selections.
+The toggle saves the setting at `$PI_CODING_AGENT_DIR/config/interactive-safeguards.v1.json`. By default, this file lives in the Pi agent config directory. You do not need to create this file to use the toggle. See `config/interactive-safeguards.v1.example.json` for an example. Turning the toggle off also clears saved command selections.
 
 Choose one of two levels in the profile:
 
@@ -80,6 +80,21 @@ Both options are optional. Their defaults are false and an empty list. The profi
 
 This setting changes only the generic attended-authority confirmation. When you enable confirmations, headless destructive calls still fail closed. The guard blocks agent `write` and `edit` calls to the user profile's `config/` directory. Use the toggle, the TUI shortcut, or direct user profile editing to change the setting. Chat text and unrelated tool arguments cannot opt in. The guard is not a shell sandbox.
 
+## Local REST and MCP machine-command host
+
+Run `scripts/machine_host.mjs mcp` for newline-delimited JSON-RPC over stdio, or
+`scripts/machine_host.mjs rest` for POST `/commands/<name>` on 127.0.0.1 only.
+Both transports use the same `createMachineCommands` table. Set
+`PAD_MACHINE_BOARD` to the absolute host `TASKS.md`; optional settings are
+`PAD_MACHINE_ROUTER_DB`, `PAD_MACHINE_RUN_DIR`, and `PAD_MACHINE_PORT`.
+
+The host exposes only journey, board card, durable run, and live-claim
+reservation commands. REST rejects foreign Host and browser Origin headers;
+loopback is not user authentication, so keep the server private to the current
+user. The standalone host does not publish packages or synchronize public
+state. See [Local machine commands](docs/machine-host.md) for the host's
+integration limits.
+
 ## Shipped features
 
 | Tool | What it does | Status |
@@ -91,10 +106,11 @@ This setting changes only the generic attended-authority confirmation. When you 
 | `agentic_relay_check_request` | Checks whether a recorded, scoped relay covers each requested private action; read-only preflight, with authority checked again at the action boundary. | shipped |
 | `agentic_merge_review_record` | Records independent Standards and Spec verdicts for an exact PR head when configured for a review-based merge workflow. It does not merge a PR. | shipped |
 | `agentic_herdr_communication` | Submits one prompt and observes delivery and marked reports; never grants authority. | shipped |
-| `agentic_herdr_spawn_worker` | Starts and verifies one Pi worker tab in a trusted repository, reporting partial failures without an automatic retry. | shipped |
+| `agentic_herdr_spawn_worker` | Starts and verifies one Pi worker tab in a trusted repository, reporting partial failures without recreating the layout. | shipped |
 | `agentic_aidr` | A remedy for AI;DR. Reviews writing for clarity, simplicity, brevity, and humanity. | shipped |
 | `agentic_linux_microvm_cutover` | Runs one job in a throwaway QEMU/KVM virtual machine on a Linux host, with a severity-tiered killswitch that stops escape attempts. | user-enabled, native confirmation |
 | `agentic_worker_dispatch` | Runs bounded worker journeys and observes worker liveness. Each iteration is a durable checkpoint, so an interrupted journey resumes without resending an uncertain prompt; the `journeys` action lists the records. | shipped |
+| Local REST and MCP machine-command host | Exposes journey, board card, durable run, and live-claim reservation commands over local REST or stdio MCP. See [Local machine commands](docs/machine-host.md). | shipped |
 | `agentic_journey_outward_effect` | Confirms one push or private draft PR change for a journey. After an interruption, it checks the remote without replaying an uncertain write. | shipped, native confirmation |
 | `agentic_kanban_board` | Shows the workspace task board: lanes, flags, priorities, dependencies, and which cards can run. | shipped |
 | `agentic_kanban_board_write` | Adds cards to the board through the trusted writer, which records who authorized the work. | shipped |
@@ -407,7 +423,7 @@ native lifecycle. Choose tab placement, a safe role label, a model from the
 active Pi model roster, and a trusted repository. The extension:
 
 - creates a labelled tab in the coordinator's existing workspace (it refuses coordinator pane splits);
-- starts exactly one Pi agent in it;
+- starts one Pi agent in it, with bounded same-pane retries only when the new shell reports `agent_pane_busy`; it never creates another tab on retry;
 - verifies the role, model arguments, pane identity, and canonical repository;
 - resolves the model against the installed Pi roster; exact installed models
   from known subscription providers need no individual route entry in
@@ -417,6 +433,8 @@ active Pi model roster, and a trusted repository. The extension:
   worktree root of that same eligible repository and carry an active
   Treehouse lease observed read-only; the tool checks it again after preflight
   and between mutations;
+- resolves the named primary clone beside the coordinator when present, or under the user's home directory when that sibling is missing; both paths require the same canonical primary-clone and configured-origin-owner checks;
+- leaves repository deny patterns off for spawn unless `enforceSpawnDenyRepositories: true` is set in the profile's `config/relay-authority.v1.json`; public visibility alone is not refused;
 - starts ordinary guarded workers without a per-spawn grant or native dialog;
   an explicitly supplied legacy ledger grant is still validated;
 - when you supply a legacy grant, requires it to cover the repository, action,
@@ -427,7 +445,7 @@ active Pi model roster, and a trusted repository. The extension:
 - uses fixed argv with `shell: false` and no arbitrary Herdr or shell surface;
 - returns explicit `pane_created`, `tab_created`, or `agent_started` partial
   states when only part of the operation succeeds; and
-- never retries, moves, closes, or deletes created state automatically.
+- never retries layout creation or a non-busy start, and never moves, closes, or deletes created state automatically.
 
 ![A role-labelled worker spawned in an individual tab](assets/spawn-worker-tab.png)
 
@@ -506,6 +524,15 @@ state machine.
   tag or an unreadable pane blocks: a missing tag is never proof that the
   prompt did not arrive. An abandoned pending task with no caller waits at
   most 30 seconds, then settles blocked.
+**Packaged since 3.1.4.** Journeys accept `review_requested` and `blocked`
+as consume reasons. Reservation repair keeps both reservations held when a
+worker start cannot be verified. Durable cancellation can still record a late
+receipt; dependent cards wait until the earlier card has `done === true`.
+The fixed-machine controls are also available through the [local REST and MCP
+machine-command host](#local-rest-and-mcp-machine-command-host).
+Worker starts recognize mixed-case Git checkout paths that refer to the same
+folder.
+
 - **Inspect journeys.** The `journeys` action lists bounded journey records
   for the current repository (journey, iteration, state, task and card),
   optionally filtered by role or journey ID. It grants nothing.

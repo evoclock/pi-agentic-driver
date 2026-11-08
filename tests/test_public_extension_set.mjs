@@ -12,6 +12,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 // The public extension set must not register the legacy agentic_work_mode
 // tool; only the activation-deferred, fail-closed cutover interface ships.
+// Why: the shipped cutover must not expose the legacy unsafe tool.
 test("public extension set registers cutover without agentic_work_mode", async () => {
   const registered = [];
   const pi = { registerTool: (tool) => registered.push(tool.name) };
@@ -21,6 +22,7 @@ test("public extension set registers cutover without agentic_work_mode", async (
   assert.equal(registered.includes("agentic_work_mode"), false);
 });
 
+// Why: library helpers must not load as independent Pi extensions.
 test("task-store adapter is a packaged library helper, not an extension", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(typeof createTaskStore, "function");
@@ -30,6 +32,7 @@ test("task-store adapter is a packaged library helper, not an extension", () => 
 
 // The public native-TUI predicate stays shipped and fail-closed: the cutover
 // interface reuses it for activation-deferred isolation gating.
+// Why: missing UI context must not enable unattended cutover.
 test("shipped native-TUI helper stays importable and fail-closed", () => {
   assert.equal(typeof isNativeTuiContext, "function");
   assert.equal(isNativeTuiContext(undefined), false);
@@ -38,6 +41,7 @@ test("shipped native-TUI helper stays importable and fail-closed", () => {
 
 // Package provenance: the shipped file list keeps every entry the extension
 // set needs and does not advertise an agentic_work_mode registration file.
+// Why: published code must not reintroduce the retired board client.
 test("published files contain no legacy board-client name", () => {
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
   for (const entry of pkg.files) {
@@ -50,6 +54,7 @@ test("published files contain no legacy board-client name", () => {
   }
 });
 
+// Why: missing entry points or dependencies make the installed package unusable.
 test("package file list matches the public extension set", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.ok(pkg.pi?.skills?.includes("./skills/decision-to-spec"), "decision-to-spec skill must be declared as a Pi package resource");
@@ -113,6 +118,7 @@ function relativeImportSpecifiers(source) {
   return [...specs];
 }
 
+// Why: invalid or undeclared skills disappear during Pi discovery.
 test("every shipped skill folder has valid frontmatter and package registration", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const skillsRoot = join(REPO_ROOT, "skills");
@@ -145,6 +151,7 @@ test("every shipped skill folder has valid frontmatter and package registration"
   assert.deepEqual([...pkg.pi.skills].sort(), expected.sort(), "shipped skill registration drift");
 });
 
+// Why: retired skill ports must not reappear as package resources.
 test("only the native correction skill uses a Pi suffix", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const ports = readdirSync(join(REPO_ROOT, "skills"))
@@ -162,9 +169,12 @@ test("only the native correction skill uses a Pi suffix", () => {
   }
 });
 
+// Why: distributable skill instructions must not reveal a personal name.
 test("shipped skill text uses the owner handle instead of a personal name", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const personalName = new RegExp(`${["ju", "len"].join("")}|${["gam", "boa"].join("")}`, "i");
+  // Why: license attribution lines stay exempt while ordinary text stays checked.
+  // Why: a personal name in any other shipped line must still fail this check.
   const usesPersonalName = (line) => !/^\s*(?:#|\/\/|<!--)?\s*SPDX-/.test(line) && personalName.test(line);
   assert.equal(usesPersonalName(`Only ${["Ju", "len"].join("")} merges.`), true);
   assert.equal(usesPersonalName(`Ask ${["Gam", "boa"].join("")} to choose.`), true);
@@ -181,6 +191,7 @@ test("shipped skill text uses the owner handle instead of a personal name", () =
   }
 });
 
+// Why: a packed consumer needs complete runtime dependencies without private scratch files.
 test("packed tarball retains the offline Durable module without private scratch", async () => {
   const directory = mkdtempSync(join(REPO_ROOT, ".durable-pack-test-"));
   try {
@@ -265,9 +276,11 @@ test("packed tarball retains the offline Durable module without private scratch"
   }
 });
 
+// Why: missing relative imports break the installed extension at load time.
 test("packaged file set closes over every relative script it imports", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const packaged = new Set(pkg.files);
+  // Why: only source files can add relative imports to the published closure.
   const queue = pkg.files.filter((file) => /\.(?:js|mjs|ts)$/.test(file));
   const seen = new Set();
   const missing = [];
@@ -281,17 +294,20 @@ test("packaged file set closes over every relative script it imports", () => {
     try { source = readFileSync(abs, "utf8"); } catch { continue; }
     for (const spec of relativeImportSpecifiers(source)) {
       if (!spec.startsWith(".")) continue;
+      // Why: the closure walks importable code and data, not unrelated assets.
       if (!/\.(?:js|mjs|ts|json)$/.test(spec)) continue;
       const target = resolve(dirname(abs), spec);
       if (!existsSync(target)) continue;
       const rel = target.slice(REPO_ROOT.length + 1);
       if (!packaged.has(rel)) { missing.push(`${file} imports ${spec} (${rel}) which is not in package.json files`); continue; }
+      // Why: follow code imports transitively, without recursing into data files.
       if (/\.(?:js|mjs|ts)$/.test(rel)) queue.push(rel);
     }
   }
   assert.deepEqual(missing, [], `packaged import set is incomplete:\n${missing.join("\n")}`);
 });
 
+// Why: bundling the host's Pi library creates duplicate runtime instances.
 test("host pi-ai is peerDependency * not a dependency", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal((pkg.dependencies || {})["@earendil-works/pi-ai"], undefined);

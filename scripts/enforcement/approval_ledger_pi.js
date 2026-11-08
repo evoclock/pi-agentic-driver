@@ -86,9 +86,7 @@ export async function recordApproval(profile, input) {
         || scope.repositories.length === 0 || new Set(scope.repositories).size !== scope.repositories.length
         || scope.actions.length !== 1 || scope.actions[0] !== "spawn"
         || !Array.isArray(scope.models) || !Array.isArray(scope.roles)) throw new Error("invalid grouped spawn scope");
-    const registry = JSON.parse(readFileSync(join(profile, "config/herdr-worker-repositories.v1.json"), "utf8"));
-    if (registry.schema !== "agentic-driver.herdr-worker-repositories.v1" || !Array.isArray(registry.repositories)
-        || scope.repositories.some((repo) => !/^[a-z][a-z0-9-]{0,63}$/.test(repo) || !registry.repositories.includes(repo))) throw new Error("unregistered grouped spawn repository");
+    if (scope.repositories.some((repo) => !/^[a-z][a-z0-9-]{0,63}$/.test(repo))) throw new Error("invalid grouped spawn repository");
   } else if (scope.repositories !== undefined) throw new Error("repositories require a grouped standing grant");
   const now = new Date();
   if (Date.parse(input.givenAt) > now.getTime() || (input.expiresAt && (!validDate(input.expiresAt) || Date.parse(input.expiresAt) <= now.getTime()))) throw new Error("invalid approval time");

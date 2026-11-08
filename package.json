@@ -1,6 +1,6 @@
 {
   "name": "@evoclock/pi-agentic-driver",
-  "version": "3.1.3",
+  "version": "3.1.4",
   "description": "Guardrail extensions for Agentic Driver: advisory review, bounded Herdr communication, and guarded worker lifecycle.",
   "type": "module",
   "scripts": {
@@ -77,6 +77,10 @@
     "scripts/enforcement/storage_owner_lock_pi.js",
     "scripts/enforcement/durable_driver_pi.js",
     "scripts/enforcement/durable_driver_pi.d.ts",
+    "scripts/enforcement/machine_commands_pi.js",
+    "scripts/enforcement/machine_transports_pi.js",
+    "scripts/machine_host.mjs",
+    "docs/machine-host.md",
     "docs/durable-driver-api.md",
     "scripts/enforcement/outward_effect_pi.js",
     "docs/durable-persistence.md",

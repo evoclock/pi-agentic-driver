@@ -415,8 +415,8 @@ export async function executeBatch({ batch, boardPath, spawnWorker = null, conte
       // Delivery-unknown, partial start, or ambiguous read-back: the entry
       // stays reserved and triggers reconciliation — never reuse or another
       // start (§6.2). The reservation follows the claim through the terminal
-      // settlement hook (production caller for settleBatchReservation).
-      if (routerStore && entry.reservationId) settleBatchReservation({ routerStore, envelope: claim.envelope, outcome: "released", now });
+      // settlement hook once the live claim is consumed. Do not release a
+      // reservation while its authenticated claim still owns the attempt.
       landed.push({
         title: entry.title, role: entry.role, model: entry.model, placement: entry.placement,
         status: "denied",

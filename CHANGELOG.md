@@ -1,5 +1,15 @@
-## Unreleased
+## 3.1.4
 
+- Accept `review_requested` and `blocked` as journey consume reasons.
+- Repair reservations and keep both held on unverified spawn.
+- Allow durable cancel to take a late receipt.
+- Wait for `done === true` before dispatching dependent cards.
+- Add REST and MCP commands for those fixed machines.
+- Start workers when mixed-case Git checkout paths refer to the same folder.
+- Disable repository pre-registration as a gate for guarded Herdr spawn; start a guarded worker without registering the repository first.
+- Make repository deny patterns opt-in for worker spawn without refusing public checkouts by default.
+- Resolve named primary clones under the user's home directory when no coordinator sibling exists, including when the coordinator uses a Treehouse slot.
+- Retry a busy new shell for a bounded time on the same pane without creating another tab.
 - Restore the shipped-features and router-configuration catalogs in the README to single tables.
 
 ## 3.1.3

@@ -30,6 +30,7 @@ function child(dir, script) {
   });
 }
 
+// Why: A killed process must retain completed work and hold uncertain external effects instead of repeating them.
 test("production run survives kill: finished step is not repeated; unknown external action is held", async () => {
   const dir = directory();
   try {
@@ -72,6 +73,7 @@ test("production run survives kill: finished step is not repeated; unknown exter
   } finally { tidy(dir); }
 });
 
+// Why: Correlation and durable intent prevent a repeated worker request from dispatching twice.
 test("worker invocation persists one intent, correlates the goal and never dispatches twice", async () => {
   const dir = directory();
   try {
@@ -98,6 +100,7 @@ test("worker invocation persists one intent, correlates the goal and never dispa
   } finally { tidy(dir); }
 });
 
+// Why: Aborting a worker must not certify an unverified result or resend its request.
 test("worker abort cancels the ledger without reporting an unverified completion", async () => {
   const dir = directory();
   try {
@@ -113,11 +116,39 @@ test("worker abort cancels the ledger without reporting an unverified completion
       assert.equal((await driver.status(outcome.runId)).state, "cancelled");
       assert.equal((await driver.invokeWorker({ requestId: "outer:abort", goal: "goal",
         signal: new AbortController().signal,
-        transport: { async invoke() { throw new Error("must not replay"); } } })).state, "held");
+        transport: { async invoke() { throw new Error("must not replay"); } } })).state, "cancelled");
     } finally { await driver.close(); }
   } finally { tidy(dir); }
 });
 
+// Why: cancellation stops new effects but must preserve proof of an in-flight one.
+test("cancelled intent accepts a late receipt without reopening the run", async () => {
+  const dir = directory();
+  try {
+    const driver = await openDurableDriver({ directory: dir });
+    try {
+      await driver.start({ runId: "cancel-intent", steps: [{ id: "send", kind: "external" }] });
+      const intent = await driver.resume("cancel-intent");
+      const key = intent.steps[0].requestKey;
+      await driver.cancel("cancel-intent");
+      assert.equal((await driver.status("cancel-intent")).steps[0].state, "intent");
+      const receipt = { requestKey: key, verified: true, reference: "late-proof" };
+      await driver.report("cancel-intent", { stepId: "send", requestKey: key, receipt });
+      assert.equal((await driver.status("cancel-intent")).state, "cancelled");
+      assert.equal((await driver.status("cancel-intent")).steps[0].receipt.reference, "late-proof");
+      await driver.reconcile("cancel-intent", { stepId: "send", requestKey: key, verified: true, reference: "late-proof" });
+      await driver.start({ runId: "cancel-reconcile", steps: [{ id: "send", kind: "external" }] });
+      const second = await driver.resume("cancel-reconcile");
+      await driver.cancel("cancel-reconcile");
+      const recorded = await driver.reconcile("cancel-reconcile", { stepId: "send", requestKey: second.steps[0].requestKey,
+        verified: true, reference: "observed-proof" });
+      assert.equal(recorded.state, "cancelled");
+      assert.equal(recorded.steps[0].receipt.reference, "observed-proof");
+    } finally { await driver.close(); }
+  } finally { tidy(dir); }
+});
+
+// Why: Recovery after a worker crash must park an uncertain transport effect, not replay it.
 test("worker crash parks an invocation rather than replaying its transport", async () => {
   const dir = directory();
   try {
@@ -144,6 +175,7 @@ test("worker crash parks an invocation rather than replaying its transport", asy
   } finally { tidy(dir); }
 });
 
+// Why: A live owner must be able to resume an intent without losing the ability to record its receipt.
 test("repeated resume on a live intent does not park its receipt", async () => {
   const dir = directory();
   try {
@@ -159,6 +191,7 @@ test("repeated resume on a live intent does not park its receipt", async () => {
   } finally { tidy(dir); }
 });
 
+// Why: Only proof that no send occurred permits a new attempt with a fresh request key.
 test("held unsent intent requires explicit proof to release under a fresh key", async () => {
   const dir = directory();
   try {
@@ -209,6 +242,7 @@ test("held unsent intent requires explicit proof to release under a fresh key", 
   } finally { tidy(dir); }
 });
 
+// Why: Finished runs must not consume capacity reserved for live runs.
 test("terminal history does not exhaust live-run capacity", async () => {
   const dir = directory();
   try {
@@ -227,6 +261,7 @@ test("terminal history does not exhaust live-run capacity", async () => {
   } finally { tidy(dir); }
 });
 
+// Why: Admission must enforce the live-run limit without rejecting an identical existing run.
 test("64 live runs still refuse another admission while preserving idempotent starts", async () => {
   const dir = directory();
   try {
@@ -248,6 +283,7 @@ test("64 live runs still refuse another admission while preserving idempotent st
   } finally { tidy(dir); }
 });
 
+// Why: Reusing a run identity with a changed plan must not alter admitted work.
 test("changed-plan starts reject without changing the admitted run", async () => {
   const dir = directory();
   try {
@@ -267,6 +303,7 @@ test("changed-plan starts reject without changing the admitted run", async () =>
   } finally { tidy(dir); }
 });
 
+// Why: Invalid plans must be rejected before creating durable work.
 test("invalid and empty plans reject without admitting a run", async () => {
   const dir = directory();
   try {
@@ -299,6 +336,7 @@ test("invalid and empty plans reject without admitting a run", async () => {
   } finally { tidy(dir); }
 });
 
+// Why: Unsafe storage paths must fail before any ledger files are created.
 test("unsafe and noncanonical directories refuse before creating storage", async () => {
   const dir = directory();
   try {
@@ -314,6 +352,7 @@ test("unsafe and noncanonical directories refuse before creating storage", async
   } finally { tidy(dir); }
 });
 
+// Why: A second process must not take over a live storage owner.
 test("second concurrent opener refuses without disrupting the current owner", async () => {
   const dir = directory();
   try {
@@ -336,12 +375,14 @@ test("second concurrent opener refuses without disrupting the current owner", as
   } finally { tidy(dir); }
 });
 
+// Why: Importing the production driver must not pull in assignment fixtures.
 test("driver imports the neutral owner lock without loading the assignment fixture", () => {
   const source = readFileSync(new URL("../scripts/enforcement/durable_driver_pi.js", import.meta.url), "utf8");
   assert.match(source, /from "\.\/storage_owner_lock_pi\.js"/);
   assert.doesNotMatch(source, /from "\.\/durable_assignment_pi\.js"/);
 });
 
+// Why: Consumers need the declared driver types and neutral lock in the shipped package.
 test("public consumer declarations and neutral lock ship in the package", () => {
   const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   for (const file of ["scripts/enforcement/storage_owner_lock_pi.js", "scripts/enforcement/durable_driver_pi.d.ts"]) {
@@ -350,6 +391,7 @@ test("public consumer declarations and neutral lock ship in the package", () => 
   }
 });
 
+// Why: Source licensing metadata must remain present in the shipped driver and its tests.
 test("driver and test carry SPDX source headers", () => {
   for (const file of ["../scripts/enforcement/durable_driver_pi.js", "./test_durable_driver.mjs"]) {
     const header = readFileSync(new URL(file, import.meta.url), "utf8").split("\n").slice(0, 2).join("\n");
@@ -358,6 +400,7 @@ test("driver and test carry SPDX source headers", () => {
   }
 });
 
+// Why: Admission should expose ledger identities without pretending to register tasks.
 test("admission returns ledger correlation identities, not registration tasks", async () => {
   const dir = directory();
   try {
@@ -373,6 +416,7 @@ test("admission returns ledger correlation identities, not registration tasks", 
   } finally { tidy(dir); }
 });
 
+// Why: A failed close must report the error while releasing the exclusive owner lock.
 test("close failure releases the exclusive owner while preserving the error", async () => {
   const dir = directory();
   const original = Harness.open;
@@ -394,6 +438,7 @@ test("close failure releases the exclusive owner while preserving the error", as
   } finally { Harness.open = original; tidy(dir); }
 });
 
+// Why: A valid identity matching an inherited object property must not cause false conflicts.
 test("valid toString identity is admitted without inherited-object conflict", async () => {
   const dir = directory();
   try {
@@ -407,6 +452,7 @@ test("valid toString identity is admitted without inherited-object conflict", as
   } finally { tidy(dir); }
 });
 
+// Why: A missing run should be reported as absent rather than fabricated.
 test("unknown valid run returns null", async () => {
   const dir = directory();
   try {
@@ -416,7 +462,8 @@ test("unknown valid run returns null", async () => {
   } finally { tidy(dir); }
 });
 
-test("cancelled run cannot reconcile a step into finished state", async () => {
+// Why: a cancelled run still accepts proof of an effect already in flight.
+test("cancelled run reconciles a receipt without reopening", async () => {
   const dir = directory();
   try {
     const driver = await openDurableDriver({ directory: dir });
@@ -424,14 +471,16 @@ test("cancelled run cannot reconcile a step into finished state", async () => {
       await driver.start({ runId: "cancelled-reconcile", steps: [{ id: "send", kind: "external" }] });
       const intent = await driver.resume("cancelled-reconcile");
       await driver.cancel("cancelled-reconcile");
-      await assert.rejects(driver.reconcile("cancelled-reconcile", {
+      const result = await driver.reconcile("cancelled-reconcile", {
         stepId: "send", requestKey: intent.steps[0].requestKey, verified: true, reference: "sent",
-      }), /cancelled run/);
-      assert.equal((await driver.status("cancelled-reconcile")).steps[0].state, "intent");
+      });
+      assert.equal(result.state, "cancelled");
+      assert.equal(result.steps[0].state, "finished");
     } finally { await driver.close(); }
   } finally { tidy(dir); }
 });
 
+// Why: cancellation must not resume or replay the external effect.
 test("cancel parks a run without replaying an intent", async () => {
   const dir = directory();
   try {
@@ -443,7 +492,8 @@ test("cancel parks a run without replaying an intent", async () => {
       await driver.cancel("cancelled");
       assert.equal((await driver.resume("cancelled")).state, "cancelled");
       await assert.rejects(driver.report("cancelled", { stepId: "send", requestKey: intent.steps[0].requestKey,
-        receipt: { requestKey: intent.steps[0].requestKey, verified: true, reference: "x" } }), /not active/);
+        receipt: { requestKey: intent.steps[0].requestKey, verified: false, reference: "x" } }), /verified external receipt required/);
+      assert.equal((await driver.status("cancelled")).state, "cancelled");
     } finally { await driver.close(); }
   } finally { tidy(dir); }
 });

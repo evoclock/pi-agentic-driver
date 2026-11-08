@@ -5,8 +5,8 @@
 // electron-attended context class (never a Pi-TUI representation), the
 // read-only preflight stage (context, closed parameters, trusted repository,
 // installed model roll, executable availability, duplicate-role observation),
-// and the single-attempt commit stage (no spawn confirmation, tab-only
-// topology, exact argv/read-back, no retry). All Herdr interaction goes
+// and the single-layout commit stage (no spawn confirmation, tab-only
+// topology, exact argv/read-back, same-pane busy-start retry). All Herdr interaction goes
 // through a REAL fake Herdr process (testExecutablePath with shell:false
 // spawn), never a recorder replacing the guarded lifecycle. No live Herdr,
 // no live workers, no provider calls.
@@ -38,7 +38,7 @@ const MODEL_ROLL = "provider model\nzai glm-5.3\nglm53flash glm-5.3-flash\n";
 // (direct argv, no shell), it records every argv it receives and answers the
 // documented layout/start/read-back sequence. Modes exercise failure shapes.
 const FAKE_HERDR = `#!/usr/bin/env node
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 const argv = process.argv.slice(2);
 appendFileSync(process.env.FAKE_HERDR_LOG, JSON.stringify({ argv }) + "\\n");
 const mode = process.env.FAKE_HERDR_MODE ?? "";
@@ -65,6 +65,8 @@ if (command === "tab" && argv[1] === "create") {
   process.exit(0);
 }
 if (command === "agent" && argv[1] === "start") {
+  if (mode === "busy-once" && readFileSync(process.env.FAKE_HERDR_LOG, "utf8").split("\\n").filter((line) => line.includes('"start"')).length === 1)
+    fail("agent_pane_busy", "pane shell is starting");
   if (mode === "start-fail") fail("start_failed", "the agent could not start");
   if (mode === "wrong-model") {
     emit({ result: { type: "agent_started", argv: ["agent", "start", ...argv.slice(2, -2), "--model", "other/model"],
@@ -368,7 +370,22 @@ test("headless commit refuses a foreign origin without creating a tab", async ()
   }
 });
 
-// Why: failed starts must preserve the created tab without automatic retries.
+// Why: the attended boundary must also reuse only the original busy pane.
+test("attended busy pane retries start on the same tab root once", async () => {
+  const f = fixture({ mode: "busy-once" });
+  try {
+    const result = await executeHerdrSpawnWorkerAttendedElectron(f.params, f.context, f.herdrOptions);
+    assert.equal(result.status, "spawned", JSON.stringify(result));
+    const calls = readLog(f.log);
+    assert.equal(calls.filter(([a, b]) => a === "tab" && b === "create").length, 1);
+    const starts = calls.filter(([a, b]) => a === "agent" && b === "start");
+    assert.equal(starts.length, 2);
+    assert.deepEqual(starts[0], starts[1]);
+    assert.ok(starts[0].includes("w7:p10"));
+  } finally { cleanup(f.root); }
+});
+
+// Why: non-busy failed starts must preserve the created tab without automatic retries.
 test("a failed start is one attempt only and reports a partial with cleanup guidance", async () => {
   const f = fixture({ mode: "start-fail" });
   try {
