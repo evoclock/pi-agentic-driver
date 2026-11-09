@@ -1473,6 +1473,71 @@ test("tab-labeled worker survives a lost agent registration", async () => {
   assert.ok(calls.some((argv) => argv[1] === "read" && argv[2] === pane));
 });
 
+// Why: a uniquely labeled pane can answer a delivery even when Herdr omits its role in the prompt acknowledgment.
+test("recovered labeled pane attributes its self-identified delivery without resending", async () => {
+  const role = "connection-probe";
+  const paneId = "w1:p5";
+  const tabId = "w1:t5";
+  const calls = [];
+  let sent;
+  const runProcess = async ({ argv }) => {
+    calls.push([...argv]);
+    if (argv[0] === "tab") return { code: 0, stdout: JSON.stringify({ tabs: [{ label: role, tab_id: tabId, root_pane_id: paneId }] }) };
+    if (argv[0] === "pane") return { code: 0, stdout: JSON.stringify({ pane: { pane_id: paneId, tab_id: tabId, agent: "pi", agent_status: "idle", cwd: root } }) };
+    if (argv[1] === "get") return { code: 1, stdout: JSON.stringify({ error: { code: "agent_not_found" } }) };
+    if (argv[1] === "prompt") {
+      assert.equal(argv[2], paneId);
+      sent = argv[3];
+      return { code: 0, stdout: JSON.stringify({ type: "agent_prompted", agent: { pane_id: paneId, tab_id: tabId, agent: "pi", status: "working", cwd: root } }) };
+    }
+    if (argv[1] === "read") {
+      assert.equal(argv[2], paneId);
+      if (!sent) return { code: 0, stdout: "history" };
+      const [open, close] = markerPair(role);
+      const correlation = sent.split("\n").at(-2);
+      return { code: 0, stdout: `history\n${sent}\n${open}\n${correlation}\nrecovered answer\n${close}` };
+    }
+    throw new Error(`unexpected ${argv}`);
+  };
+  const receipt = await executeHerdrCommunication(
+    { action: "prompt", role, prompt: "one recovered brief", timeoutMs: 1000 }, { cwd: root }, { runProcess },
+  );
+  assert.equal(receipt.deliveryState, "delivered", JSON.stringify(receipt));
+  const answer = await executeHerdrCommunication({ action: "delivery", deliveryId: receipt.deliveryId }, { cwd: root }, { runProcess });
+  assert.equal(answer.deliveryState, "answered", JSON.stringify(answer));
+  assert.equal(answer.report, "recovered answer");
+  assert.equal(calls.filter((argv) => argv[1] === "prompt").length, 1);
+});
+
+// Why: a conflicting role or pane identity cannot borrow a uniquely labeled pane's delivery.
+test("recovered labeled pane refuses conflicting identities after handoff", async () => {
+  for (const conflict of [{ name: "other" }, { role: "other" }, { pane_id: "w1:p6" }, { tab_id: "w1:t6" }]) {
+    const role = "connection-probe";
+    const paneId = "w1:p5";
+    const tabId = "w1:t5";
+    let prompts = 0;
+    const runProcess = async ({ argv }) => {
+      if (argv[0] === "tab") return { code: 0, stdout: JSON.stringify({ tabs: [{ label: role, tab_id: tabId, root_pane_id: paneId }] }) };
+      if (argv[0] === "pane") return { code: 0, stdout: JSON.stringify({ pane: { pane_id: paneId, tab_id: tabId, agent: "pi", agent_status: "idle", cwd: root } }) };
+      if (argv[1] === "get") return { code: 1, stdout: JSON.stringify({ error: { code: "agent_not_found" } }) };
+      if (argv[1] === "read") return { code: 0, stdout: "history" };
+      if (argv[1] === "prompt") {
+        prompts++;
+        return { code: 0, stdout: JSON.stringify({ type: "agent_prompted", agent: { pane_id: paneId, tab_id: tabId, agent: "pi", status: "working", cwd: root, ...conflict } }) };
+      }
+      throw new Error(`unexpected ${argv}`);
+    };
+    const refused = await executeHerdrCommunication(
+      { action: "prompt", role, prompt: `brief ${JSON.stringify(conflict)}`, timeoutMs: 1000 }, { cwd: root }, { runProcess },
+    );
+    assert.equal(refused.code, "delivery_unconfirmed", JSON.stringify(refused));
+    assert.equal(refused.deliveryState, "unknown");
+    const query = await executeHerdrCommunication({ action: "delivery", deliveryId: refused.deliveryId }, { cwd: root }, { runProcess });
+    assert.equal(query.code, "stale_role_mapping", JSON.stringify(conflict));
+    assert.equal(prompts, 1, "uncertain handoff is never resent");
+  }
+});
+
 // Why: a tab with an explicit root pane still recovers without a pane-list lookup.
 test("labeled tab with root_pane_id uses the direct pane read-back", async () => {
   const calls = [];

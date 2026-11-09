@@ -11,13 +11,15 @@
     "weekly-recap-tests": "Reuse weekly-recap-tests in .driver/gate-rules.json; unittest's host-observed Ran N total is the denominator.",
     "public-pr-wording-tests": "Reuse public-pr-wording-tests in .driver/gate-rules.json; unittest's host-observed Ran N total is the denominator."
   },
-  "mutation": {
-    "id": "github-origin-mixed-case",
-    "path": "scripts/enforcement/herdr_lifecycle_pi.js",
-    "before": "const ssh = new RegExp(`^git@github\\\\.com:${owner}/([a-zA-Z0-9][a-zA-Z0-9-]{0,63})(?:\\\\.git)?$`);",
-    "after": "const ssh = new RegExp(`^git@github\\\\.com:${owner}/([a-z0-9][a-z0-9-]{0,63})(?:\\\\.git)?$`);",
-    "testCheckId": "node-tests",
-    "testPaths": ["tests/test_worktree_spawn_target.mjs"],
-    "reason": "Restoring lowercase-only matching for either GitHub origin form must fail the mixed-case acceptance regression."
-  }
+  "mutations": [
+    {
+      "id": "release-prepare-publish-fallthrough",
+      "path": "scripts/release_public.py",
+      "before": "note=note, prepare_pr_only=prepare_pr_only)",
+      "after": "note=note, prepare_pr_only=False)",
+      "testCheckId": "python-tests",
+      "testPaths": ["tests/test_release_public.py"],
+      "reason": "Dropping the prepare-only mode before archive handling must expose forbidden tag and GitHub release attempts in the actual CLI effect record."
+    }
+  ]
 }

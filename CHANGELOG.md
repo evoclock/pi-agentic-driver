@@ -1,3 +1,7 @@
+## 3.1.8
+
+- Keep worker delivery attribution and add local task and skill observations.
+
 ## 3.1.7
 
 - Recover a labeled worker from the live pane list when its tab has no pane id, and surface that recovery error instead of hiding it as not found.

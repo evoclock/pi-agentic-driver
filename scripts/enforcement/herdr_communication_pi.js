@@ -882,10 +882,10 @@ function hostModel(value) {
   return { provider, model };
 }
 
-function publicAgentObservation(value, role, repositories, { requirePromptable = false } = {}) {
+function publicAgentObservation(value, role, repositories, { requirePromptable = false, allowUnnamedRole = false } = {}) {
   validateAgentInfoShape(value);
   const observedRole = oneConsistent(collectStringValues(value, ["name", "role"]), "role");
-  if (observedRole !== role) throw communicationError("stale_role_mapping", "Herdr role mapping did not match the requested configured role");
+  if (observedRole !== role && !(allowUnnamedRole && observedRole === undefined)) throw communicationError("stale_role_mapping", "Herdr role mapping did not match the requested configured role");
   const kind = oneConsistent(collectStringValues(value, ["agent", "agent_kind", "kind"]), "agent kind");
   if (kind !== "pi") throw communicationError("agent_mismatch", "the configured role is not hosted by the expected Pi agent");
   const status = oneConsistent(collectStringValues(value, ["agent_status", "status"]), "status");
@@ -920,6 +920,16 @@ function publicAgentObservation(value, role, repositories, { requirePromptable =
     repository: normalizeRepository(repo),
     ...(observedModel ? { hostObservedModel: observedModel } : {}),
   };
+}
+
+// An unnamed acknowledgment can inherit only a previously verified unique
+// tab-label mapping, and only when both live pane and tab identifiers agree.
+function publicTargetObservation(value, role, repositories, options) {
+  const paneId = options.roleTargets?.get(role);
+  if (paneId && (value.pane_id !== paneId || value.tab_id !== options.roleTabs?.get(role))) {
+    throw communicationError("stale_role_mapping", "Herdr returned a different pane for the labeled role");
+  }
+  return publicAgentObservation(value, role, repositories, { allowUnnamedRole: Boolean(paneId) });
 }
 
 function extractAgent(value, expectedType) {
@@ -971,10 +981,10 @@ async function labeledPane(role, context, options, signal, repositories) {
   if (pane?.pane_id !== paneId || pane?.tab_id !== tab.tab_id) {
     throw communicationError("ambiguous_target_role", "the labeled tab did not match its pane");
   }
-  const value = { name: role, agent: pane.agent ?? pane.agent_kind ?? pane.kind,
+  const value = { name: pane.name ?? role, role: pane.role, agent: pane.agent ?? pane.agent_kind ?? pane.kind,
     status: pane.agent_status ?? pane.status, cwd: pane.cwd, foreground_cwd: pane.foreground_cwd,
     pane_id: paneId, tab_id: tab.tab_id, state_change_seq: pane.state_change_seq };
-  return { paneId, observation: publicAgentObservation(value, role, repositories), value };
+  return { paneId, tabId: tab.tab_id, observation: publicAgentObservation(value, role, repositories), value };
 }
 
 async function observeRole(role, context, options, signal, repositories) {
@@ -997,6 +1007,7 @@ async function observeRole(role, context, options, signal, repositories) {
     const pane = await labeledPane(role, context, options, signal, repositories);
     if (!pane) throw error;
     options.roleTargets.set(role, pane.paneId);
+    options.roleTabs.set(role, pane.tabId);
     return { raw: { type: "agent_info", agent: pane.value }, observation: pane.observation };
   }
 }
@@ -1546,7 +1557,7 @@ async function deliverPrompt(operation, request, context, options, signal, repos
     // prompt_async is an internal operation name: the delivery argv, not the
     // legacy blocking --wait argv.
     const accepted = await invokeHerdr("prompt_async", { ...request, timeoutMs: COMMAND_TIMEOUT_MS, sentPrompt: record.sentPrompt }, context, options, signal);
-    const observation = publicAgentObservation(extractAgent(accepted, "agent_prompted"), role, repositories);
+    const observation = publicTargetObservation(extractAgent(accepted, "agent_prompted"), role, repositories, options);
     record.state = "delivered";
     record.acceptedAt = new Date().toISOString();
     record.agentStatus = observation.status;
@@ -1770,7 +1781,7 @@ async function queryDelivery(request, context, options, signal, repositories) {
         action: "prompt", role: record.role, prompt: record.prompt,
         timeoutMs: COMMAND_TIMEOUT_MS, sentPrompt: record.sentPrompt,
       }, context, options, signal);
-      publicAgentObservation(extractAgent(accepted, "agent_prompted"), record.role, repositories);
+      publicTargetObservation(extractAgent(accepted, "agent_prompted"), record.role, repositories, options);
       record.state = "delivered";
       record.acceptedAt = new Date().toISOString();
       record.waitingForIdle = false;
@@ -2008,7 +2019,7 @@ export async function executeHerdrCommunication(params, context, options = {}, s
     await loadWorktreeResolver();
     const repository = expectedRepository(context);
     const repositories = trustedRepositories(repository, options);
-    options = { ...options, roleTargets: new Map() };
+    options = { ...options, roleTargets: new Map(), roleTabs: new Map() };
     if (operation === "list") {
       const raw = await invokeHerdr(operation, request, context, options, signal);
       const agents = listAgents(raw);

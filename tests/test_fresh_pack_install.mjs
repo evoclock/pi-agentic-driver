@@ -15,6 +15,11 @@ const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // is mandatory; missing offline cache or missing sfw fails rather than skips.
 // Why: the published archive must install in a clean consumer using only the locked offline dependency graph.
 test("fresh offline packed install loads all configured skills and imports", async () => {
+  if (existsSync(join(repo, "scripts/public_sync.py"))) {
+    assert.doesNotThrow(() => execFileSync("python3", ["tests/test_public_sync.py", "PublicSyncTests.test_dry_run_is_repeatable_and_preserves_remotes"], {
+      cwd: repo, encoding: "utf8",
+    }), "the private curator must remove excluded guard metadata before installation");
+  }
   const scratch = mkdtempSync(join(repo, ".fresh-pack-install-"));
   try {
     const home = join(scratch, "home");
