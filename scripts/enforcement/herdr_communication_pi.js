@@ -460,6 +460,8 @@ function fixedArgv(action, params) {
       return ["agent", "list"];
     case "tabs":
       return ["tab", "list"];
+    case "panes":
+      return ["pane", "list"];
     case "pane":
       return ["pane", "get", params.paneId];
     case "get":
@@ -952,10 +954,18 @@ async function labeledPane(role, context, options, signal, repositories) {
   if (matches.length > 1) throw communicationError("ambiguous_target_role", "more than one tab has this role label");
   if (!matches.length) return undefined;
   const tab = matches[0];
-  const paneId = tab.root_pane_id ?? tab.root_pane?.pane_id ?? tab.pane_id;
-  if (typeof paneId !== "string" || !/^w[A-Za-z0-9]+:p[A-Za-z0-9]+$/.test(paneId)) {
-    throw communicationError("unexpected_result", "the labeled tab has no valid root pane");
+  const validPaneId = (id) => typeof id === "string" && /^w[A-Za-z0-9]+:p[A-Za-z0-9]+$/.test(id);
+  let paneId = [tab.root_pane_id, tab.root_pane?.pane_id, tab.pane_id].find(validPaneId);
+  if (!paneId) {
+    const rawPanes = unwrapResponse(await invokeHerdr("panes", {}, context, options, signal));
+    if (!Array.isArray(rawPanes?.panes) || rawPanes.panes.length > 64) {
+      throw communicationError("unexpected_result", "Herdr returned an invalid pane list");
+    }
+    const matches = rawPanes.panes.filter((pane) => pane?.tab_id === tab.tab_id);
+    if (matches.length > 1) throw communicationError("ambiguous_target_role", "more than one pane belongs to the labeled tab");
+    paneId = matches[0]?.pane_id;
   }
+  if (!validPaneId(paneId)) throw communicationError("unexpected_result", "the labeled tab has no valid root pane");
   const paneRaw = unwrapResponse(await invokeHerdr("pane", { paneId }, context, options, signal));
   const pane = paneRaw?.pane ?? paneRaw;
   if (pane?.pane_id !== paneId || pane?.tab_id !== tab.tab_id) {
@@ -984,12 +994,7 @@ async function observeRole(role, context, options, signal, repositories) {
     return { raw, observation };
   } catch (error) {
     if (!(error instanceof HerdrCommunicationError) || !["agent_not_found", "agent_name_not_found", "agent_not_running", "target_not_found"].includes(error.code)) throw error;
-    let pane;
-    try { pane = await labeledPane(role, context, options, signal, repositories); }
-    catch (fallbackError) {
-      if (fallbackError?.code === "ambiguous_target_role" || fallbackError?.code === "repository_mismatch") throw fallbackError;
-      throw error;
-    }
+    const pane = await labeledPane(role, context, options, signal, repositories);
     if (!pane) throw error;
     options.roleTargets.set(role, pane.paneId);
     return { raw: { type: "agent_info", agent: pane.value }, observation: pane.observation };
