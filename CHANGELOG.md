@@ -1,3 +1,7 @@
+## 3.1.7
+
+- Recover a labeled worker from the live pane list when its tab has no pane id, and surface that recovery error instead of hiding it as not found.
+
 ## 3.1.6
 
 - Keep worker delivery reports visible after a reconnect, report the worker directory instead of the caller directory, and let a finished worker take the next brief.

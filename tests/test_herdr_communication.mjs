@@ -871,6 +871,7 @@ test("prompt refusals are structured and never throw", async () => {
 
   const goneRunProcess = async ({ argv }) => {
     if (argv[1] === "get") return { code: 2, stdout: "", stderr: "agent_name_not_found" };
+    if (argv[0] === "tab" && argv[1] === "list") return { code: 0, stdout: JSON.stringify({ tabs: [] }) };
     throw new Error("no traffic expected after a stale role");
   };
   const gone = await executeHerdrCommunication(
@@ -1449,8 +1450,9 @@ test("tab-labeled worker survives a lost agent registration", async () => {
   const calls = [];
   const runProcess = async ({ argv }) => {
     calls.push(argv);
-    if (argv[0] === "tab") return { code: 0, stdout: JSON.stringify({ tabs: [{ label: worker, tab_id: "w1:t5", root_pane_id: pane }] }) };
-    if (argv[0] === "pane") return { code: 0, stdout: JSON.stringify({ pane: { pane_id: pane, tab_id: "w1:t5", agent: "pi", agent_status: "idle", cwd: root } }) };
+    if (argv[0] === "tab") return { code: 0, stdout: JSON.stringify({ tabs: [{ label: worker, tab_id: "w1:t5", pane_count: 1, workspace_id: "w1", agent_status: "idle" }] }) };
+    if (argv[0] === "pane" && argv[1] === "list") return { code: 0, stdout: JSON.stringify({ panes: [{ pane_id: pane, tab_id: "w1:t5", agent: "pi", agent_status: "idle", cwd: root }] }) };
+    if (argv[0] === "pane" && argv[1] === "get") return { code: 0, stdout: JSON.stringify({ pane: { pane_id: pane, tab_id: "w1:t5", agent: "pi", agent_status: "idle", cwd: root } }) };
     if (argv[1] === "list") return { code: 0, stdout: JSON.stringify({ type: "agent_list", agents: [] }) };
     if (argv[1] === "get") return { code: 1, stdout: JSON.stringify({ error: { code: "agent_not_found" } }) };
     if (argv[1] === "read") return { code: 0, stdout: `[CONNECTION_PROBE_REPORT_BEGIN]\nanswer\n[CONNECTION_PROBE_REPORT_END]` };
@@ -1460,12 +1462,69 @@ test("tab-labeled worker survives a lost agent registration", async () => {
   const listed = await executeHerdrCommunication({ action: "list" }, { cwd: root }, options);
   assert.equal(listed.ok, true, JSON.stringify(listed));
   assert.equal(listed.roles[0].repository, root);
+  assert.equal(listed.roles[0].role, worker);
   const get = await executeHerdrCommunication({ action: "get", role: worker }, { cwd: root }, options);
+  assert.equal(get.ok, true, JSON.stringify(get));
   assert.equal(get.observation.repository, root);
+  assert.ok(calls.some((argv) => argv[0] === "pane" && argv[1] === "list"));
   const read = await executeHerdrCommunication({ action: "read", role: worker }, { cwd: root }, options);
   assert.equal(read.report, "answer");
   assert.equal(read.repository, root);
   assert.ok(calls.some((argv) => argv[1] === "read" && argv[2] === pane));
+});
+
+// Why: a tab with an explicit root pane still recovers without a pane-list lookup.
+test("labeled tab with root_pane_id uses the direct pane read-back", async () => {
+  const calls = [];
+  const runProcess = async ({ argv }) => {
+    calls.push(argv);
+    if (argv[0] === "agent" && argv[1] === "get") return { code: 1, stdout: JSON.stringify({ error: { code: "agent_not_found" } }) };
+    if (argv[0] === "tab" && argv[1] === "list") return { code: 0, stdout: JSON.stringify({ tabs: [{ label: "worker", tab_id: "w1:t5", root_pane_id: "w1:p5" }] }) };
+    if (argv[0] === "pane" && argv[1] === "get") return { code: 0, stdout: JSON.stringify({ pane: { pane_id: "w1:p5", tab_id: "w1:t5", agent: "pi", agent_status: "idle", cwd: root } }) };
+    throw new Error(`unexpected ${argv}`);
+  };
+  const result = await executeHerdrCommunication({ action: "get", role: "worker" }, { cwd: root }, { runProcess });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.observation.repository, root);
+  assert.ok(calls.some((argv) => argv[0] === "pane" && argv[1] === "get" && argv[2] === "w1:p5"));
+  assert.equal(calls.some((argv) => argv[0] === "pane" && argv[1] === "list"), false);
+});
+
+// Why: a matching label without a pane must expose the recovery error, not the missing registry entry.
+test("missing pane for a labeled tab surfaces unexpected_result", async () => {
+  const runProcess = async ({ argv }) => {
+    if (argv[0] === "agent") return { code: 1, stdout: JSON.stringify({ error: { code: "agent_not_found" } }) };
+    if (argv[0] === "tab") return { code: 0, stdout: JSON.stringify({ tabs: [{ label: "worker", tab_id: "w1:t5" }] }) };
+    if (argv[0] === "pane" && argv[1] === "list") return { code: 0, stdout: JSON.stringify({ panes: [{ pane_id: "w1:p6", tab_id: "w1:t6" }] }) };
+    throw new Error(`unexpected ${argv}`);
+  };
+  const result = await executeHerdrCommunication({ action: "get", role: "worker" }, { cwd: root }, { runProcess });
+  assert.equal(result.code, "unexpected_result", JSON.stringify(result));
+});
+
+// Why: two panes in one labeled tab cannot safely identify one worker.
+test("multiple panes on a labeled tab are ambiguous", async () => {
+  const runProcess = async ({ argv }) => {
+    if (argv[0] === "agent") return { code: 1, stdout: JSON.stringify({ error: { code: "agent_not_found" } }) };
+    if (argv[0] === "tab") return { code: 0, stdout: JSON.stringify({ tabs: [{ label: "worker", tab_id: "w1:t5" }] }) };
+    if (argv[0] === "pane" && argv[1] === "list") return { code: 0, stdout: JSON.stringify({ panes: [{ pane_id: "w1:p5", tab_id: "w1:t5" }, { pane_id: "w1:p6", tab_id: "w1:t5" }] }) };
+    throw new Error(`unexpected ${argv}`);
+  };
+  const result = await executeHerdrCommunication({ action: "get", role: "worker" }, { cwd: root }, { runProcess });
+  assert.equal(result.code, "ambiguous_target_role", JSON.stringify(result));
+});
+
+// Why: registered agents still check live-shaped labels for conflicting panes.
+test("registered worker checks live-shaped tab labels", async () => {
+  const runProcess = async ({ argv }) => {
+    if (argv[0] === "agent") return { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: "worker", agent: "pi", status: "idle", cwd: root, pane_id: "w1:p5", tab_id: "w1:t5" } }) };
+    if (argv[0] === "tab") return { code: 0, stdout: JSON.stringify({ tabs: [{ label: "worker", tab_id: "w1:t5" }] }) };
+    if (argv[0] === "pane" && argv[1] === "list") return { code: 0, stdout: JSON.stringify({ panes: [{ pane_id: "w1:p5", tab_id: "w1:t5" }] }) };
+    if (argv[0] === "pane" && argv[1] === "get") return { code: 0, stdout: JSON.stringify({ pane: { pane_id: "w1:p5", tab_id: "w1:t5", agent: "pi", agent_status: "idle", cwd: root } }) };
+    throw new Error(`unexpected ${argv}`);
+  };
+  const result = await executeHerdrCommunication({ action: "get", role: "worker" }, { cwd: root }, { runProcess });
+  assert.equal(result.ok, true, JSON.stringify(result));
 });
 
 // Why: recovered reports must identify both the role and delivery on the first line.
