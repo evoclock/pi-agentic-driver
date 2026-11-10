@@ -123,31 +123,63 @@ inventory and local Obsidian/pad/ci/treehouse scratch paths stay out of git.
 
 ## Shipped features
 
-| Tool | What it does | Status |
+| Name | What it does | Status |
 |------|--------------|--------|
-| `code_phage` | Reviews a plan against a stated goal before code is written and advises your agent. | shipped |
-| `tasks` | Keeps a priority-ordered session plan, then lets the owner make selected items durable in `TASKS.md`. | shipped |
-| `decision-to-spec` skill | Drafts one reviewable assignment from your explicit decision or a sourced, quoted relay, with observable outcomes and a stop point. | packaged skill |
-| `agentic_decision_evidence` | Records the stated source of a decision (direct or relayed, with quote, where, when and relayer) for a private assignment; it verifies no identity and creates no authority. | shipped |
-| `agentic_relay_check_request` | Checks whether a recorded, scoped relay covers each requested private action; read-only preflight, with authority checked again at the action boundary. | shipped |
-| `agentic_merge_review_record` | Records independent Standards and Spec verdicts for an exact PR head; read only when the merge policy is `agents-after-checks-and-review`, and it merges nothing. | shipped |
-| `agentic_herdr_communication` | Submits one prompt and observes delivery and marked reports; never grants authority. Labeled-tab recovery keeps worker delivery attribution attached to the live pane. | shipped; included in 3.1.8 candidate |
-| Local task and skill observations | Records task-local reads, submitted skill commands and observed worker provenance, with explicit capture gaps and a read-only cross-session aggregate. These records do not verify successful task completion or correct skill use. | included in 3.1.8 candidate; not published |
-| `agentic_herdr_spawn_worker` | Starts and verifies one Pi worker tab in a trusted repository, reporting partial failures without an automatic retry. | shipped |
-| `agentic_aidr` | A remedy for AI;DR. Reviews writing for clarity, simplicity, brevity, and humanity. | shipped |
-| `agentic_linux_microvm_cutover` | Runs one job in a throwaway QEMU/KVM virtual machine on a Linux host, with a severity-tiered killswitch that stops escape attempts. | user-enabled, native confirmation |
-| `agentic_worker_dispatch` | Runs bounded worker journeys and observes worker liveness. Each iteration is a durable checkpoint, so an interrupted journey resumes without resending an uncertain prompt; the `journeys` action lists the records. | shipped |
-| `agentic_journey_outward_effect` | Makes one confirmed Git push, or private draft PR create or update, for an existing journey; after an interruption it checks the remote and never repeats an uncertain write. | shipped, native confirmation |
-| `agentic_kanban_board` | Shows the workspace task board: lanes, flags, priorities, dependencies, and which cards can run. | shipped |
-| `agentic_kanban_board_write` | Adds cards to the board through the trusted writer, which records who authorized the work. | shipped |
-| `agentic_kanban_board_update` | Moves, closes, flags, edits, or removes cards on the board, always recording who authorized the change. | shipped |
-| `agentic_kanban_board_dispatch` | Claims an eligible board card for automated contained work and creates its assignment envelope. | shipped |
-| `agentic_kanban_pulse` | Checks for ready work and available capacity, then starts assignments under the board policy. | shipped |
-| `agentic-recovery-evidence` | Opens private recovery evidence in the local TUI; it is not a model-callable tool or recovery authorization. | shipped, local review only |
-| Router | Capacity/policy routing for Board Pulse: seats with scope statements, tunable policy values, and a binding dispatch gate. | shipped |
-| Janus (bundled service) | Local Jev evaluation service on loopback: semantic ranking, the dispatch-gate judgment, redaction before every external call. See `janus/README.md`. | shipped |
-| `weekly-build-recap` skill | Prepares a local weekly GitHub recap with a picture and draft posts; posting remains yours. | shipped |
-| Bounded loop-until-done | Keeps a session working toward an explicit stopping condition within configured limits; packaged since 2.0.0 and documented here. | shipped |
+| `code_phage` | Reviews a proposed change against its goal and advises on reuse and scope. | shipped |
+| `agentic_decision_evidence` | Records the stated source of a decision without granting authority. | shipped |
+| `agentic_relay_check_request` | Checks whether a recorded relay covers a requested action. | shipped |
+| `agentic_merge_review_record` | Records independent reviews for an exact pull request. | shipped |
+| `agentic_herdr_communication` | Sends a worker brief and observes delivery and reports, including recovered labeled tabs. | shipped |
+| `agentic_herdr_register_repository` | Reports that worker repository pre-registration is no longer needed; it changes no registry. | shipped |
+| `agentic_herdr_spawn_worker` | Starts and verifies one worker in a trusted checkout. | shipped |
+| `agentic_aidr` | Reviews writing for clarity and brevity. | shipped |
+| `agentic_interactive_safeguards_toggle` | Turns optional interactive confirmations on or off. | shipped |
+| `agentic_linux_microvm_cutover` | Runs an approved isolation proof in a temporary Linux virtual machine when enabled. | shipped |
+| `agentic_worker_dispatch` | Runs bounded worker journeys and checks worker liveness. | shipped |
+| `agentic_worker_dispatch_async` | Submits one worker brief for later observation without waiting for a report. | shipped |
+| `agentic_journey_outward_effect` | Confirms one push or draft pull request action without replaying an uncertain write. | shipped |
+| `agentic_kanban_board` | Shows board work, dependencies, and readiness. | shipped |
+| `agentic_kanban_board_write` | Adds a board card through the trusted writer. | shipped |
+| `agentic_kanban_board_update` | Changes a board card through the trusted writer. | shipped |
+| `agentic_kanban_board_dispatch` | Claims eligible board work for an assigned worker. | shipped |
+| `agentic_kanban_pulse` | Checks board capacity and starts eligible work under board policy. | shipped |
+| `agentic_harvest_lessons` | Collects past correction evidence for review without changing a repository. | shipped |
+| `agentic_recovery_evidence_summary` | Shows counts of recent recovery records without exposing their contents. | shipped |
+| Local task and skill observations | Records task and skill activity while marking gaps in the record. | shipped |
+| `inventory-refresh` extension | Refreshes the local codebase inventory used for code search. | shipped |
+| `task-board` extension | Registers board views and controlled card actions. | shipped |
+| `task-skill-observability` extension | Records task and skill use for later review. | shipped |
+| `treehouse-recycle` extension | Returns only idle, clean worktrees after their review closes. | shipped |
+| Recovery evidence review | Opens local recovery evidence for review in the terminal. | shipped |
+| Router | Routes Board Pulse work to eligible capacity. | shipped |
+| Janus | Provides local evaluation for routing and the dispatch gate. | shipped |
+| Bounded loop-until-done | Works toward a defined stopping condition within set limits. | shipped |
+
+Use `/skill:<name>` to load a skill; loading is not approval to act, and pstack ports come from the separate `pi-poteto-mode` package.
+
+| Name | What it does | Status |
+|------|--------------|--------|
+| `correct-pi` | Prevents a recurring mistake and checks that the fix catches it. | shipped |
+| `crew-tracker-sync` | Keeps team work and decisions current from observed updates. | shipped |
+| `decision-to-spec` | Drafts one bounded assignment from a recorded decision. | shipped |
+| `driver-mode` | Routes explicit driver jobs to the right workflow. | shipped |
+| `driver-principle-boundary-only-authority` | Checks that an action stays within its approved scope. | shipped |
+| `driver-principle-cite-your-status` | Supports progress reports with source evidence. | shipped |
+| `driver-principle-dependency-policy` | Reviews dependency and install choices. | shipped |
+| `driver-principle-evidence` | Grounds work claims in observed evidence. | shipped |
+| `driver-principle-fail-loud` | Reports a failed or missing check without calling it a pass. | shipped |
+| `driver-principle-working-memory-is-not-authority` | Keeps task lists and summaries separate from permission to act. | shipped |
+| `evidence-first-delivery-workflow` | Drafts an inactive delivery plan for review; it does not run the plan. | shipped |
+| `harvest-lessons` | Reviews past corrections and prepares guarded improvement drafts. | shipped |
+| `public-pr-wording` | Helps write clear pull request titles and descriptions. | shipped |
+| `pulse` | Checks board capacity and works through ready cards. | shipped |
+| `ralph` | Works through one bounded fix-plan item at a time. | shipped |
+| `session-handover` | Writes a source-indexed handover for a later session. | shipped |
+| `tasks` | Tracks session work and promotes selected tasks to the board. | shipped |
+| `test-gate` | Checks changed tests with fail-first and mutation evidence. | shipped |
+| `weekly-build-recap` | Drafts a local weekly shipping recap and social posts. | shipped |
+
+The shipped how notes guide these workflows, but `how` is not an invocable skill.
 
 **Status: active development and testing.** The disabled NUDGE classifier and
 private evidence store are packaged foundations, not a running recovery
@@ -210,7 +242,7 @@ The result is a clean handoff from a session plan to durable work. Selected task
 </details>
 
 <details>
-<summary><strong>decision-to-spec, one reviewable assignment</strong> <em>(packaged skill)</em></summary>
+<summary><strong>decision-to-spec, one reviewable assignment</strong> <em>(shipped)</em></summary>
 
 The `decision-to-spec` skill turns a decision into one reviewable planning
 brief. Invoke `/skill:decision-to-spec` or ask for the workflow explicitly.
@@ -989,45 +1021,6 @@ acceptance with all prohibited effects absent.
 The `templates/AGENTS.md` file is a starting contract you can copy into any
 repository that uses Pi agents. It asks for controlled tasks and realistic tests, and
 treats agent reports as untrusted evidence. It never overwrites an existing `AGENTS.md`. Add your project rules below it.
-
-## Packaged skills
-
-*Methods your agent loads on request. A skill never grants authority.*
-
-<details>
-<summary><strong>Packaged driver skills</strong></summary>
-
-The package registers native skills alongside the extensions. Invoke one with
-`/skill:<name>`. Pi may load a skill description on its own; loading is not
-approval to act, and no skill grants permission to merge, publish, install
-or change a model route.
-
-- **Driver workflows.** `tasks` (session plan to durable board), `pulse`
-  (Board Pulse), `decision-to-spec` (one reviewable assignment),
-  `harvest-lessons` and `public-pr-wording`.
-- **harvest-lessons.** Mines past corrections in an approved repository: PR
-  reviews, revert and fixup commits, failed CI and session logs. It groups
-  them into patterns, ranks them, and hands the top ones to `correct-pi` as
-  guarded draft PRs. Its `agentic_harvest_lessons` collector is read-only and
-  never writes files, posts or opens PRs.
-- **public-pr-wording.** Drafts PR titles and bodies in four sections, in
-  the repository owner's first person, with no bot or model names and no
-  local paths. The bundled lint enforces length caps and wording rules; your
-  own names go in a personal config that is never committed.
-- **correct-pi.** Turns an owner-selected recurring correction into a
-  structural guard, then requires a check that catches a real past failure.
-- **pstack methods.** The separate `pi-poteto-mode` package supplies the
-  pstack skill ports. Install it separately if you need those methods.
-  `correct-pi` remains a native driver skill.
-- **Packaged-skill checks.** Public CI verifies skill frontmatter and package
-  registration, then loads the packed artifact in a fresh consumer and checks
-  for Pi skill diagnostics. This is release validation, not an install-time
-  permission or security boundary.
-
-The historical comparison of pstack ports remains in
-`docs/pstack-pi-ports-comparison.md`; the driver no longer ships those ports.
-
-</details>
 
 ## Install
 

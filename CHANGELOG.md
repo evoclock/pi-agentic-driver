@@ -1,6 +1,11 @@
 ## 3.1.8
 
-- Keep worker delivery attribution and add local task and skill observations.
+- Add the evidence-first delivery workflow skill with example plans and a static validator. The plans do not run workflows or enforce approvals.
+- Record local task and skill observations with visible capture gaps; observations do not prove successful completion.
+- Keep worker delivery attribution across reconnects and recover labeled worker tabs from the live pane list.
+- Improve gate and test-gate checks, including host-observed evidence for corrected fixtures and isolated test environments.
+- Generate the codebase inventory locally instead of shipping it in the public repository or package.
+- Explain how supported external bot hosts can use the guarded Pi worker spawn tool without claiming a cross-framework execution hook.
 
 ## 3.1.7
 

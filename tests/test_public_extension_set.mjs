@@ -171,6 +171,42 @@ test("every shipped skill folder has valid frontmatter and package registration"
   assert.deepEqual([...pkg.pi.skills].sort(), expected.sort(), "shipped skill registration drift");
 });
 
+// Why: a public README must list every tracked, exported skill and registered tool in separate shipped tables.
+test("shipped README tables cover tracked skills and registered tools", () => {
+  const readme = readFileSync(join(REPO_ROOT, "README.md"), "utf8");
+  const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
+  const shipped = readme.split("## Shipped features\n")[1]?.split("\n## Code review and planning")[0];
+  assert.ok(shipped, "missing Shipped features section");
+  const tables = [...shipped.matchAll(/\| Name \| What it does \| Status \|\n\|[-| ]+\|\n((?:\|[^\n]+\n)+)/g)];
+  assert.equal(tables.length, 2, "one tools table followed by one skills table");
+  const [tools, skills] = tables.map((match) => match[1]);
+  assert.match(shipped, /\/skill:<name>.*loading.*not approval.*pi-poteto-mode/i);
+  const trackedSkills = execFileSync("git", ["ls-files", "skills/*/SKILL.md"], { cwd: REPO_ROOT, encoding: "utf8" })
+    .trim().split("\n").filter(Boolean);
+  for (const skill of trackedSkills) {
+    const name = skill.split("/")[1];
+    if (name === "release-public") continue; // Private-only: excluded by the public-sync manifest.
+    if (!pkg.pi.skills.includes(`./skills/${name}`) || !pkg.files.some((entry) => entry === skill || entry === `skills/${name}`)) continue;
+    assert.match(skills, new RegExp(`^\\| \\x60${name}\\x60 \\| [^\\n]+ \\| shipped \\|$`, "m"), `missing public skill: ${name}`);
+    assert.doesNotMatch(tools, new RegExp(`\\| \\x60${name}\\x60 \\|`), `skill in tools table: ${name}`);
+  }
+  assert.doesNotMatch(skills, /\| `(?:release-public|how)` \|/);
+  const registered = new Set();
+  for (const path of pkg.files.filter((entry) => entry.match(/^(?:extensions|scripts)\/.+\.[cm]?[jt]s$/))) {
+    if (!existsSync(join(REPO_ROOT, path))) continue;
+    for (const match of readFileSync(join(REPO_ROOT, path), "utf8").matchAll(/\bname:\s*["'](agentic_[a-z0-9_]+)["']/g)) {
+      registered.add(match[1]);
+    }
+  }
+  assert.ok(registered.size >= 10, "registered tool discovery unexpectedly empty");
+  for (const name of registered) assert.match(tools, new RegExp(`\\| \\x60${name}\\x60 \\|`), `missing registered tool: ${name}`);
+  for (const name of ["agentic_herdr_register_repository", "agentic_recovery_evidence_summary",
+    "inventory-refresh", "task-board", "task-skill-observability", "treehouse-recycle"]) {
+    assert.ok(tools.includes(name), `missing tool or extension: ${name}`);
+  }
+  assert.doesNotMatch(shipped, /candidate|not published|packaged skill|shipped;/i);
+});
+
 // Why: retired skill ports must not reappear as package resources.
 test("only the native correction skill uses a Pi suffix", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
