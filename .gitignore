@@ -1,6 +1,7 @@
 node_modules/
 scratch/*
 !scratch/.gitkeep
+.scratch/
 .driver/test-gate-evidence/
 /scan-terms.local.json
 /.ci-buildkite/
@@ -30,3 +31,4 @@ skills/weekly-build-recap/banned.local.json
 .pad-scratch/
 .ci-scratch/
 .treehouse/
+pipeline_output/

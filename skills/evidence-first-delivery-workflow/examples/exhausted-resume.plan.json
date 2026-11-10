@@ -1,0 +1,35 @@
+{
+  "schema": "evidence-first-delivery-plan.v1",
+  "planId": "efdw-example-exhausted-resume",
+  "unitId": "pad-skill-unit-resume-001",
+  "mode": "resume",
+  "continuationDefault": "automatic",
+  "humanDecisions": ["material-undefined-product-decision", "new-authority", "review-budget-exhaustion", "owner-only-merge"],
+  "matrixRefs": { "capabilities": "GUARDS.md#adapter-capability-matrix", "bypasses": "GUARDS.md#framework-bypass-matrix" },
+  "start": "resume",
+  "artifactHead": "f4b55a11ecdf3671814ce441a8426a8bb7458b0b",
+  "baseline": { "unitId": "pad-skill-unit-resume-001", "artifactHead": "f4b55a11ecdf3671814ce441a8426a8bb7458b0b", "consumedReviews": 2 },
+  "contract": { "definition": "Resume exhausted review budget into terminal recovery without reopening independent review.", "definitionHash": "3f5b39227a58280dd95849ba1c700787e0aa1b7285eb79667162ce9896fc0c26", "sourceHash": "ca5bcd09e76ed4c61d0861bb0eef3bc44ac52636a60394250d31c99649421f80" },
+  "methodHash": "79a122bd37926b46eee5ed9f3c16289d21e95fee43002280ba4e72dd7c590647",
+  "modelMapHash": "9c2abfd67d4edf9af6a74ceef2de28a46bd5c156527ff0bc5e4b57653d52b9df",
+  "roles": { "development": "example-development-model", "independent-review": null },
+  "writer": { "actor": "development", "epoch": 2 },
+  "review": { "limit": 2, "consumed": 2, "previousInvolvement": ["development", "independent-review"] },
+  "nodes": [
+    { "id": "resume", "kind": "contract" },
+    { "id": "recovery", "kind": "recovery", "actor": null, "model": null },
+    { "id": "delivery", "kind": "delivery" },
+    { "id": "owner-wait", "kind": "owner-wait" },
+    { "id": "cleanup", "kind": "cleanup" },
+    { "id": "stop", "kind": "stop" }
+  ],
+  "edges": [
+    { "from": "resume", "to": "recovery", "outcome": "exhausted", "requires": "prior-review-counter-and-findings" },
+    { "from": "recovery", "to": "delivery", "outcome": "accepted", "requires": "terminal-acceptance-and-writer-transfer" },
+    { "from": "recovery", "to": "stop", "outcome": "hold", "requires": "unresolved-findings" },
+    { "from": "recovery", "to": "stop", "outcome": "cancel", "requires": "cancel-and-process-reconciliation" },
+    { "from": "delivery", "to": "owner-wait", "outcome": "verified", "requires": "delivery-and-head-receipts" },
+    { "from": "owner-wait", "to": "cleanup", "outcome": "integrated", "requires": "owner-confirmed-integration", "continuation": "human" },
+    { "from": "owner-wait", "to": "stop", "outcome": "hold", "requires": "unmerged-preservation-record" }
+  ]
+}

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
 import { normalizeSkillObservation, observationId, summarizeSkillObservations } from '../scripts/enforcement/task_skill_observability_pi.js';
 import observe from '../extensions/task-skill-observability.ts';
 
@@ -77,19 +79,31 @@ function harness(journal = [], session = 's1') {
   const hooks = new Map(); const tools = new Map();
   const pi = { on(name, fn) { hooks.set(name, fn); }, registerTool(def) { tools.set(def.name, def); },
     appendEntry(type, data) { journal.push({ type: 'custom', customType: type, data }); } };
-  const previousSkillsRoot = process.env.PI_POTETO_SKILLS_ROOT;
+  const previous = process.env.PI_POTETO_SKILLS_ROOT;
+  process.env.PI_POTETO_SKILLS_ROOT = '/scratch/observer-skills';
   try {
-    process.env.PI_POTETO_SKILLS_ROOT = '/scratch/observer-skills';
     observe(pi);
   } finally {
-    if (previousSkillsRoot === undefined) delete process.env.PI_POTETO_SKILLS_ROOT;
-    else process.env.PI_POTETO_SKILLS_ROOT = previousSkillsRoot;
+    if (previous === undefined) delete process.env.PI_POTETO_SKILLS_ROOT;
+    else process.env.PI_POTETO_SKILLS_ROOT = previous;
   }
   const ctx = { sessionManager: { getSessionId: () => session, getBranch: () => journal } };
   const emit = (name, e) => hooks.get(name)(e, ctx);
   const declaration = (id, params) => tools.get('agentic_task_skill_observation').execute(id, params, null, null, ctx);
   return { journal, emit, declaration };
 }
+
+// Why: observability cannot certify itself through an author-modified shared verifier, including in public exports.
+test('shared verifier matches the trusted pre-observer implementation', () => {
+  const path = 'scripts/test_gate_runner.py';
+  const digest = 'e741ef55f909c3af8eb135a40b6de1001af7ef369cb924b5fb6d4be6a2915d8a';
+  const file = new URL(`../${path}`, import.meta.url);
+  assert.ok(existsSync(file), `trusted verification file missing: ${path}`);
+  assert.equal(createHash('sha256').update(readFileSync(file)).digest('hex'), digest, path);
+  const previous = process.env.PI_POTETO_SKILLS_ROOT;
+  harness();
+  assert.equal(process.env.PI_POTETO_SKILLS_ROOT, previous, 'fixture must restore caller environment');
+});
 
 // Why: Duplicate starts and observer calls must not create extra attempts or fabricate step evidence.
 test('live hooks correlate task, reject observer/unrelated refs and retain one attempt', async () => {

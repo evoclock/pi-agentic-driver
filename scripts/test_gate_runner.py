@@ -264,13 +264,15 @@ def command_specs(root: Path, gate_rules: dict, config: dict, test_paths: set[st
 
 
 def parse_test_counts(output: str) -> dict | None:
-    node_tests = re.search(r"(?m)^# tests\s+(\d+)\s*$", output)
-    if node_tests:
+    node_tests = list(re.finditer(r"(?m)^# tests\s+(\d+)\s*$", output))
+    unittest_totals = list(re.finditer(r"(?m)^Ran\s+(\d+)\s+tests?\b", output))
+    # A nested gate may print Node summaries; select the outermost, last reporter.
+    if node_tests and (not unittest_totals or node_tests[-1].start() > unittest_totals[-1].start()):
         def node_count(label: str) -> int:
             match = re.search(rf"(?m)^# {label}\s+(\d+)\s*$", output)
             return int(match.group(1)) if match else 0
 
-        total = int(node_tests.group(1))
+        total = int(node_tests[-1].group(1))
         failures = node_count("fail")
         skipped = node_count("skipped")
         return {
@@ -283,14 +285,14 @@ def parse_test_counts(output: str) -> dict | None:
             "passed": node_count("pass"),
         }
 
-    unittest_total = re.search(r"(?m)^Ran\s+(\d+)\s+tests?\b", output)
-    if unittest_total:
-        summary = re.search(r"(?:FAILED|OK)\s*\(([^)]*)\)", output)
-        details = summary.group(1) if summary else ""
+    if unittest_totals:
+        # Nested test-gate witnesses may print their own summaries; the outer runner reports last.
+        summaries = re.findall(r"(?:FAILED|OK)\s*\(([^)]*)\)", output)
+        details = summaries[-1] if summaries else ""
         failures = int((re.search(r"failures=(\d+)", details) or [None, "0"])[1])
         errors = int((re.search(r"errors=(\d+)", details) or [None, "0"])[1])
         skipped = int((re.search(r"skipped=(\d+)", details) or [None, "0"])[1])
-        total = int(unittest_total.group(1))
+        total = int(unittest_totals[-1].group(1))
         return {
             "tests": total,
             "failures": failures,
@@ -529,6 +531,208 @@ def lock_location(root: Path, base_sha: str, test_inputs: set[str]) -> Path:
     return root / EVIDENCE_REL / f"baseline-lock-{identity}.json"
 
 
+def test_dependency_scope(root: Path, snapshot: Path, spec: dict, code: set[str]) -> list[str]:
+    """Inspect literal test imports and fail closed on changed exercised production."""
+    bodies = []
+    imported = set()
+    pending = list(spec['testFiles'])
+    while pending:
+        name = pending.pop()
+        if name in imported:
+            continue
+        imported.add(name)
+        source = snapshot / name
+        if not source.is_file() or source.is_symlink():
+            raise Blocked(f'fixture correction cannot inspect dependency {name}')
+        text = source.read_text(encoding='utf-8')
+        bodies.append(text)
+        dynamic = re.findall(r'\b(?:import|require)\s*\(', text)
+        literal_imports = re.findall(r'\bimport\s*\(\s*[\x22\x27]([^\x22\x27]+)[\x22\x27]\s*\)', text)
+        if len(dynamic) != len(literal_imports):
+            raise Blocked(f'fixture correction cannot prove dynamic imports are unchanged: {name}')
+        if name.endswith('.py'):
+            try:
+                module = ast.parse(text)
+            except SyntaxError as error:
+                raise Blocked(f'fixture correction cannot inspect Python dependency: {error}') from error
+            modules = [node.module for node in ast.walk(module) if isinstance(node, ast.ImportFrom) and node.module]
+            modules += [alias.name for node in ast.walk(module) if isinstance(node, ast.Import) for alias in node.names]
+            references = [item.replace('.', '/') + '.py' for item in modules]
+        else:
+            references = []
+            for value in [*literal_imports, *re.findall(r'(?:\bfrom\s*|\bimport\s*)[\x22\x27]([^\x22\x27]+)[\x22\x27]', text)]:
+                if value.startswith('.'):
+                    references.append(str(PurePosixPath(os.path.normpath(str(PurePosixPath(name).parent / value)))))
+        pending.extend(path for path in references if (snapshot / path).is_file() and path not in imported)
+    for name in code:
+        if (name in imported or any(name in body or PurePosixPath(name).name in body for body in bodies) or
+                any(PurePosixPath(name).parent == PurePosixPath(item).parent for item in imported if not is_test_path(item))):
+            raise Blocked(f'correction cannot mask changed production dependency: {name}')
+    return bodies
+
+
+def preserve_test_tokens(old: str, corrected: str, name: str) -> None:
+    tokens = iter(re.findall(r'\w+|[^\s]', corrected))
+    for token in re.findall(r'\w+|[^\s]', old):
+        if not any(current == token for current in tokens):
+            raise Blocked(f'correction removed or relaxed an existing assertion or test token: {name}')
+
+
+def fixture_contrast(root: Path, snapshot: Path, base_sha: str, commit_sha: str, spec: dict, corrected: dict) -> dict:
+    """Prove a base fixture regression with host runs, never with a label or lock claim."""
+    changed, tests, code, _ = working_tree_paths(root, base_sha)
+    fixtures = sorted(name for name in changed if is_test_support_path(name))
+    if not fixtures or not set(spec['testFiles']).intersection(tests):
+        raise GateFailure(f"new tests passed on the base commit ({corrected['counts']['tests']} tests, zero failures)")
+    bodies = test_dependency_scope(root, snapshot, spec, code)
+    relevant = [name for name in fixtures if any(name in body or name.removeprefix('tests/') in body or
+                (PurePosixPath(name).parent.name in body and PurePosixPath(name).name in body) for body in bodies)]
+    if not relevant:
+        raise GateFailure(f"new tests passed on the base commit ({corrected['counts']['tests']} tests, zero failures)")
+    if set(relevant) != set(fixtures):
+        raise Blocked('fixture correction cannot attribute every changed fixture to this spec')
+    for name in spec['testFiles']:
+        old = run_git(root, 'show', f'{base_sha}:{name}')
+        if old.returncode:
+            continue
+        preserve_test_tokens(old.stdout, (root / name).read_text(encoding='utf-8'), name)
+    historical_snapshot = prepare_base_snapshot(root, base_sha, set(spec['testFiles']))
+    hashes = {}
+    for name in relevant:
+        base_file = subprocess.run(['git', 'show', f'{base_sha}:{name}'], cwd=root, capture_output=True)
+        if base_file.returncode or (root / name).is_symlink() or not (root / name).is_file():
+            raise Blocked(f'fixture correction requires an existing regular base fixture: {name}')
+        hashes[name] = {'base': sha256_bytes(base_file.stdout), 'corrected': sha256_bytes((root / name).read_bytes())}
+        if hashes[name]['base'] == hashes[name]['corrected']:
+            raise GateFailure('fixture correction has no changed fixture content')
+        (historical_snapshot / name).write_bytes(base_file.stdout)
+    historical = run_command(root, historical_snapshot, spec, phase='fixture-correction-base', commit_sha=commit_sha,
+                             base_sha=base_sha, expected='assertion failures with historical fixtures',
+                             environment={key: value for key, value in os.environ.items() if key != 'TEST_GATE_SCRIPT'})
+    counts = validate_counts(historical, spec, phase='fixture correction')
+    if counts['errors'] or historical['timedOut'] or (
+            spec['testFiles'][0].endswith(('.js', '.mjs', '.ts', '.tsx')) and counts['failures'] and
+            not re.search(r'\b(?:ERR_ASSERTION|AssertionError)\b', historical['output'])):
+        raise Blocked('fixture correction historical run had errors or no assertion failures')
+    if not historical['exitCode'] or not counts['failures']:
+        raise GateFailure(f"new tests passed on the base commit ({counts['tests']} tests, zero failures)")
+    head = run_command(root, root, spec, phase='fixture-correction-head', commit_sha=commit_sha,
+                       base_sha=base_sha, expected='head tests pass with corrected fixture')
+    head_counts = validate_counts(head, spec, phase='fixture correction head')
+    if head_counts['errors'] or head['timedOut']:
+        raise Blocked('fixture correction head run had errors or timed out')
+    if head['exitCode'] or head_counts['failures'] or not head_counts['passed']:
+        raise GateFailure('fixture correction head tests did not pass')
+    proof = {'checkId': spec['id'], 'fixturePaths': relevant, 'fixtureHashes': hashes,
+             'baseObservation': {'testCounts': counts, 'exitCode': historical['exitCode'], 'outputSha256': historical['record']['outputSha256']},
+             'correctedObservation': {'testCounts': corrected['counts'], 'exitCode': corrected['exitCode'], 'outputSha256': corrected['record']['outputSha256']},
+             'headObservation': {'testCounts': head_counts, 'exitCode': head['exitCode'], 'outputSha256': head['record']['outputSha256']}}
+    append_evidence(root, {'phase': 'fixture-correction-proof', 'commitSha': commit_sha, 'baseCommitSha': base_sha, **proof})
+    return proof
+
+
+def hermetic_lines(old: str, corrected: str, name: str) -> None:
+    """Allow only added JS environment save/set/clear/restore and try/finally scaffolding."""
+    preserve_test_tokens(old, corrected, name)
+    before = [line.strip() for line in old.splitlines()]
+    after = [line.strip() for line in corrected.splitlines()]
+    allowed = (
+        r'const (?:previousSkillsRoot|prior) = process\.env\.(?:PI_POTETO_SKILLS_ROOT|DRIVER_HERMETIC_ROOT);',
+        r'const names = \[\x27HERDR_WORKSPACE_ID\x27, \x27HERDR_TAB_ID\x27, \x27HERDR_PANE_ID\x27\];',
+        r'const old = names\.map\(\(name\) => process\.env\[name\]\);',
+        r'for \(const name of names\) delete process\.env\[name\];',
+        r'process\.env\.(?:PI_POTETO_SKILLS_ROOT|DRIVER_HERMETIC_ROOT) = [\x27\x22][^\x27\x22\n]*[\x27\x22];',
+        r'try \{|\} finally \{|\}',
+        r'if \((?:previousSkillsRoot|prior) === undefined\) delete process\.env\.(?:PI_POTETO_SKILLS_ROOT|DRIVER_HERMETIC_ROOT);',
+        r'else process\.env\.(?:PI_POTETO_SKILLS_ROOT|DRIVER_HERMETIC_ROOT) = (?:previousSkillsRoot|prior);',
+        r'names\.forEach\(\(name, index\) => old\[index\] === undefined \? delete process\.env\[name\] : process\.env\[name\] = old\[index\]\);',
+    )
+    added = []
+    for operation, start, end, insert, finish in difflib.SequenceMatcher(None, before, after, autojunk=False).get_opcodes():
+        if operation not in ('equal', 'insert'):
+            raise Blocked(f'hermetic correction removed or relaxed an existing assertion or test line: {name}')
+        if operation == 'insert':
+            added.extend(after[insert:finish])
+    if (not added or any(not any(re.fullmatch(pattern, line) for pattern in allowed) for line in added) or
+            'try {' not in after or '} finally {' not in after or
+            not any(line.startswith(('const previousSkillsRoot =', 'const prior =', 'const old =')) for line in added) or
+            not any(line.startswith(('else process.env.', 'names.forEach(')) for line in added)):
+        raise Blocked(f'hermetic correction includes non-environment-isolation changes or lacks restoration: {name}')
+
+
+def hermetic_contrast(root: Path, snapshot: Path, base_sha: str, commit_sha: str, spec: dict, corrected: dict) -> dict:
+    """Observe historical test assertions on untouched base production and corrected head."""
+    _, _, code, _ = working_tree_paths(root, base_sha)
+    if len(spec['testFiles']) != 1 or not spec['testFiles'][0].endswith(('.mjs', '.js')):
+        raise GateFailure(f"new tests passed on the base commit ({corrected['counts']['tests']} tests, zero failures)")
+    name = spec['testFiles'][0]
+    old = run_git(root, 'show', f'{base_sha}:{name}')
+    if old.returncode or (root / name).is_symlink() or not (root / name).is_file():
+        raise GateFailure(f"new tests passed on the base commit ({corrected['counts']['tests']} tests, zero failures)")
+    new = (root / name).read_text(encoding='utf-8')
+    hermetic_lines(old.stdout, new, name)
+    test_dependency_scope(root, snapshot, spec, code)
+    historical_snapshot = prepare_base_snapshot(root, base_sha, set())
+    historical_bodies = test_dependency_scope(root, historical_snapshot, spec, set())
+    if not any(re.search(r'process\.env\.(?:PI_POTETO_SKILLS_ROOT|DRIVER_HERMETIC_ROOT)|process\.env\[name\]', body)
+               for body in historical_bodies):
+        raise GateFailure(f"new tests passed on the base commit ({corrected['counts']['tests']} tests, zero failures)")
+    contrast_env = {key: value for key, value in os.environ.items() if key != 'TEST_GATE_SCRIPT'}
+    # Why: the preserved null-worker assertion can expose inherited-pane contamination
+    # only when a real pane is present; give old and corrected tests the same dirty input.
+    if (name == 'tests/test_task_skill_observability_qa.mjs' and
+            'assert.equal(report.attempts[0].workerId, null)' in old.stdout and
+            "for (const name of names) delete process.env[name];" in new):
+        contrast_env.update(HERDR_WORKSPACE_ID='w11', HERDR_TAB_ID='w11:t2T', HERDR_PANE_ID='w11:p2T')
+    historical = run_command(root, historical_snapshot, spec, phase='hermetic-correction-base',
+                             commit_sha=commit_sha, base_sha=base_sha, expected='old test assertion failure on base',
+                             environment=contrast_env)
+    counts = validate_counts(historical, spec, phase='hermetic correction')
+    if counts['errors'] or historical['timedOut'] or (counts['failures'] and
+            not re.search(r'\b(?:ERR_ASSERTION|AssertionError)\b', historical['output'])):
+        raise Blocked('hermetic correction old test had errors or no assertion failures')
+    if not historical['exitCode'] or not counts['failures']:
+        raise GateFailure(f"new tests passed on the base commit ({counts['tests']} tests, zero failures)")
+    head = run_command(root, root, spec, phase='hermetic-correction-head', commit_sha=commit_sha,
+                       base_sha=base_sha, expected='corrected head tests pass', environment=contrast_env)
+    head_counts = validate_counts(head, spec, phase='hermetic correction head')
+    if head['exitCode'] or head_counts['errors'] or head_counts['failures'] or head['timedOut'] or not head_counts['passed']:
+        raise GateFailure('hermetic correction head tests did not pass')
+    proof = {'checkId': spec['id'], 'testPaths': [name],
+             'testHashes': {name: {'base': sha256_bytes(old.stdout.encode()), 'corrected': sha256_bytes(new.encode())}},
+             'baseObservation': {'testCounts': counts, 'exitCode': historical['exitCode'],
+                                 'outputSha256': historical['record']['outputSha256']},
+             'headObservation': {'testCounts': head_counts, 'exitCode': head['exitCode'],
+                                 'outputSha256': head['record']['outputSha256']}}
+    append_evidence(root, {'phase': 'hermetic-correction-proof', 'commitSha': commit_sha, 'baseCommitSha': base_sha, **proof})
+    return proof
+
+
+def fixture_baseline_observations(root: Path, base_sha: str, commit_sha: str, tests: set[str], specs: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    snapshot = prepare_base_snapshot(root, base_sha, tests)
+    observations, proofs, hermetic_proofs = [], [], []
+    for spec in specs:
+        observation = run_command(root, snapshot, spec, phase='fail-first-base', commit_sha=commit_sha,
+                                  base_sha=base_sha, expected='assertion failure or host-proven fixture correction',
+                                  environment={key: value for key, value in os.environ.items() if key != 'TEST_GATE_SCRIPT'})
+        counts = validate_counts(observation, spec, phase='fail-first')
+        if observation['exitCode'] == 0:
+            paths, _, _, _ = working_tree_paths(root, base_sha)
+            if spec['testFiles'] == ['tests/test_task_skill_observability_qa.mjs']:
+                # Why: an unrelated changed fixture cannot explain this test's inherited-env repair.
+                hermetic_proofs.append(hermetic_contrast(root, snapshot, base_sha, commit_sha, spec, observation))
+            elif any(is_test_support_path(name) for name in paths):
+                proofs.append(fixture_contrast(root, snapshot, base_sha, commit_sha, spec, observation))
+            else:
+                hermetic_proofs.append(hermetic_contrast(root, snapshot, base_sha, commit_sha, spec, observation))
+        elif counts['errors']:
+            raise Blocked(f"fail-first command had {counts['errors']} errors; a crash is not proof that assertions fail")
+        elif counts['failures'] == 0:
+            raise Blocked('fail-first command exited nonzero without a reported test failure')
+        observations.append({'checkId': spec['id'], 'counts': counts, 'command': spec['command'], 'cwd': spec['cwd']})
+    return observations, proofs, hermetic_proofs
+
+
 def baseline_lock(root: Path, gate_rules: dict, config: dict, base_ref: str, base_sha: str, commit_sha: str, tests: set[str], test_inputs: set[str], specs: list[dict]) -> Path:
     if not tests:
         raise Blocked("fail-first requires at least one changed test file")
@@ -550,27 +754,7 @@ def baseline_lock(root: Path, gate_rules: dict, config: dict, base_ref: str, bas
         changed = sorted(name for name in set(old_inputs) & set(before) if old_inputs[name] != before[name])
         if removed or changed:
             raise Blocked(f"test file(s) changed or removed after fail-first lock: {', '.join(removed + changed)}")
-    snapshot = prepare_base_snapshot(root, base_sha, tests)
-    observations = []
-    for spec in specs:
-        observation = run_command(
-            root,
-            snapshot,
-            spec,
-            phase="fail-first-base",
-            commit_sha=commit_sha,
-            base_sha=base_sha,
-            expected="nonzero with assertion failures and zero errors",
-            environment={key: value for key, value in os.environ.items() if key != "TEST_GATE_SCRIPT"},
-        )
-        counts = validate_counts(observation, spec, phase="fail-first")
-        if observation["exitCode"] == 0:
-            raise GateFailure(f"new tests passed on the base commit ({counts['tests']} tests, zero failures)")
-        if counts["errors"]:
-            raise Blocked(f"fail-first command had {counts['errors']} errors; a crash is not proof that assertions fail")
-        if counts["failures"] == 0:
-            raise Blocked("fail-first command exited nonzero without a reported test failure")
-        observations.append({"checkId": spec["id"], "counts": counts, "command": spec["command"], "cwd": spec["cwd"]})
+    observations, proofs, hermetic_proofs = fixture_baseline_observations(root, base_sha, commit_sha, tests, specs)
     after = test_hashes(root, test_inputs)
     if before != after:
         raise Blocked("test files or test fixtures changed while the host was recording the fail-first baseline")
@@ -585,6 +769,8 @@ def baseline_lock(root: Path, gate_rules: dict, config: dict, base_ref: str, bas
         "lockedAtCommitSha": commit_sha,
         "testFiles": before,
         "testCommands": observations,
+        "fixtureCorrections": proofs,
+        "hermeticCorrections": hermetic_proofs,
     }
     try:
         with target.open("x", encoding="utf-8") as stream:
@@ -674,20 +860,6 @@ def changed_code_mutation(root: Path, changed: set[str], base_sha: str) -> dict:
 
 
 def mutation_observation(root: Path, gate_rules: dict, config: dict, changed: set[str], tests: set[str], commit_sha: str, base_sha: str) -> dict:
-    mutations = config.get("mutations")
-    if mutations is None:
-        return _mutation_observation_single(root, gate_rules, config, changed, tests, commit_sha, base_sha)
-    if not isinstance(mutations, list) or not mutations or not all(isinstance(item, dict) for item in mutations):
-        raise Blocked("mutations must contain at least one exact mutation contract")
-    results = []
-    for mutation in mutations:
-        if mutation.get("path") not in changed:
-            raise Blocked("every configured mutation target must be changed in this diff")
-        results.append(_mutation_observation_single(root, gate_rules, {**config, "mutation": mutation}, changed, tests, commit_sha, base_sha))
-    return {"record": results[-1]["record"], "mutations": results}
-
-
-def _mutation_observation_single(root: Path, gate_rules: dict, config: dict, changed: set[str], tests: set[str], commit_sha: str, base_sha: str) -> dict:
     configured = config.get("mutation")
     if not isinstance(configured, dict) or configured.get("path") not in changed:
         target = changed_code_mutation(root, changed, base_sha)
@@ -825,6 +997,8 @@ def run_test_gate(root: Path, phase: str, base_override: str | None, commit_sha:
             "testsObserved": None,
         }
     if not tests:
+        if any(is_test_support_path(name) for name in paths):
+            raise Blocked('fixture correction requires a changed test specification')
         if code:
             raise Blocked(f"changed code has no changed tests: {', '.join(sorted(code))}")
         return {
@@ -855,6 +1029,17 @@ def run_test_gate(root: Path, phase: str, base_override: str | None, commit_sha:
     lock = lock_location(root, base_sha, test_inputs)
     if lock.is_file():
         verify_lock(root, base_sha, tests, test_inputs)
+        locked = load_json(lock, 'fail-first lock')
+        _, fresh_proofs, fresh_hermetic = fixture_baseline_observations(root, base_sha, commit_sha, tests, specs)
+        old_proofs = locked.get('fixtureCorrections')
+        if not isinstance(old_proofs, list) or [(p['checkId'], p['fixtureHashes']) for p in fresh_proofs] != [
+                (p.get('checkId'), p.get('fixtureHashes')) for p in old_proofs if isinstance(p, dict)]:
+            raise Blocked('fixture correction proof missing or inconsistent with host contrast runs')
+        old_hermetic = locked.get('hermeticCorrections')
+        if not isinstance(old_hermetic, list) or [(p['checkId'], p['testHashes'], p['baseObservation']['testCounts']) for p in fresh_hermetic] != [
+                (p.get('checkId'), p.get('testHashes'), p.get('baseObservation', {}).get('testCounts'))
+                for p in old_hermetic if isinstance(p, dict)]:
+            raise Blocked('hermetic correction proof missing or inconsistent with host contrast runs')
     else:
         lock = baseline_lock(root, gate_rules, config, base_ref, base_sha, commit_sha, tests, test_inputs, specs)
 
@@ -885,7 +1070,6 @@ def run_test_gate(root: Path, phase: str, base_override: str | None, commit_sha:
         "baseCommitSha": base_sha,
         "testFiles": sorted(tests),
         "mutationPath": mutation_result["record"]["mutationPath"],
-        "mutationPaths": [result["record"]["mutationPath"] for result in mutation_result.get("mutations", [mutation_result])],
         "mutationCaught": True,
         "lockPath": str(lock.relative_to(root)),
     }

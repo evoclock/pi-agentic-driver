@@ -26,6 +26,12 @@ def check(repo: Path) -> tuple[bool, str]:
     if any(Path(name).suffix in EXTENSIONS for name in changed if name):
         return False, "source has unstaged changes; stage the intended code before refreshing the inventory"
     staged = subprocess.run(["git", "-C", str(repo), "show", f":{INVENTORY}"], capture_output=True)
+    ignored = subprocess.run(["git", "-C", str(repo), "check-ignore", "--no-index", "-q", INVENTORY],
+                             capture_output=True).returncode == 0
+    if ignored:
+        if staged.returncode == 0:
+            return False, "ignored inventory is still staged; retire it from the public commit"
+        return True, "local inventory matches the staged source"
     if staged.returncode != 0 or staged.stdout != content:
         return False, "review and stage pipeline_output/codebase_inventory.jsonl, then retry the commit"
     return True, "inventory matches the staged source"
