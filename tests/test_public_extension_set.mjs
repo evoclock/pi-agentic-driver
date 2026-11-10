@@ -56,6 +56,11 @@ test("published files contain no legacy board-client name", () => {
 
 // Why: only guards present in this tree may be registered or packaged.
 test("vendored guard registration matches source presence without duplicate extension paths", () => {
+  if (existsSync(join(REPO_ROOT, "scripts/public_sync.py"))) {
+    assert.doesNotThrow(() => execFileSync("python3", ["tests/test_public_sync.py", "PublicSyncTests.test_dry_run_is_repeatable_and_preserves_remotes"], {
+      cwd: REPO_ROOT, encoding: "utf8",
+    }), "the private curator must remove excluded guard registrations");
+  }
   const pkg = JSON.parse(readFileSync(process.env.PACKAGE_MANIFEST || join(REPO_ROOT, "package.json"), "utf8"));
   const guards = ["env-guard", "pr-merge-guard", "pr-message-guard"];
   assert.ok(pkg.pi.extensions.includes("./extensions"));
@@ -98,6 +103,7 @@ test("package file list matches the public extension set", () => {
     "extensions/pulse.ts",
     "extensions/recovery-evidence.ts",
     "extensions/task-board.ts",
+    "extensions/task-skill-observability.ts",
     "extensions/tasks.ts",
     "extensions/treehouse-recycle.ts",
   ]);

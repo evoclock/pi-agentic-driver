@@ -674,6 +674,20 @@ def changed_code_mutation(root: Path, changed: set[str], base_sha: str) -> dict:
 
 
 def mutation_observation(root: Path, gate_rules: dict, config: dict, changed: set[str], tests: set[str], commit_sha: str, base_sha: str) -> dict:
+    mutations = config.get("mutations")
+    if mutations is None:
+        return _mutation_observation_single(root, gate_rules, config, changed, tests, commit_sha, base_sha)
+    if not isinstance(mutations, list) or not mutations or not all(isinstance(item, dict) for item in mutations):
+        raise Blocked("mutations must contain at least one exact mutation contract")
+    results = []
+    for mutation in mutations:
+        if mutation.get("path") not in changed:
+            raise Blocked("every configured mutation target must be changed in this diff")
+        results.append(_mutation_observation_single(root, gate_rules, {**config, "mutation": mutation}, changed, tests, commit_sha, base_sha))
+    return {"record": results[-1]["record"], "mutations": results}
+
+
+def _mutation_observation_single(root: Path, gate_rules: dict, config: dict, changed: set[str], tests: set[str], commit_sha: str, base_sha: str) -> dict:
     configured = config.get("mutation")
     if not isinstance(configured, dict) or configured.get("path") not in changed:
         target = changed_code_mutation(root, changed, base_sha)
@@ -871,6 +885,7 @@ def run_test_gate(root: Path, phase: str, base_override: str | None, commit_sha:
         "baseCommitSha": base_sha,
         "testFiles": sorted(tests),
         "mutationPath": mutation_result["record"]["mutationPath"],
+        "mutationPaths": [result["record"]["mutationPath"] for result in mutation_result.get("mutations", [mutation_result])],
         "mutationCaught": True,
         "lockPath": str(lock.relative_to(root)),
     }

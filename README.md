@@ -129,7 +129,8 @@ inventory and local Obsidian/pad/ci/treehouse scratch paths stay out of git.
 | `agentic_decision_evidence` | Records the stated source of a decision (direct or relayed, with quote, where, when and relayer) for a private assignment; it verifies no identity and creates no authority. | shipped |
 | `agentic_relay_check_request` | Checks whether a recorded, scoped relay covers each requested private action; read-only preflight, with authority checked again at the action boundary. | shipped |
 | `agentic_merge_review_record` | Records independent Standards and Spec verdicts for an exact PR head; read only when the merge policy is `agents-after-checks-and-review`, and it merges nothing. | shipped |
-| `agentic_herdr_communication` | Submits one prompt and observes delivery and marked reports; never grants authority. | shipped |
+| `agentic_herdr_communication` | Submits one prompt and observes delivery and marked reports; never grants authority. Labeled-tab recovery keeps worker delivery attribution attached to the live pane. | shipped; included in 3.1.8 candidate |
+| Local task and skill observations | Records task-local reads, submitted skill commands and observed worker provenance, with explicit capture gaps and a read-only cross-session aggregate. These records do not verify successful task completion or correct skill use. | included in 3.1.8 candidate; not published |
 | `agentic_herdr_spawn_worker` | Starts and verifies one Pi worker tab in a trusted repository, reporting partial failures without an automatic retry. | shipped |
 | `agentic_aidr` | A remedy for AI;DR. Reviews writing for clarity, simplicity, brevity, and humanity. | shipped |
 | `agentic_linux_microvm_cutover` | Runs one job in a throwaway QEMU/KVM virtual machine on a Linux host, with a severity-tiered killswitch that stops escape attempts. | user-enabled, native confirmation |

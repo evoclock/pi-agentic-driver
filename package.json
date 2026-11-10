@@ -1,6 +1,6 @@
 {
   "name": "@evoclock/pi-agentic-driver",
-  "version": "3.1.7",
+  "version": "3.1.8",
   "description": "Guardrail extensions for Agentic Driver: advisory review, bounded Herdr communication, and guarded worker lifecycle.",
   "type": "module",
   "scripts": {
@@ -91,6 +91,9 @@
     "scripts/enforcement/recovery_evidence_store_pi.js",
     "extensions/recovery-evidence.ts",
     "scripts/enforcement/recovery_evidence_review_pi.js",
+    "extensions/task-skill-observability.ts",
+    "scripts/enforcement/task_skill_observability_pi.js",
+    "docs/task-skill-observability.md",
     "scripts/enforcement/nudge_reason_state_pi.js",
     "scripts/enforcement/nudge_validate_pi.js",
     ".agentic-driver/nudge.defaults.json",

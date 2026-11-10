@@ -29,6 +29,17 @@ import {
   validateSpawnParams,
 } from "../scripts/enforcement/herdr_lifecycle_pi.js";
 
+// Why: portable spawn fixtures must not carry excluded private entry points into a public candidate.
+test("private curation removes guard routing before portable spawn fixtures are reused", (t) => {
+  if (!existsSync(new URL("../scripts/public_sync.py", import.meta.url))) {
+    t.skip("the private curator is not shipped in a public source tree");
+    return;
+  }
+  assert.doesNotThrow(() => execFileSync("python3", ["tests/test_public_sync.py", "PublicSyncTests.test_dry_run_is_repeatable_and_preserves_remotes"], {
+    cwd: new URL("..", import.meta.url), encoding: "utf8",
+  }), "curation must remove private guard registrations without changing public fixtures");
+});
+
 const WORKER_REPO = "agents-work";
 const MODEL = "fixture/model-x";
 const MODEL_ROLL = "provider model\nfixture model-x\n";
