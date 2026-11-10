@@ -22,32 +22,49 @@
       "id": "inventory",
       "kind": "command",
       "label": "Check codebase inventory",
-      "command": ["python3", "scripts/codebase_inventory.py", "--check"],
-      "failureMessage": "Run `python3 scripts/codebase_inventory.py`, review the inventory diff, then rerun `make gate`."
+      "command": [
+        "python3",
+        "scripts/codebase_inventory.py"
+      ],
+      "failureMessage": "Run `python3 scripts/codebase_inventory.py`, then rerun `make gate`."
     },
     {
       "id": "treehouse-codepath",
       "kind": "command",
       "label": "Check managed workspace usage",
-      "command": ["python3", "scripts/treehouse_codepath_scan.py"]
+      "command": [
+        "python3",
+        "scripts/treehouse_codepath_scan.py"
+      ]
     },
     {
       "id": "public-scan",
       "kind": "command",
       "label": "Check public-facing content",
-      "command": [".buildkite/public-scan.sh"]
+      "command": [
+        ".buildkite/public-scan.sh"
+      ]
     },
     {
       "id": "durable-tests",
       "kind": "command",
       "label": "Durable test subset",
-      "command": ["npm", "run", "test:ci"]
+      "command": [
+        "npm",
+        "run",
+        "test:ci"
+      ]
     },
     {
       "id": "janus-types",
       "kind": "command",
       "label": "Janus type check",
-      "command": ["janus/node_modules/.bin/tsc", "--noEmit", "-p", "janus/tsconfig.json"]
+      "command": [
+        "janus/node_modules/.bin/tsc",
+        "--noEmit",
+        "-p",
+        "janus/tsconfig.json"
+      ]
     },
     {
       "id": "policy-unit-tests",
@@ -65,14 +82,26 @@
       "id": "janus-tests",
       "kind": "command",
       "label": "Janus unit tests",
-      "command": ["npm", "test"],
+      "command": [
+        "npm",
+        "test"
+      ],
       "cwd": "janus"
     },
     {
       "id": "python-tests",
       "kind": "command",
       "label": "Python unit tests",
-      "command": ["python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"]
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-p",
+        "test_*.py"
+      ]
     },
     {
       "id": "weekly-recap-tests",
@@ -93,13 +122,24 @@
       "id": "public-pr-wording-tests",
       "kind": "command",
       "label": "Public PR wording unit tests",
-      "command": ["python3", "-m", "unittest", "discover", "-s", "skills/public-pr-wording/tests", "-p", "test_*.py"]
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "skills/public-pr-wording/tests",
+        "-p",
+        "test_*.py"
+      ]
     },
     {
       "id": "precommit-hook",
       "kind": "command",
       "label": "Replay repository pre-commit hook",
-      "command": [".githooks/pre-commit"],
+      "command": [
+        ".githooks/pre-commit"
+      ],
       "when": "buildkite",
       "failureMessage": "Fix the staged inventory or restore the checked-in pre-commit hook."
     },

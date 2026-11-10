@@ -123,6 +123,16 @@ class TestGateWorkflow(unittest.TestCase):
         )
 
     @unittest.skipUnless(RUNNER.is_file(), "test-gate runner is not implemented yet")
+    def test_nested_unittest_output_uses_outer_summary(self):
+        """Why: nested gate witnesses must not conceal the outer assertion-failure count."""
+        spec = spec_from_file_location("driver_test_gate_runner_nested", RUNNER)
+        module = module_from_spec(spec)
+        spec.loader.exec_module(module)
+        output = "# tests 1\n# pass 1\n# fail 0\nRan 1 test in 0.01s\nOK\nRan 29 tests in 1s\nFAILED (failures=14)\n"
+        self.assertEqual(module.parse_test_counts(output),
+                         {"tests": 29, "failures": 14, "errors": 0, "skipped": 0, "passed": 15})
+
+    @unittest.skipUnless(RUNNER.is_file(), "test-gate runner is not implemented yet")
     def test_always_passing_test_is_rejected_on_base(self):
         """Why: a test that passes before the change does not prove the new behavior."""
         self.put_test(self.fixture_text("vacuous.py"))
@@ -131,6 +141,200 @@ class TestGateWorkflow(unittest.TestCase):
         self.assertEqual(completed.returncode, 1)
         self.assertEqual(result["status"], "fail")
         self.assertIn("passed on the base", result["reason"])
+
+    def fixture_correction(self, *, old="stale", new="ready", original='self.assertEqual(value(), "ready")'):
+        self.write("app.py", "from pathlib import Path\ndef value():\n    return Path('tests/fixtures/value.txt').read_text().strip()\n")
+        self.write("tests/fixtures/value.txt", old)
+        self.put_test('from app import value\nimport unittest\nclass TestValue(unittest.TestCase):\n'
+                      '    def test_value(self):\n        """Why: fixture reports the expected value."""\n'
+                      f'        {original}\n        self.assertTrue(value())\n')
+        self.git("add", ".")
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture baseline")
+        self.write("tests/fixtures/value.txt", new)
+        self.put_test('from app import value\nimport unittest\nclass TestValue(unittest.TestCase):\n'
+                      '    def test_value(self):\n        """Why: fixture reports the expected value."""\n'
+                      f'        {original}\n        self.assertTrue(value())\n        self.assertIsInstance(value(), str)\n')
+
+    def test_fixture_correction_requires_real_contrast_and_records_it(self):
+        """Why: corrected data may pass base only when the historical data demonstrably failed assertions."""
+        self.fixture_correction()
+        completed = self.run_gate("baseline")
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        lock = json.loads(next((self.repo / '.driver/test-gate-evidence').glob('baseline-lock-*.json')).read_text())
+        proof = lock['fixtureCorrections'][0]
+        self.assertEqual(proof['fixturePaths'], ['tests/fixtures/value.txt'])
+        self.assertNotEqual(proof['fixtureHashes']['tests/fixtures/value.txt']['base'], proof['fixtureHashes']['tests/fixtures/value.txt']['corrected'])
+        self.assertGreater(proof['baseObservation']['testCounts']['failures'], 0)
+        self.assertEqual(proof['correctedObservation']['testCounts']['failures'], 0)
+        records = [json.loads(line) for line in (self.repo / '.driver/test-gate-evidence/checks.jsonl').read_text().splitlines()]
+        self.assertTrue(any(row.get('phase') == 'fixture-correction-proof' for row in records))
+
+    def test_fixture_correction_forged_lock_does_not_replace_host_runs(self):
+        """Why: a lock claim without matching host contrast evidence must be refused on check."""
+        self.fixture_correction()
+        baseline = self.run_gate('baseline')
+        self.assertEqual(baseline.returncode, 0, baseline.stdout)
+        lock_path = next((self.repo / '.driver/test-gate-evidence').glob('baseline-lock-*.json'))
+        lock = json.loads(lock_path.read_text())
+        lock['fixtureCorrections'] = []
+        lock_path.write_text(json.dumps(lock))
+        checked = self.run_gate('check')
+        self.assertEqual(checked.returncode, 3, checked.stdout)
+        self.assertIn('proof missing', self.result(checked)['reason'])
+
+    def test_fixture_correction_base_still_passes_is_rejected(self):
+        """Why: a fixture label cannot exempt a suite that also passes with historical data."""
+        self.fixture_correction(old='ready', new='ready ')
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('passed on the base', self.result(result)['reason'])
+
+    def test_fixture_correction_cannot_mask_changed_production(self):
+        """Why: a changed producer exercised by the test makes a fixture-only explanation unsafe."""
+        self.fixture_correction()
+        self.write('app.py', 'def value():\n    return "ready"\n')
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 3, result.stdout)
+        self.assertIn('changed production', self.result(result)['reason'])
+
+    def test_fixture_correction_errors_block(self):
+        """Why: a base fixture crash is not an assertion-based contrast."""
+        self.fixture_correction(old='invalid', new='1', original='self.assertEqual(int(value()), 1)')
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 3, result.stdout)
+        self.assertIn('errors', self.result(result)['reason'])
+
+    def test_new_only_fixture_cannot_claim_historical_contrast(self):
+        """Why: a fixture absent from base has no historical value to replay."""
+        self.write('app.py', "from pathlib import Path\ndef value():\n    return Path('tests/fixtures/value.txt').read_text().strip()\n")
+        self.git('add', '.')
+        self.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'producer without fixture')
+        self.write('tests/fixtures/value.txt', 'ready')
+        self.put_test('from app import value\nimport unittest\nclass TestValue(unittest.TestCase):\n'
+                      '    def test_value(self):\n        """Why: require the expected result."""\n'
+                      '        self.assertEqual(value(), "ready")\n')
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 3, result.stdout)
+        self.assertIn('existing regular base fixture', self.result(result)['reason'])
+
+    def test_fixture_without_changed_test_blocks(self):
+        """Why: fixture-only changes have no changed test specification to validate."""
+        self.fixture_correction()
+        self.git('add', '.')
+        self.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture corrected')
+        self.write('tests/fixtures/value.txt', 'changed again')
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 3, result.stdout)
+        self.assertIn('fixture', self.result(result)['reason'])
+
+    def test_fixture_correction_rejects_removed_assertion(self):
+        """Why: an older assertion must not disappear behind otherwise valid fixture data."""
+        self.fixture_correction()
+        test = self.repo / 'tests/test_contract.py'
+        test.write_text(test.read_text().replace('        self.assertTrue(value())\n', ''), encoding='utf-8')
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 3, result.stdout)
+        self.assertIn('assertion', self.result(result)['reason'])
+
+    def hermetic_correction(self, *, old_env_assert="assert.equal(process.env.DRIVER_HERMETIC_ROOT, 'ready');", code_change=False):
+        self.write('.gitignore', 'scratch/\n.driver/test-gate-evidence/\n')
+        self.write('app.js', 'export const value = () => 1;\n')
+        old = ('import { test } from "node:test";\nimport assert from "node:assert/strict";\n'
+               'import { value } from "../app.js";\n'
+               '// Why: the isolated root must be supplied and the producer must remain stable.\n'
+               'test("root", () => {\n'
+               f'  {old_env_assert}\n  assert.equal(value(), 1);\n}});\n')
+        self.write('tests/test_hermetic.mjs', old)
+        config = json.loads((self.repo / '.driver/test-gate.json').read_text())
+        config['testCountRationales']['node-tests'] = 'Node TAP reports the observed number of cases.'
+        self.write('.driver/test-gate.json', json.dumps(config))
+        self.git('add', '.')
+        self.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'hermetic base')
+        corrected = old.replace('  ' + old_env_assert,
+            '  const prior = process.env.DRIVER_HERMETIC_ROOT;\n  try {\n'
+            "    process.env.DRIVER_HERMETIC_ROOT = 'ready';\n"
+            '    ' + old_env_assert + '\n  } finally {\n'
+            '    if (prior === undefined) delete process.env.DRIVER_HERMETIC_ROOT;\n'
+            '    else process.env.DRIVER_HERMETIC_ROOT = prior;\n  }', 1)
+        self.write('tests/test_hermetic.mjs', corrected)
+        if code_change:
+            self.write('app.js', 'export const value = () => 2;\n')
+
+    def test_hermetic_repair_records_old_assertion_and_head_proof(self):
+        """Why: a hermetic test may pass base only when its own historical version failed assertions there."""
+        self.hermetic_correction()
+        completed = self.run_gate('baseline')
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        lock = json.loads(next((self.repo / '.driver/test-gate-evidence').glob('baseline-lock-*.json')).read_text())
+        proof = lock['hermeticCorrections'][0]
+        self.assertEqual(proof['testPaths'], ['tests/test_hermetic.mjs'])
+        self.assertNotEqual(proof['testHashes']['tests/test_hermetic.mjs']['base'], proof['testHashes']['tests/test_hermetic.mjs']['corrected'])
+        self.assertGreater(proof['baseObservation']['testCounts']['failures'], 0)
+        self.assertEqual(proof['baseObservation']['testCounts']['errors'], 0)
+        self.assertEqual(proof['headObservation']['testCounts']['failures'], 0)
+        records = [json.loads(line) for line in (self.repo / '.driver/test-gate-evidence/checks.jsonl').read_text().splitlines()]
+        self.assertTrue(any(row.get('phase') == 'hermetic-correction-proof' for row in records))
+
+    def test_hermetic_old_test_also_passes_still_fails(self):
+        """Why: setting an already satisfied environment is not fail-first evidence."""
+        self.hermetic_correction(old_env_assert='assert.equal(value(), 1);')
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('passed on the base', self.result(result)['reason'])
+
+    def test_hermetic_rejects_removed_assertion(self):
+        """Why: a test repair must preserve every prior behavior check."""
+        self.hermetic_correction()
+        path = self.repo / 'tests/test_hermetic.mjs'
+        path.write_text(path.read_text().replace('  assert.equal(value(), 1);\n', ''), encoding='utf-8')
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 3, result.stdout)
+        self.assertIn('assertion', self.result(result)['reason'])
+
+    def test_hermetic_rejects_changed_producer(self):
+        """Why: a producer change must not be hidden under a test-environment correction."""
+        self.hermetic_correction(code_change=True)
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 3, result.stdout)
+        self.assertIn('changed production', self.result(result)['reason'])
+
+    def test_hermetic_rejects_crashing_old_test(self):
+        """Why: a missing-key crash is not an assertion failure."""
+        self.hermetic_correction(old_env_assert='assert.equal(process.env.DRIVER_HERMETIC_ROOT.toString(), "ready");')
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 3, result.stdout)
+        self.assertIn('assertion', self.result(result)['reason'])
+
+    def test_hermetic_rejects_missing_restore(self):
+        """Why: changing process environment without restoration is not a hermetic repair."""
+        self.hermetic_correction()
+        path = self.repo / 'tests/test_hermetic.mjs'
+        path.write_text(path.read_text().replace('    else process.env.DRIVER_HERMETIC_ROOT = prior;\n', ''), encoding='utf-8')
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 3, result.stdout)
+        self.assertIn('restoration', self.result(result)['reason'])
+
+    def test_hermetic_rejects_non_isolation_addition(self):
+        """Why: added unrelated assertions or behavior cannot ride the environment-only exception."""
+        self.hermetic_correction()
+        path = self.repo / 'tests/test_hermetic.mjs'
+        path.write_text(path.read_text().replace('  try {\n', '  assert.equal(value(), 1);\n  try {\n'), encoding='utf-8')
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 3, result.stdout)
+        self.assertIn('non-environment-isolation', self.result(result)['reason'])
+
+    def test_hermetic_rejects_forged_lock(self):
+        """Why: the check phase must rerun the old test, not trust a JSON claim."""
+        self.hermetic_correction()
+        baseline = self.run_gate('baseline')
+        self.assertEqual(baseline.returncode, 0, baseline.stdout)
+        path = next((self.repo / '.driver/test-gate-evidence').glob('baseline-lock-*.json'))
+        lock = json.loads(path.read_text())
+        lock['hermeticCorrections'] = []
+        path.write_text(json.dumps(lock))
+        checked = self.run_gate('check')
+        self.assertEqual(checked.returncode, 3, checked.stdout)
+        self.assertIn('proof missing', self.result(checked)['reason'])
 
     @unittest.skipUnless(RUNNER.is_file(), "test-gate runner is not implemented yet")
     def test_test_without_assertion_is_blocked(self):

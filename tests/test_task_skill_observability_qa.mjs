@@ -118,6 +118,9 @@ test('SPA absent, single and conflicting links retain explicit provenance', () =
 // Why: a configurable neutral root must count leaf reads without retaining their filesystem paths.
 test('QA configured root counts reads without operator-specific source paths', async () => {
   const previous = process.env.PI_POTETO_SKILLS_ROOT;
+  const names = ['HERDR_WORKSPACE_ID', 'HERDR_TAB_ID', 'HERDR_PANE_ID'];
+  const old = names.map((name) => process.env[name]);
+  for (const name of names) delete process.env[name];
   process.env.PI_POTETO_SKILLS_ROOT = '/opt/observer-fixture/skills';
   try {
     const run = hooks(); run.emit('session_start', { reason: 'new' });
@@ -135,6 +138,7 @@ test('QA configured root counts reads without operator-specific source paths', a
   } finally {
     if (previous === undefined) delete process.env.PI_POTETO_SKILLS_ROOT;
     else process.env.PI_POTETO_SKILLS_ROOT = previous;
+    names.forEach((name, index) => old[index] === undefined ? delete process.env[name] : process.env[name] = old[index]);
   }
 });
 

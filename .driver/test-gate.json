@@ -11,15 +11,13 @@
     "weekly-recap-tests": "Reuse weekly-recap-tests in .driver/gate-rules.json; unittest's host-observed Ran N total is the denominator.",
     "public-pr-wording-tests": "Reuse public-pr-wording-tests in .driver/gate-rules.json; unittest's host-observed Ran N total is the denominator."
   },
-  "mutations": [
-    {
-      "id": "release-prepare-publish-fallthrough",
-      "path": "scripts/release_public.py",
-      "before": "note=note, prepare_pr_only=prepare_pr_only)",
-      "after": "note=note, prepare_pr_only=False)",
-      "testCheckId": "python-tests",
-      "testPaths": ["tests/test_release_public.py"],
-      "reason": "Dropping the prepare-only mode before archive handling must expose forbidden tag and GitHub release attempts in the actual CLI effect record."
-    }
-  ]
+  "mutation": {
+    "id": "public-local-inventory-required",
+    "path": "scripts/codebase_inventory_gate.py",
+    "before": "return True, \"local inventory matches the staged source\"",
+    "after": "return False, \"local inventory matches the staged source\"",
+    "testCheckId": "python-tests",
+    "testPaths": ["tests/test_codebase_inventory.py"],
+    "reason": "Rejecting a correct ignored public inventory must fail the public local-inventory regression."
+  }
 }
