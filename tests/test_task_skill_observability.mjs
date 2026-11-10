@@ -77,7 +77,14 @@ function harness(journal = [], session = 's1') {
   const hooks = new Map(); const tools = new Map();
   const pi = { on(name, fn) { hooks.set(name, fn); }, registerTool(def) { tools.set(def.name, def); },
     appendEntry(type, data) { journal.push({ type: 'custom', customType: type, data }); } };
-  observe(pi);
+  const previousSkillsRoot = process.env.PI_POTETO_SKILLS_ROOT;
+  try {
+    process.env.PI_POTETO_SKILLS_ROOT = '/scratch/observer-skills';
+    observe(pi);
+  } finally {
+    if (previousSkillsRoot === undefined) delete process.env.PI_POTETO_SKILLS_ROOT;
+    else process.env.PI_POTETO_SKILLS_ROOT = previousSkillsRoot;
+  }
   const ctx = { sessionManager: { getSessionId: () => session, getBranch: () => journal } };
   const emit = (name, e) => hooks.get(name)(e, ctx);
   const declaration = (id, params) => tools.get('agentic_task_skill_observation').execute(id, params, null, null, ctx);
