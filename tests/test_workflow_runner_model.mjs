@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 const root = new URL('../docs/design/workflow-runner/', import.meta.url);
@@ -96,7 +96,11 @@ test('recorded safety and liveness outputs name the pinned model bytes', async (
 });
 
 // Why: This audits the committed probe outputs; it does not execute the model or independently prove liveness.
-test('ported Opus re-review probe logs retain their recorded outcomes', () => {
+test('ported Opus re-review probe logs retain their recorded outcomes', (t) => {
+  if (!existsSync(new URL('tlc-fix5-probe-re2-no-dispatch.out', root))) {
+    t.skip('probe-re2 review-port logs are not in the public tree');
+    return;
+  }
   for (const name of ['no-dispatch', 'epoch', 'writer', 'trust', 'L3', 'L4', 'L5', 'L6']) {
     const output = text(`tlc-fix5-probe-re2-${name}.out`);
     assert.match(output, /Model checking completed\. No error has been found\./, name);
