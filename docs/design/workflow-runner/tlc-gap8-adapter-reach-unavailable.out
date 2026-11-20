@@ -1,0 +1,57 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Running breadth-first search Model-Checking with fp 68 and seed 8789142495263517182 with 1 worker on 10 cores with 16384MB heap and 64MB offheap memory [pid: <PROCESS_ID>] (Mac OS X 27.0.1 aarch64, Homebrew 27.0.1.0.3 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file <WORKTREE>/.scratch/g8-linux-adapter/Gap8LinuxAdapter.tla
+Parsing file <TLC_TEMP>
+Semantic processing of module Naturals
+Semantic processing of module Gap8LinuxAdapter
+Starting... (2026-11-17 11:21:23)
+Computing initial states...
+Computed 2 initial states...
+Finished computing initial states: 4 distinct states generated at 2026-11-17 11:21:23.
+Error: Invariant NeverUnavailable is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ runArgv = 0
+/\ cancelled = FALSE
+/\ source = "none"
+/\ pinnedArgv = 1
+/\ tui = FALSE
+/\ resultRun = 0
+/\ receiptDigest = 1
+/\ passed = FALSE
+/\ nativeAtRun = FALSE
+/\ switched = FALSE
+/\ executed = FALSE
+/\ phase = "requested"
+/\ confirmed = FALSE
+/\ stagedDigest = 0
+/\ guestRun = 0
+/\ payloadUnchanged = TRUE
+/\ unavailable = FALSE
+
+State 2: <Park line 57, col 9 to line 62, col 32 of module Gap8LinuxAdapter>
+/\ runArgv = 0
+/\ cancelled = FALSE
+/\ source = "none"
+/\ pinnedArgv = 1
+/\ tui = FALSE
+/\ resultRun = 0
+/\ receiptDigest = 1
+/\ passed = FALSE
+/\ nativeAtRun = FALSE
+/\ switched = FALSE
+/\ executed = FALSE
+/\ phase = "parked"
+/\ confirmed = FALSE
+/\ stagedDigest = 0
+/\ guestRun = 0
+/\ payloadUnchanged = TRUE
+/\ unavailable = TRUE
+
+6 states generated, 6 distinct states found, 4 states left on queue.
+The depth of the complete state graph search is 2.
+Finished in 00s at (2026-11-17 11:21:23)
+
+checkerExit=12

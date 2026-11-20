@@ -1,0 +1,177 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 17 and seed 3212971237959648927 with 1 worker on 10 cores with 14564MB heap and 64MB offheap memory [pid: 22184] (Mac OS X 27.0.1 aarch64, Homebrew 27.0.1.0.3 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file <WORKDIR>/WorkflowRunner.tla
+Parsing file <TMP>/Naturals.tla
+Semantic processing of module Naturals
+Semantic processing of module WorkflowRunner
+Starting... (2026-11-15 18:29:08)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-11-15 18:29:08.
+Error: Invariant NoStaleAdvance is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ phase = "ready"
+/\ resultEpoch = 0
+/\ epoch = 0
+/\ advanced = FALSE
+/\ resultWriter = 1
+/\ attempts = <<0, 0>>
+/\ verifiedWake = FALSE
+/\ lastWriter = 1
+/\ lastJournal = FALSE
+/\ resultStep = 1
+/\ lastWake = FALSE
+/\ writer = 1
+/\ lastEpoch = 0
+/\ dispatched = FALSE
+/\ intent = FALSE
+/\ crashedOnce = FALSE
+/\ stopStep = 1
+/\ wake = FALSE
+/\ step = 1
+/\ lastHeld = FALSE
+/\ ack = FALSE
+/\ journaled = FALSE
+/\ reconciled = FALSE
+/\ result = "none"
+/\ held = FALSE
+
+State 2: <RecordIntent line 27, col 17 to line 32, col 83 of module WorkflowRunner>
+/\ phase = "intent"
+/\ resultEpoch = 0
+/\ epoch = 0
+/\ advanced = FALSE
+/\ resultWriter = 1
+/\ attempts = <<1, 0>>
+/\ verifiedWake = FALSE
+/\ lastWriter = 1
+/\ lastJournal = FALSE
+/\ resultStep = 1
+/\ lastWake = FALSE
+/\ writer = 1
+/\ lastEpoch = 0
+/\ dispatched = FALSE
+/\ intent = TRUE
+/\ crashedOnce = FALSE
+/\ stopStep = 1
+/\ wake = FALSE
+/\ step = 1
+/\ lastHeld = FALSE
+/\ ack = FALSE
+/\ journaled = TRUE
+/\ reconciled = FALSE
+/\ result = "none"
+/\ held = FALSE
+
+State 3: <Dispatch line 33, col 13 to line 37, col 93 of module WorkflowRunner>
+/\ phase = "waiting"
+/\ resultEpoch = 0
+/\ epoch = 0
+/\ advanced = FALSE
+/\ resultWriter = 1
+/\ attempts = <<1, 0>>
+/\ verifiedWake = FALSE
+/\ lastWriter = 1
+/\ lastJournal = FALSE
+/\ resultStep = 1
+/\ lastWake = FALSE
+/\ writer = 1
+/\ lastEpoch = 0
+/\ dispatched = TRUE
+/\ intent = TRUE
+/\ crashedOnce = FALSE
+/\ stopStep = 1
+/\ wake = FALSE
+/\ step = 1
+/\ lastHeld = FALSE
+/\ ack = TRUE
+/\ journaled = TRUE
+/\ reconciled = FALSE
+/\ result = "none"
+/\ held = FALSE
+
+State 4: <ReceiveWrongWriter line 72, col 23 to line 78, col 50 of module WorkflowRunner>
+/\ phase = "waiting"
+/\ resultEpoch = 0
+/\ epoch = 0
+/\ advanced = FALSE
+/\ resultWriter = 2
+/\ attempts = <<1, 0>>
+/\ verifiedWake = TRUE
+/\ lastWriter = 1
+/\ lastJournal = FALSE
+/\ resultStep = 1
+/\ lastWake = FALSE
+/\ writer = 1
+/\ lastEpoch = 0
+/\ dispatched = TRUE
+/\ intent = TRUE
+/\ crashedOnce = FALSE
+/\ stopStep = 1
+/\ wake = TRUE
+/\ step = 1
+/\ lastHeld = FALSE
+/\ ack = TRUE
+/\ journaled = TRUE
+/\ reconciled = FALSE
+/\ result = "good"
+/\ held = FALSE
+
+State 5: <Transfer line 102, col 13 to line 106, col 103 of module WorkflowRunner>
+/\ phase = "waiting"
+/\ resultEpoch = 0
+/\ epoch = 1
+/\ advanced = FALSE
+/\ resultWriter = 2
+/\ attempts = <<1, 0>>
+/\ verifiedWake = TRUE
+/\ lastWriter = 1
+/\ lastJournal = FALSE
+/\ resultStep = 1
+/\ lastWake = FALSE
+/\ writer = 2
+/\ lastEpoch = 0
+/\ dispatched = TRUE
+/\ intent = TRUE
+/\ crashedOnce = FALSE
+/\ stopStep = 1
+/\ wake = TRUE
+/\ step = 1
+/\ lastHeld = FALSE
+/\ ack = TRUE
+/\ journaled = TRUE
+/\ reconciled = FALSE
+/\ result = "good"
+/\ held = FALSE
+
+State 6: <Advance line 107, col 12 to line 125, col 59 of module WorkflowRunner>
+/\ phase = "ready"
+/\ resultEpoch = 0
+/\ epoch = 1
+/\ advanced = TRUE
+/\ resultWriter = 2
+/\ attempts = <<1, 0>>
+/\ verifiedWake = FALSE
+/\ lastWriter = 2
+/\ lastJournal = TRUE
+/\ resultStep = 1
+/\ lastWake = TRUE
+/\ writer = 2
+/\ lastEpoch = 0
+/\ dispatched = FALSE
+/\ intent = FALSE
+/\ crashedOnce = FALSE
+/\ stopStep = 1
+/\ wake = FALSE
+/\ step = 2
+/\ lastHeld = FALSE
+/\ ack = FALSE
+/\ journaled = FALSE
+/\ reconciled = FALSE
+/\ result = "none"
+/\ held = FALSE
+
+174 states generated, 101 distinct states found, 62 states left on queue.
+The depth of the complete state graph search is 6.
+The average outdegree of the complete state graph is 3 (minimum is 0, the maximum 8 and the 95th percentile is 7).
+Finished in 00s at (2026-11-15 18:29:08)

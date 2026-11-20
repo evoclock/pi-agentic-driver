@@ -981,7 +981,7 @@ test("final: every terminal board journey consumes its envelope", async () => {
     const journey = await runWorkerJourney(
       { role: "implementer", stepPrompt: "work", maxSteps: 1, autonomy: "autonomous", model: "test/model" },
       { cwd: dir },
-      { taskStore: { list: () => [] }, runProcess: idleCommunicationFixture(dir), board: { boardPath, envelope: r.envelope } },
+      { enableAutonomy: true, taskStore: { list: () => [] }, runProcess: idleCommunicationFixture(dir), board: { boardPath, envelope: r.envelope } },
     );
     assert.equal(journey.status, "exhausted");
     assert.equal(isEnvelopeConsumed(boardPath, r.envelope.envelopeId), true);
@@ -1010,7 +1010,7 @@ test("final: mid-journey card drift is caught before prompt and the attempt is c
     const journey = await runWorkerJourney(
       { role: "implementer", stepPrompt: "work", maxSteps: 1, autonomy: "autonomous", model: "test/model" },
       { cwd: dir },
-      { taskStore: store, runProcess: idleCommunicationFixture(dir, (action) => { if (action === "prompt") prompts += 1; }), board: { boardPath, envelope: r.envelope } },
+      { enableAutonomy: true, taskStore: store, runProcess: idleCommunicationFixture(dir, (action) => { if (action === "prompt") prompts += 1; }), board: { boardPath, envelope: r.envelope } },
     );
     assert.equal(journey.status, "failed");
     assert.equal(journey.code, "card-hash-drift");
@@ -1034,12 +1034,23 @@ test("final: envelope consumption failure makes a terminal result fail closed", 
     const journey = await runWorkerJourney(
       { role: "implementer", stepPrompt: "work", maxSteps: 1, autonomy: "autonomous", model: "test/model" },
       { cwd: dir },
-      { taskStore: store, runProcess: idleCommunicationFixture(dir), board: { boardPath, envelope: r.envelope } },
+      { enableAutonomy: true, taskStore: store, runProcess: idleCommunicationFixture(dir), board: { boardPath, envelope: r.envelope } },
     );
     assert.equal(journey.ok, false);
     assert.equal(journey.status, "failed");
     assert.equal(journey.code, "claims-corrupt");
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// Why: an internal-only journey option cannot be supplied by an ordinary board dispatch call.
+test("board journey cannot enable autonomous mode without the internal option", async () => {
+  const { runWorkerJourney } = await import("../scripts/enforcement/herdr_async_dispatch_pi.js");
+  const result = await runWorkerJourney(
+    { role: "implementer", stepPrompt: "work", autonomy: "autonomous" },
+    {},
+    { taskStore: { list: () => [] } },
+  );
+  assert.equal(result.code, "autonomy-unavailable");
 });
 
 // Why: Each crash window must roll forward the staged authenticated claim state.

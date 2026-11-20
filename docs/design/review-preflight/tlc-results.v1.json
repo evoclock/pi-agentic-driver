@@ -1,0 +1,24 @@
+{
+  "schema": "review-preflight.tlc-observation.v1",
+  "date": "2026-11-17",
+  "scope": "Bounded supplied models only; sanitized observation, rerun required for a new head",
+  "workers": 1,
+  "runs": [
+    {"config":"ReviewPreflight.cfg","exit":0,"generated":40,"distinct":28},
+    {"config":"ReviewPreflight-unsafe-required.cfg","exit":12,"invariant":"RequiredChecker","generated":20,"distinct":20},
+    {"config":"ReviewPreflight-unsafe-native.cfg","exit":12,"invariant":"NativeGateOnly","generated":27,"distinct":27},
+    {"config":"ReviewPreflight-unsafe-tokens.cfg","exit":12,"invariant":"FrozenTokensRemain","generated":23,"distinct":23},
+    {"config":"Gap7SpecGate.cfg","exit":0,"generated":611,"distinct":132},
+    {"config":"Gap7SpecGate-unsafe-gate.cfg","exit":12,"invariant":"NoDispatchWithoutCheckedSpec","generated":7,"distinct":5},
+    {"config":"Gap7SpecGate-unsafe-complete.cfg","exit":12,"invariant":"NoDispatchOnUnprovenSpec","generated":213,"distinct":74},
+    {"config":"Gap7SpecGate-unsafe-digest.cfg","exit":12,"invariant":"NoStaleSpecDispatch","generated":356,"distinct":102},
+    {"config":"Gap7SpecGate-unsafe-derive.cfg","exit":12,"invariant":"DispatchUsesCheckedStack","generated":190,"distinct":71},
+    {"config":"Gap7SpecGate-unsafe-confirm.cfg","exit":12,"invariant":"NoDispatchWithoutConfirmedChart","generated":56,"distinct":33},
+    {"config":"Gap7SpecGate-unsafe-chart.cfg","exit":12,"invariant":"NoStaleChartDispatch","generated":524,"distinct":128},
+    {"config":"Gap7SpecGate-unsafe-early.cfg","exit":12,"invariant":"NoDispatchWithoutEarlyChecks","generated":120,"distinct":53},
+    {"config":"DecisionGate.cfg","exit":0,"generated":45,"distinct":14},
+    {"config":"DecisionGate-unsafe-owner.cfg","exit":12,"invariant":"OwnerBoundary","generated":42,"distinct":15},
+    {"config":"DecisionGate-unsafe-record.cfg","exit":12,"invariant":"RecordedBeforeProceed","generated":20,"distinct":12},
+    {"config":"DecisionGate-unsafe-enforce.cfg","exit":12,"invariant":"EnforcedBeforeProceed","generated":17,"distinct":12}
+  ]
+}

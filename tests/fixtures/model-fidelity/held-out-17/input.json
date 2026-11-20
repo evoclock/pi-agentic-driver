@@ -1,0 +1,33 @@
+{
+  "schema": "model-fidelity.eval.v1",
+  "author": "fixture-author",
+  "protocol": {
+    "arms": ["method-loaded", "control"],
+    "method": "skills/model-fidelity/SKILL.md at the pinned source revision",
+    "control": "same prompt and case without skill text",
+    "responseFields": ["actionId", "mechanism", "schedule", "finding"],
+    "attemptPolicy": "One response per case and arm; never rerun for a better answer. An unavailable run is recorded, not silently skipped."
+  },
+  "cases": [
+    {"id":"renamed-readiness","reviewStatus":"expected-unreviewed","prompt":"A cart lease survives controller exit. The slot is reused before the delayed dispatch. Name the effect and the actual ownership check.","expected":{"actionId":"Dispatch","mechanism":"No effect-time generation check on the reused slot","schedule":["clear","controller-exit","reuse-slot","dispatch"],"finding":true}},
+    {"id":"misleading-disconnect","reviewStatus":"expected-unreviewed","prompt":"The cable drops, so the capability table is obviously empty. A queued worker later uses the capability after replacement. What action is unsafe?","expected":{"actionId":"UseCapability","mechanism":"Connection loss does not delete durable rows; worker lacks a generation check","schedule":["disconnect","replace","worker-effect"],"finding":true}},
+    {"id":"atomic-write","reviewStatus":"expected-unreviewed","prompt":"Every reassignment and write uses the same database row. A conditional update checks current generation and writes atomically, including after caller death. Is it unsafe?","expected":{"actionId":"ConditionalUpdate","mechanism":"Same-store generation comparison and effect in one operation, assuming all reassignments use it","schedule":["caller-death","replace","conditional-update-rejects"],"finding":false}},
+    {"id":"redundant-guards","reviewStatus":"expected-unreviewed","prompt":"Guard A was removed but guard B still prevents replacement. A completed bounded reachability search has no hazard witness. Did A's removal expose the hazard?","expected":{"actionId":"Replace","mechanism":"B shadows the removed A; no exposed hazard in the bounded search","schedule":["remove-A","attempt-replace","B-rejects"],"finding":false}},
+    {"id":"light-omission","reviewStatus":"expected-unreviewed","prompt":"A screen-flow diagram omits the protocol resource service. Light mode is selected for a reusable address. What correspondence is missing?","expected":{"actionId":"ApplyEffect","mechanism":"Light mode omits protocol correspondence and effect-time ownership evidence","schedule":["observe","replace-address","effect"],"finding":true}},
+    {"id":"runtime-unknown","reviewStatus":"expected-unreviewed","prompt":"The model completes without counterexample, but no runtime test or independent review exists. Report the actual runtime status.","expected":{"actionId":"ApplyEffect","mechanism":"Model pass does not establish implementation correspondence or runtime behavior","schedule":["model-check","runtime-unobserved"],"finding":true}}
+  ],
+  "attempts": [
+    {"caseId":"renamed-readiness","arm":"method-loaded","status":"unavailable","reason":"No pinned live model invocation or independent expected-answer review"},
+    {"caseId":"renamed-readiness","arm":"control","status":"unavailable","reason":"No pinned live model invocation or independent expected-answer review"},
+    {"caseId":"misleading-disconnect","arm":"method-loaded","status":"unavailable","reason":"No pinned live model invocation or independent expected-answer review"},
+    {"caseId":"misleading-disconnect","arm":"control","status":"unavailable","reason":"No pinned live model invocation or independent expected-answer review"},
+    {"caseId":"atomic-write","arm":"method-loaded","status":"unavailable","reason":"No pinned live model invocation or independent expected-answer review"},
+    {"caseId":"atomic-write","arm":"control","status":"unavailable","reason":"No pinned live model invocation or independent expected-answer review"},
+    {"caseId":"redundant-guards","arm":"method-loaded","status":"unavailable","reason":"No pinned live model invocation or independent expected-answer review"},
+    {"caseId":"redundant-guards","arm":"control","status":"unavailable","reason":"No pinned live model invocation or independent expected-answer review"},
+    {"caseId":"light-omission","arm":"method-loaded","status":"unavailable","reason":"No pinned live model invocation or independent expected-answer review"},
+    {"caseId":"light-omission","arm":"control","status":"unavailable","reason":"No pinned live model invocation or independent expected-answer review"},
+    {"caseId":"runtime-unknown","arm":"method-loaded","status":"unavailable","reason":"No pinned live model invocation or independent expected-answer review"},
+    {"caseId":"runtime-unknown","arm":"control","status":"unavailable","reason":"No pinned live model invocation or independent expected-answer review"}
+  ]
+}

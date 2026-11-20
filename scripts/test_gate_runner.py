@@ -7,15 +7,22 @@ import argparse
 import ast
 import difflib
 import hashlib
+import fcntl
 import io
 import json
 import os
 import re
 import shlex
+import shutil
+import socket
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import local
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
@@ -26,7 +33,7 @@ EVIDENCE_SCHEMA = "driver-test-gate-evidence.v1"
 RESULT_SCHEMA = "driver-test-gate-result.v1"
 BLOCKED_EXIT = 3
 MAX_OBSERVED_TESTS = 10_000
-MAX_COMMAND_SECONDS = 300
+MAX_COMMAND_SECONDS = 380
 CODE_SUFFIXES = {".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".sh", ".go", ".rs", ".java"}
 LOCKED_TEST_GATE_CONFIGS = {".driver/gate-rules.json", ".driver/test-gate.json"}
 
@@ -94,6 +101,36 @@ def load_rules(root: Path) -> tuple[dict, dict]:
     if not isinstance(rationales, dict):
         raise Blocked("testCountRationales must explain how each host-observed total is produced")
     return gate_rules, config
+
+
+def require_fresh_base(root: Path, base_ref: str, *, base_sha: str | None = None, commit_sha: str | None = None, contained: bool = False) -> None:
+    command = [sys.executable, str(Path(__file__).with_name('check_base_freshness.py')),
+               '--root', str(root), '--base', base_ref]
+    if base_sha is not None:
+        command += ['--expected-base', base_sha]
+    if commit_sha is not None:
+        command += ['--expected-head', commit_sha]
+    if contained:
+        command += ['--contained-observation']
+    result = subprocess.run(command, capture_output=True, text=True, timeout=180)
+    if result.returncode:
+        raise Blocked(result.stdout.strip() or 'base freshness: check could not complete')
+
+
+def require_fresh_anchor(root: Path, gate_rules: dict, commit_sha: str, comparison_ref: str) -> None:
+    """Comparison selection cannot replace the configured live freshness requirement."""
+    anchor_ref = gate_rules.get('baseRef')
+    if not isinstance(anchor_ref, str) or not anchor_ref or anchor_ref.startswith('-'):
+        raise Blocked('configured freshness anchor is missing or invalid')
+    observed_base = os.environ.get('PAD_OBSERVABILITY_BASE')
+    observed_head = os.environ.get('PAD_OBSERVABILITY_HEAD')
+    if root == Path('/scratch/work') and (observed_base or observed_head):
+        if comparison_ref != observed_base or commit_sha != observed_head:
+            raise Blocked('contained observation does not match comparison base/head')
+        # The helper verifies actual isolation and immutable /source, not caller claims alone.
+        require_fresh_base(root, 'main', base_sha=observed_base, commit_sha=commit_sha, contained=True)
+    else:
+        require_fresh_base(root, anchor_ref, commit_sha=commit_sha)
 
 
 def resolve_base(root: Path, gate_rules: dict, override: str | None) -> tuple[str, str]:
@@ -264,21 +301,39 @@ def command_specs(root: Path, gate_rules: dict, config: dict, test_paths: set[st
 
 
 def parse_test_counts(output: str) -> dict | None:
+    # Python 3.14 honors FORCE_COLOR inherited from a parent Node reporter.
+    # Normalize display-only SGR codes here; evidence still hashes the raw output.
+    output = re.sub(r'\x1b\[[0-9;]*m', '', output)
     node_tests = list(re.finditer(r"(?m)^# tests\s+(\d+)\s*$", output))
     unittest_totals = list(re.finditer(r"(?m)^Ran\s+(\d+)\s+tests?\b", output))
     # A nested gate may print Node summaries; select the outermost, last reporter.
     if node_tests and (not unittest_totals or node_tests[-1].start() > unittest_totals[-1].start()):
+        reporter = output[node_tests[-1].end():]
+
         def node_count(label: str) -> int:
-            match = re.search(rf"(?m)^# {label}\s+(\d+)\s*$", output)
+            match = re.search(rf"(?m)^# {label}\s+(\d+)\s*$", reporter)
             return int(match.group(1)) if match else 0
 
         total = int(node_tests[-1].group(1))
         failures = node_count("fail")
         skipped = node_count("skipped")
+        # Only failed TAP diagnostics are evidence, never console substrings.
+        # A file-level ERR_TEST_FAILURE means assertions may never have loaded.
+        diagnostics = re.findall(r"(?m)^([ \t]*)not ok [^\n]*\n\1  ---\n(.*?)^\1  \.\.\.",
+                                 output[:node_tests[-1].start()], re.DOTALL | re.MULTILINE)
+        infrastructure = sum(
+            bool(re.search(r"(?m)^\s+code: ['\"](?:ERR_MODULE_NOT_FOUND|MODULE_NOT_FOUND|ERR_UNKNOWN_FILE_EXTENSION|ERR_UNSUPPORTED_DIR_IMPORT|ERR_PACKAGE_PATH_NOT_EXPORTED)['\"]\s*$", diagnostic))
+            or bool(re.search(r"(?m)^\s+exitCode:", diagnostic)
+                    and re.search(r"(?m)^\s+code: [\'\"]ERR_TEST_FAILURE[\'\"]\s*$", diagnostic))
+            or bool(re.search(r"(?m)^\s+code: ['\"]ERR_TEST_FAILURE['\"]\s*$", diagnostic)
+                    and re.search(r"(?m)^\s+name: ['\"]SyntaxError['\"]\s*$", diagnostic)
+                    and re.search(r"(?m)^\s+stack:\s*\|-\n\s+[^\n]*node:internal/modules/(?:esm|cjs)/", diagnostic))
+            for _, diagnostic in diagnostics
+        )
         return {
             "tests": total,
             "failures": failures,
-            "errors": 0,
+            "errors": infrastructure,
             "skipped": skipped,
             "cancelled": node_count("cancelled"),
             "todo": node_count("todo"),
@@ -287,7 +342,8 @@ def parse_test_counts(output: str) -> dict | None:
 
     if unittest_totals:
         # Nested test-gate witnesses may print their own summaries; the outer runner reports last.
-        summaries = re.findall(r"(?:FAILED|OK)\s*\(([^)]*)\)", output)
+        reporter = output[unittest_totals[-1].end():]
+        summaries = re.findall(r"(?m)^(?:FAILED|OK)(?:\s*\(([^)]*)\))?\s*$", reporter)
         details = summaries[-1] if summaries else ""
         failures = int((re.search(r"failures=(\d+)", details) or [None, "0"])[1])
         errors = int((re.search(r"errors=(\d+)", details) or [None, "0"])[1])
@@ -337,7 +393,101 @@ def append_evidence(root: Path, record: dict) -> None:
     target = evidence_path(root)
     value = {"schema": EVIDENCE_SCHEMA, "recordedAt": datetime.now(timezone.utc).isoformat(), **record}
     with target.open("a", encoding="utf-8") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
         stream.write(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+        stream.flush()
+
+
+_COMMAND_CAPTURE = local()
+
+
+def emit_command(root: Path, record: dict, output: str) -> None:
+    print(f"RUN [{record['phase']}]: {record['command']} (cwd={record['cwd']}, contract={record.get('contractId') or '-'})", flush=True)
+    if record['timedOut']:
+        print(f"TIMEOUT [{record['phase']}]: exceeded {record['timeoutSeconds']:g}s", flush=True)
+    if output:
+        print(output, end="" if output.endswith("\n") else "\n", flush=True)
+    append_evidence(root, record)
+
+
+def available_cpus(quota_path: Path = Path('/sys/fs/cgroup/cpu.max')) -> int:
+    count = os.cpu_count() or 1
+    try:
+        quota, period = quota_path.read_text().split()
+        if quota != 'max' and int(quota) > 0 and int(period) > 0:
+            count = min(count, max(1, int(quota) // int(period)))
+    except (OSError, ValueError):
+        pass  # Non-cgroup hosts retain the existing core observation.
+    return count
+
+
+def mutation_workers() -> int:
+    if os.environ.get('PAD_TEST_GATE_NESTED') == '1':
+        return 1
+    value = os.environ.get('PAD_TEST_GATE_WORKERS', str(min(4, os.cpu_count() or 1)))
+    if value not in {'1', '2', '3', '4'}:
+        raise Blocked('PAD_TEST_GATE_WORKERS must be 1..4')
+    value = str(min(int(value), available_cpus()))
+    return min(int(value), os.cpu_count() or 1)
+
+
+def mutation_jobs(root: Path, jobs: dict, operation) -> list:
+    """Run isolated jobs concurrently; publish complete command blocks in input order."""
+    def execute(item):
+        key, value = item
+        _COMMAND_CAPTURE.pending = []
+        try:
+            result, error = operation(key, value), None
+        except Exception as caught:
+            result, error = None, caught
+        pending = _COMMAND_CAPTURE.pending
+        del _COMMAND_CAPTURE.pending
+        return key, result, error, pending
+
+    with ThreadPoolExecutor(max_workers=mutation_workers()) as pool:
+        completed = list(pool.map(execute, jobs.items()))
+    failures, results = [], []
+    for key, result, error, pending in completed:
+        for record, output in pending:
+            emit_command(root, record, output)
+        if error is not None:
+            failures.append((key, error))
+        results.append(result)
+    if failures:
+        key, error = failures[0]
+        if isinstance(error, (Blocked, GateFailure)):
+            raise type(error)(f'{key}: {error}') from error
+        raise error
+    return results
+
+
+def node_command_groups(command: list[str], execute_root: Path, cwd: Path, environment: dict, timeout: float) -> list[list[str]] | None:
+    """Optimize only explicit multi-file Node tests; unknown plans keep the native command."""
+    helper = execute_root / 'scripts/node_test_run.mjs'
+    sandbox = execute_root / 'scripts/node_test_sandbox.mjs'
+    offset = 3 if len(command) > 2 and command[2] == '--test-reporter=tap' else 2
+    if (len(command) < offset + 2 or Path(command[0]).name != 'node' or command[1] != '--test'
+            or not all(not name.startswith('-') and name.endswith('.mjs') for name in command[offset:])
+            or not helper.is_file() or not sandbox.is_file()):
+        return None
+    try:
+        planned = subprocess.run([command[0], str(helper), '--plan'], cwd=cwd, env=environment,
+                                 input=json.dumps({'root': str(cwd), 'argv': command[1:]}),
+                                 capture_output=True, text=True, timeout=min(timeout, 20))
+        if planned.returncode != 0:
+            return None
+        groups = json.loads(planned.stdout)['groups']
+        files = [name for group in groups for name in group['files']]
+        expected = sorted(str((cwd / name).resolve()) for name in command[offset:])
+        if (not groups or sorted(str(Path(name).resolve()) for name in files) != expected
+                or any(type(group['safe']) is not bool or not group['files'] for group in groups)
+                or not any(group['safe'] and len(group['files']) >= 2 for group in groups)):
+            return None
+        return [[*command[:offset], '--import', str(sandbox),
+                 *(['--experimental-test-isolation=none'] if group['safe'] else []), *group['files']]
+                for group in groups]
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError):
+        return None
 
 
 def run_command(
@@ -360,21 +510,60 @@ def run_command(
     started = time.monotonic()
     changed_count, diff_sha256 = worktree_fingerprint(evidence_root, base_sha)
     timeout_seconds = spec["timeoutSeconds"]
+    protected = None
+    if phase in {"mutation-head-tests", "mutation-spot-check"} and execute_root != evidence_root:
+        names = {str(path.relative_to(execute_root)) for path in execute_root.rglob("*")
+                 if path.is_file() and not path.is_symlink() and '.git' not in path.relative_to(execute_root).parts}
+        protected = test_hashes(execute_root, names)
+    history = evidence_root / EVIDENCE_REL / "checks.jsonl"
+    previous = None
+    if history.is_file():
+        for line in history.read_text().splitlines():
+            item = json.loads(line)
+            if (item.get("argv") == command and item.get("cwd") == cwd_rel
+                    and item.get("phase") == phase and item.get("mutationPath") == mutation_path and "elapsedMs" in item):
+                previous = item
+    if previous is not None and previous["elapsedMs"] > timeout_seconds * 750:
+        raise Blocked(f"{spec.get('checkId', command[0])}: last runtime {previous['elapsedMs'] / 1000:.3f}s / cap {timeout_seconds}s leaves under 25% headroom; use a reviewed configuration transition in a fresh lease, never edit a baseline lock")
+    if shutil.which(command[0], path=os.environ.get("PATH")) is None and not os.access(cwd / command[0], os.X_OK):
+        raise Blocked(f"required test tool missing before run: {command[0]}")
     timed_out = False
     process_environment = dict(os.environ if environment is None else environment)
+    checkout = process_environment.get("BUILDKITE_BUILD_CHECKOUT_PATH")
+    # Why: base snapshots may contain old runners that annotate on BUILDKITE alone.
+    if (not checkout or execute_root.resolve() != Path(checkout).resolve() or
+            cwd.resolve() != Path(checkout).resolve()):
+        process_environment.pop("BUILDKITE", None)
+        process_environment.pop("BUILDKITE_BUILD_CHECKOUT_PATH", None)
     process_environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    temporary = None
+    if phase in {"mutation-head-tests", "mutation-spot-check"}:
+        process_environment["PAD_TEST_GATE_NESTED"] = "1"
+        temporary = tempfile.TemporaryDirectory(prefix='test-gate-command-')
+        for name in ('TMPDIR', 'TMP', 'TEMP'):
+            process_environment[name] = temporary.name
+        option = '-Djava.io.tmpdir=' + json.dumps(temporary.name, ensure_ascii=False)
+        process_environment['JAVA_TOOL_OPTIONS'] = (process_environment.get('JAVA_TOOL_OPTIONS', '') + ' ' + option).strip()
+        if execute_root != evidence_root:
+            process_environment["GIT_CEILING_DIRECTORIES"] = str(execute_root.resolve().parent)
+            for name in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'):
+                process_environment.pop(name, None)
+    executed = []
+    output = ''
     try:
-        result = subprocess.run(
-            command,
-            cwd=cwd,
-            env=process_environment,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=timeout_seconds,
-        )
-        output = (result.stdout or "") + (result.stderr or "")
-        exit_code = result.returncode
+        groups = node_command_groups(command, execute_root, cwd, process_environment, timeout_seconds) if phase in {'mutation-head-tests', 'mutation-spot-check'} else None
+        exit_code = 0
+        for actual in groups or [command]:
+            row = {'argv': actual, 'exitCode': None, 'testCounts': None}
+            executed.append(row)
+            result = subprocess.run(actual, cwd=cwd, env=process_environment, capture_output=True,
+                                    text=True, errors='replace', timeout=max(.001, timeout_seconds - (time.monotonic() - started)))
+            native_output = (result.stdout or '') + (result.stderr or '')
+            row.update(exitCode=result.returncode, testCounts=parse_test_counts(native_output),
+                       outputSha256=sha256_bytes(native_output.encode('utf-8', errors='replace')))
+            output += native_output
+            if result.returncode and exit_code == 0:
+                exit_code = result.returncode
     except subprocess.TimeoutExpired as error:
         stdout = error.stdout or error.output or ""
         stderr = error.stderr or ""
@@ -388,13 +577,17 @@ def run_command(
     except OSError as error:
         output = str(error)
         exit_code = 127
+    finally:
+        if temporary is not None:
+            temporary.cleanup()
     elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
-    print(f"RUN [{phase}]: {shlex.join(command)} (cwd={cwd_rel})", flush=True)
-    if timed_out:
-        print(f"TIMEOUT [{phase}]: exceeded {timeout_seconds:g}s", flush=True)
-    if output:
-        print(output, end="" if output.endswith("\n") else "\n", flush=True)
     counts = parse_test_counts(output)
+    if len(executed) > 1:
+        native_counts = [row['testCounts'] for row in executed]
+        counts = ({key: sum(row.get(key, 0) for row in native_counts) for key in set().union(*native_counts)}
+                  if all(row is not None for row in native_counts) else None)
+    if executed and executed[-1]['exitCode'] is None:
+        executed[-1].update(exitCode=exit_code, timedOut=timed_out)
     input_hashes = {}
     for name in spec.get("testFiles", []):
         input_path = execute_root / name
@@ -404,6 +597,7 @@ def run_command(
         "phase": phase,
         "command": shlex.join(command),
         "argv": command,
+        "executedCommands": executed,
         "cwd": cwd_rel,
         "exitCode": exit_code,
         "commitSha": commit_sha,
@@ -417,11 +611,19 @@ def run_command(
         "testCounts": counts,
         "testCountRationale": spec.get("rationale"),
         "testFileSha256": input_hashes,
+        "contractId": spec.get("contractId"),
+        "executeTree": str(execute_root),
         "mutationPath": mutation_path,
         "mutantSha256": spec.get("mutantSha256"),
         "outputSha256": sha256_bytes(output.encode("utf-8", errors="replace")),
     }
-    append_evidence(evidence_root, record)
+    pending = getattr(_COMMAND_CAPTURE, "pending", None)
+    if pending is None:
+        emit_command(evidence_root, record, output)
+    else:
+        pending.append((record, output))
+    if protected is not None and test_hashes(execute_root, set(protected)) != protected:
+        raise Blocked("contract inputs or worktree changed in isolated command")
     return {"exitCode": exit_code, "counts": counts, "output": output, "record": record, "timedOut": timed_out}
 
 
@@ -490,7 +692,9 @@ def prepare_base_snapshot(root: Path, base_sha: str, test_paths: set[str]) -> Pa
 
     overlay = set(test_paths)
     if any(name.startswith("tests/") for name in test_paths):
-        overlay.update(changed_test_support_paths(root))
+        # New fixtures belong to the head, not the base being tested.
+        overlay.update(name for name in changed_test_support_paths(root)
+                       if (snapshot / name).is_file())
     for name in sorted(overlay):
         source = root / name
         if source.is_symlink() or not source.is_file():
@@ -578,7 +782,7 @@ def preserve_test_tokens(old: str, corrected: str, name: str) -> None:
             raise Blocked(f'correction removed or relaxed an existing assertion or test token: {name}')
 
 
-def fixture_contrast(root: Path, snapshot: Path, base_sha: str, commit_sha: str, spec: dict, corrected: dict) -> dict:
+def fixture_contrast(root: Path, snapshot: Path, base_sha: str, commit_sha: str, spec: dict, corrected: dict, cleanup: ExitStack) -> dict:
     """Prove a base fixture regression with host runs, never with a label or lock claim."""
     changed, tests, code, _ = working_tree_paths(root, base_sha)
     fixtures = sorted(name for name in changed if is_test_support_path(name))
@@ -597,6 +801,7 @@ def fixture_contrast(root: Path, snapshot: Path, base_sha: str, commit_sha: str,
             continue
         preserve_test_tokens(old.stdout, (root / name).read_text(encoding='utf-8'), name)
     historical_snapshot = prepare_base_snapshot(root, base_sha, set(spec['testFiles']))
+    cleanup.callback(shutil.rmtree, historical_snapshot)
     hashes = {}
     for name in relevant:
         base_file = subprocess.run(['git', 'show', f'{base_sha}:{name}'], cwd=root, capture_output=True)
@@ -660,7 +865,7 @@ def hermetic_lines(old: str, corrected: str, name: str) -> None:
         raise Blocked(f'hermetic correction includes non-environment-isolation changes or lacks restoration: {name}')
 
 
-def hermetic_contrast(root: Path, snapshot: Path, base_sha: str, commit_sha: str, spec: dict, corrected: dict) -> dict:
+def hermetic_contrast(root: Path, snapshot: Path, base_sha: str, commit_sha: str, spec: dict, corrected: dict, cleanup: ExitStack) -> dict:
     """Observe historical test assertions on untouched base production and corrected head."""
     _, _, code, _ = working_tree_paths(root, base_sha)
     if len(spec['testFiles']) != 1 or not spec['testFiles'][0].endswith(('.mjs', '.js')):
@@ -673,6 +878,7 @@ def hermetic_contrast(root: Path, snapshot: Path, base_sha: str, commit_sha: str
     hermetic_lines(old.stdout, new, name)
     test_dependency_scope(root, snapshot, spec, code)
     historical_snapshot = prepare_base_snapshot(root, base_sha, set())
+    cleanup.callback(shutil.rmtree, historical_snapshot)
     historical_bodies = test_dependency_scope(root, historical_snapshot, spec, set())
     if not any(re.search(r'process\.env\.(?:PI_POTETO_SKILLS_ROOT|DRIVER_HERMETIC_ROOT)|process\.env\[name\]', body)
                for body in historical_bodies):
@@ -709,7 +915,13 @@ def hermetic_contrast(root: Path, snapshot: Path, base_sha: str, commit_sha: str
 
 
 def fixture_baseline_observations(root: Path, base_sha: str, commit_sha: str, tests: set[str], specs: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    with ExitStack() as cleanup:
+        return _fixture_baseline_observations(root, base_sha, commit_sha, tests, specs, cleanup)
+
+
+def _fixture_baseline_observations(root: Path, base_sha: str, commit_sha: str, tests: set[str], specs: list[dict], cleanup: ExitStack) -> tuple[list[dict], list[dict], list[dict]]:
     snapshot = prepare_base_snapshot(root, base_sha, tests)
+    cleanup.callback(shutil.rmtree, snapshot)
     observations, proofs, hermetic_proofs = [], [], []
     for spec in specs:
         observation = run_command(root, snapshot, spec, phase='fail-first-base', commit_sha=commit_sha,
@@ -720,11 +932,11 @@ def fixture_baseline_observations(root: Path, base_sha: str, commit_sha: str, te
             paths, _, _, _ = working_tree_paths(root, base_sha)
             if spec['testFiles'] == ['tests/test_task_skill_observability_qa.mjs']:
                 # Why: an unrelated changed fixture cannot explain this test's inherited-env repair.
-                hermetic_proofs.append(hermetic_contrast(root, snapshot, base_sha, commit_sha, spec, observation))
+                hermetic_proofs.append(hermetic_contrast(root, snapshot, base_sha, commit_sha, spec, observation, cleanup))
             elif any(is_test_support_path(name) for name in paths):
-                proofs.append(fixture_contrast(root, snapshot, base_sha, commit_sha, spec, observation))
+                proofs.append(fixture_contrast(root, snapshot, base_sha, commit_sha, spec, observation, cleanup))
             else:
-                hermetic_proofs.append(hermetic_contrast(root, snapshot, base_sha, commit_sha, spec, observation))
+                hermetic_proofs.append(hermetic_contrast(root, snapshot, base_sha, commit_sha, spec, observation, cleanup))
         elif counts['errors']:
             raise Blocked(f"fail-first command had {counts['errors']} errors; a crash is not proof that assertions fail")
         elif counts['failures'] == 0:
@@ -733,32 +945,174 @@ def fixture_baseline_observations(root: Path, base_sha: str, commit_sha: str, te
     return observations, proofs, hermetic_proofs
 
 
-def baseline_lock(root: Path, gate_rules: dict, config: dict, base_ref: str, base_sha: str, commit_sha: str, tests: set[str], test_inputs: set[str], specs: list[dict]) -> Path:
-    if not tests:
-        raise Blocked("fail-first requires at least one changed test file")
-    findings = test_source_findings(root, tests)
-    if findings:
-        raise Blocked("; ".join(findings))
-    before = test_hashes(root, test_inputs)
-    target = lock_location(root, base_sha, test_inputs)
+def verified_refresh_predecessors(root: Path, lock: dict) -> dict[str, str]:
+    predecessors = lock.get("refreshPredecessors", {})
+    if not isinstance(predecessors, dict):
+        raise Blocked("refresh predecessor history is malformed")
+    for name, digest in predecessors.items():
+        if not re.fullmatch(r"baseline-lock-[0-9a-f]+\.json", name):
+            raise Blocked("invalid refresh predecessor path")
+        path = root / EVIDENCE_REL / name
+        if path.is_symlink() or not path.is_file() or sha256_bytes(path.read_bytes()) != digest:
+            raise Blocked("refresh predecessor evidence changed or disappeared")
+        prior = load_json(path, "refresh predecessor")
+        if (prior.get("schema") != LOCK_SCHEMA or prior.get("baseCommitSha") != lock.get("baseCommitSha")
+                or prior.get("branch") != lock.get("branch")
+                or not isinstance(prior.get("testFiles"), dict)
+                or not set(prior["testFiles"]) < set(lock.get("testFiles", {}))):
+            raise Blocked("refresh predecessor is not a matching strict input subset")
+    return predecessors
+
+
+def refresh_lock_source(root: Path, base_sha: str, before: dict, target: Path) -> Path:
+    if target.is_file():
+        return target
+    candidates = []
+    for path in (root / EVIDENCE_REL).glob("baseline-lock-*.json"):
+        prior = load_json(path, "prior fail-first lock")
+        if (prior.get("baseCommitSha") == base_sha and prior.get("branch") == current_branch(root)
+                and isinstance(prior.get("testFiles"), dict) and set(prior["testFiles"]) < set(before)):
+            candidates.append((len(prior["testFiles"]), path))
+    if not candidates:
+        raise Blocked("refresh requires an existing fail-first lock with the same inputs or a strict subset")
+    largest = max(size for size, _ in candidates)
+    matches = [path for size, path in candidates if size == largest]
+    if len(matches) != 1:
+        raise Blocked("refresh source lock is ambiguous")
+    return matches[0]
+
+
+def verify_prior_locks(root: Path, base_sha: str, before: dict[str, str], target: Path | None = None) -> None:
+    """Adding an input must not unlock previously locked inputs on this branch/base."""
+    superseded = set()
+    for path in (root / EVIDENCE_REL).glob("baseline-lock-*.json"):
+        superseded.update(verified_refresh_predecessors(root, load_json(path, "prior fail-first lock")))
     for previous in sorted((root / EVIDENCE_REL).glob("baseline-lock-*.json")):
         if previous == target:
             raise Blocked("fail-first lock already exists; do not replace it during implementation")
+        if previous.name in superseded:
+            continue
         old_lock = load_json(previous, "prior fail-first lock")
-        if old_lock.get("baseCommitSha") != base_sha or old_lock.get("branch", current_branch(root)) != current_branch(root):
+        if old_lock.get("branch", current_branch(root)) != current_branch(root):
             continue
         old_inputs = old_lock.get("testFiles")
+        if isinstance(old_inputs, dict):
+            drift = [name for name in LOCKED_TEST_GATE_CONFIGS if name in old_inputs and old_inputs[name] != before.get(name)]
+            if drift:
+                raise Blocked("test-gate configuration changed after fail-first lock: " + ", ".join(sorted(drift)))
+        if old_lock.get("baseCommitSha") != base_sha:
+            continue
         if not isinstance(old_inputs, dict):
             raise Blocked(f"prior fail-first lock is malformed: {previous.name}")
         removed = sorted(set(old_inputs) - set(before))
         changed = sorted(name for name in set(old_inputs) & set(before) if old_inputs[name] != before[name])
         if removed or changed:
             raise Blocked(f"test file(s) changed or removed after fail-first lock: {', '.join(removed + changed)}")
-    observations, proofs, hermetic_proofs = fixture_baseline_observations(root, base_sha, commit_sha, tests, specs)
+
+
+def refresh_control_additions(root: Path, previous: dict, before: dict, gate_rules: dict, config: dict) -> list[str]:
+    old_hashes = previous["testFiles"]
+    changed = [name for name in LOCKED_TEST_GATE_CONFIGS if old_hashes.get(name) != before.get(name)]
+    if not changed:
+        return []
+    if changed != [".driver/test-gate.json"]:
+        raise Blocked("refresh cannot change locked gate rules; only additive mutation contracts are supported")
+    name = ".driver/test-gate.json"
+    snapshots = previous.get("controlSnapshots", {})
+    if not isinstance(snapshots, dict):
+        raise Blocked("prior control snapshots are malformed")
+    old_text = snapshots.get(name)
+    if old_text is None:
+        commit = previous.get("lockedAtCommitSha")
+        if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+            raise Blocked("prior control configuration is unavailable; preserve this attempt and start a fresh baseline")
+        observed = run_git(root, "show", f"{commit}:{name}")
+        if observed.returncode:
+            raise Blocked("cannot recover prior locked control configuration")
+        old_text = observed.stdout
+    if not isinstance(old_text, str) or sha256_bytes(old_text.encode("utf-8")) != old_hashes.get(name):
+        raise Blocked("prior control snapshot does not match its locked hash")
+    old = json.loads(old_text)
+    if not isinstance(old, dict):
+        raise Blocked("prior control configuration is not an object")
+    old_map, new_map = old.get("mutations", {}), config.get("mutations", {})
+    if not isinstance(old_map, dict) or not isinstance(new_map, dict):
+        raise Blocked("additive refresh requires keyed mutation maps")
+    old_rest = {key: value for key, value in old.items() if key != "mutations"}
+    new_rest = {key: value for key, value in config.items() if key != "mutations"}
+    if old_rest != new_rest or any(new_map.get(key) != value for key, value in old_map.items()):
+        raise Blocked("refresh may only add mutation contracts; existing entries, caps and other controls must remain unchanged")
+    old_effective, new_effective = mutation_contracts(old), mutation_contracts(config)
+    if any(new_effective.get(key) != value for key, value in old_effective.items()):
+        raise Blocked("refresh cannot remove or replace an existing effective mutation contract")
+    if (set(new_map) - set(old_map)) & set(old_effective):
+        raise Blocked("refresh cannot shadow an existing legacy mutation contract")
+    added = sorted(set(new_effective) - set(old_effective))
+    if not added:
+        raise Blocked("changed control configuration contains no additive mutation contracts")
+    for key in added:
+        mutation_command_spec(root, gate_rules, config, new_effective[key])
+    return added
+
+
+def baseline_lock(root: Path, gate_rules: dict, config: dict, base_ref: str, base_sha: str, commit_sha: str, tests: set[str], test_inputs: set[str], specs: list[dict], refresh_reason: str | None = None, *, refresh: bool = False) -> Path:
+    if not tests:
+        raise Blocked("fail-first requires at least one changed test file")
+    findings = test_source_findings(root, tests)
+    if findings:
+        raise Blocked("; ".join(findings))
+    before = test_hashes(root, test_inputs)
+    control_snapshots = {name: (root / name).read_text(encoding="utf-8") for name in LOCKED_TEST_GATE_CONFIGS}
+    if any(sha256_bytes(text.encode("utf-8")) != before.get(name) for name, text in control_snapshots.items()):
+        raise Blocked("control configuration changed while preparing the baseline")
+    if (json.loads(control_snapshots[".driver/gate-rules.json"]) != gate_rules
+            or json.loads(control_snapshots[".driver/test-gate.json"]) != config):
+        raise Blocked("loaded control configuration differs from the baseline inputs")
+    target = lock_location(root, base_sha, test_inputs)
+    previous = None
+    previous_bytes = None
+    identity = None
+    added_contracts = []
+    previous_target = target
+    predecessors = {}
+    if not refresh:
+        verify_prior_locks(root, base_sha, before, target)
+    else:
+        previous_target = refresh_lock_source(root, base_sha, before, target)
+        if previous_target.is_symlink():
+            raise Blocked("refresh source lock must not be a symlink")
+        previous_bytes = previous_target.read_bytes()
+        previous = load_json(previous_target, "fail-first lock")
+        predecessors = verified_refresh_predecessors(root, previous)
+        old_hashes = previous.get('testFiles')
+        if (previous.get('schema') != LOCK_SCHEMA or previous.get('baseCommitSha') != base_sha
+                or previous.get('branch') != current_branch(root) or not isinstance(old_hashes, dict)
+                or not set(old_hashes) <= set(before) or not all(isinstance(v, str) and re.fullmatch(r'[0-9a-f]{64}', v) for v in old_hashes.values())
+                or not isinstance(previous.get('testCommands'), list) or not previous['testCommands']
+                or not isinstance(previous.get('fixtureCorrections'), list) or not isinstance(previous.get('hermeticCorrections'), list)):
+            raise Blocked('refresh requires a well-formed matching fail-first lock')
+        added_contracts = refresh_control_additions(root, previous, before, gate_rules, config)
+        if old_hashes == before:
+            raise Blocked('refresh requires changed test or fixture hashes')
+        for prior in sorted((root / EVIDENCE_REL).glob('baseline-lock-*.json')):
+            if prior != previous_target and prior.name not in predecessors:
+                other = load_json(prior, 'prior fail-first lock')
+                if other.get('baseCommitSha') == base_sha and other.get('branch', current_branch(root)) == current_branch(root):
+                    raise Blocked('refresh requires a single matching fail-first lock')
+        identity = {'author': git_value(root, 'var', 'GIT_AUTHOR_IDENT'),
+                    'committer': git_value(root, 'var', 'GIT_COMMITTER_IDENT'), 'hostname': socket.gethostname()}
+    try:
+        observations, proofs, hermetic_proofs = fixture_baseline_observations(root, base_sha, commit_sha, tests, specs)
+    except GateFailure as error:
+        if refresh:
+            raise Blocked(f'refresh baseline was not proven: {error}') from error
+        raise
     after = test_hashes(root, test_inputs)
     if before != after:
         raise Blocked("test files or test fixtures changed while the host was recording the fail-first baseline")
 
+    require_fresh_anchor(root, gate_rules, commit_sha, base_ref)
+    require_fresh_base(root, base_ref, base_sha=base_sha, commit_sha=commit_sha)
     target.parent.mkdir(parents=True, exist_ok=True)
     lock = {
         "schema": LOCK_SCHEMA,
@@ -768,16 +1122,41 @@ def baseline_lock(root: Path, gate_rules: dict, config: dict, base_ref: str, bas
         "lockedAt": datetime.now(timezone.utc).isoformat(),
         "lockedAtCommitSha": commit_sha,
         "testFiles": before,
+        "controlSnapshots": control_snapshots,
         "testCommands": observations,
         "fixtureCorrections": proofs,
         "hermeticCorrections": hermetic_proofs,
     }
-    try:
-        with target.open("x", encoding="utf-8") as stream:
+    if refresh:
+        if previous_target.is_symlink() or previous_target.read_bytes() != previous_bytes:
+            raise Blocked("prior lock changed while refresh was running")
+        if previous_target != target:
+            if target.exists() or target.is_symlink():
+                raise Blocked("expanded refresh target already exists")
+            predecessors = {**predecessors, previous_target.name: sha256_bytes(previous_bytes)}
+        lock["refreshPredecessors"] = predecessors
+        record = {'kind': 'lock-refresh', 'phase': 'refresh', 'reason': refresh_reason.strip(),
+                  'oldHashes': previous['testFiles'], 'newHashes': before, 'identity': identity,
+                  'addedContracts': added_contracts, 'addedInputs': sorted(set(before) - set(previous['testFiles'])),
+                  'commitSha': commit_sha, 'baseCommitSha': base_sha}
+        lock['refresh'] = {**record, 'recordedAt': datetime.now(timezone.utc).isoformat()}
+        prior_history = previous.get('refreshHistory', [previous['refresh']] if 'refresh' in previous else [])
+        if not isinstance(prior_history, list) or not all(isinstance(item, dict) for item in prior_history):
+            raise Blocked('prior refresh history is malformed')
+        lock['refreshHistory'] = [*prior_history, lock['refresh']]
+        temporary = target.with_name(f'{target.name}.{os.getpid()}.{time.time_ns()}.pending')
+        with temporary.open('x', encoding='utf-8') as stream:
             json.dump(lock, stream, sort_keys=True, indent=2)
-            stream.write("\n")
-    except FileExistsError as error:
-        raise Blocked("fail-first lock already exists; do not replace it during implementation") from error
+            stream.write('\n')
+        append_evidence(root, record)
+        os.replace(temporary, target)
+    else:
+        try:
+            with target.open("x", encoding="utf-8") as stream:
+                json.dump(lock, stream, sort_keys=True, indent=2)
+                stream.write("\n")
+        except FileExistsError as error:
+            raise Blocked("fail-first lock already exists; do not replace it during implementation") from error
     return target
 
 
@@ -789,6 +1168,7 @@ def verify_lock(root: Path, base_sha: str, tests: set[str], test_inputs: set[str
     if not target.is_file():
         raise Blocked("no fail-first lock exists; run `make test-gate TEST_GATE_PHASE=baseline` before implementation")
     lock = load_json(target, "fail-first lock")
+    verified_refresh_predecessors(root, lock)
     if lock.get("schema") != LOCK_SCHEMA or lock.get("baseCommitSha") != base_sha:
         raise Blocked("fail-first lock does not match the current base commit")
     locked_files = lock.get("testFiles")
@@ -804,7 +1184,7 @@ def verify_lock(root: Path, base_sha: str, tests: set[str], test_inputs: set[str
 
 
 def changed_code_mutation(root: Path, changed: set[str], base_sha: str) -> dict:
-    """Choose a changed JS/TS comparison or slice bound, or a Python return mutant."""
+    """Choose a changed JS/TS comparison, shell group kill, or Python return mutant."""
     for name in sorted(changed):
         if not is_production_code_path(name) or not name.endswith((".js", ".mjs", ".cjs", ".ts", ".tsx")):
             continue
@@ -836,6 +1216,26 @@ def changed_code_mutation(root: Path, changed: set[str], base_sha: str) -> dict:
                                 "end": (index + 1, start + len(bound.group(1))),
                                 "replacement": str(int(bound.group(1)) + 1)}
     for name in sorted(changed):
+        if not is_production_code_path(name) or not name.endswith(".sh"):
+            continue
+        source = root / name
+        if source.is_symlink() or not source.is_file():
+            continue
+        current = source.read_text(encoding="utf-8").splitlines(keepends=True)
+        base = run_git(root, "show", f"{base_sha}:{name}")
+        previous = base.stdout.splitlines(keepends=True) if base.returncode == 0 else []
+        for kind, _, _, first, last in difflib.SequenceMatcher(a=previous, b=current, autojunk=False).get_opcodes():
+            if kind == "equal":
+                continue
+            for index in range(first, last):
+                line = current[index]
+                if line.strip() in {'kill -KILL 0 2>/dev/null || true', 'kill -KILL "$PPID" 2>/dev/null || true'}:
+                    replacement = ('kill -KILL "$PPID" 2>/dev/null || true; kill -KILL 0 2>/dev/null || true'
+                                   if line.strip().startswith('kill -KILL 0 ') else ':')
+                    return {"path": name, "start": (index + 1, 0),
+                            "end": (index + 1, len(line.rstrip("\r\n").encode("utf-8"))),
+                            "replacement": replacement}
+    for name in sorted(changed):
         if not is_production_code_path(name) or not name.endswith(".py"):
             continue
         source = root / name
@@ -856,15 +1256,152 @@ def changed_code_mutation(root: Path, changed: set[str], base_sha: str) -> dict:
             if before and before != "None":
                 return {"path": name, "start": (node.value.lineno, node.value.col_offset),
                         "end": (node.value.end_lineno, node.value.end_col_offset), "replacement": "None"}
-    raise Blocked("no changed JavaScript comparison or Python return can be mutated; add a focused mutation contract for this change")
+    raise Blocked("no changed JavaScript comparison, shell group kill, or Python return can be mutated; add a focused mutation contract for this change")
 
 
-def mutation_observation(root: Path, gate_rules: dict, config: dict, changed: set[str], tests: set[str], commit_sha: str, base_sha: str) -> dict:
+def mutation_contracts(config: dict) -> dict:
+    """Normalize current and legacy contracts; obsolete upstreamMutation is metadata only."""
+    contracts = config.get("mutations", {})
+    if not isinstance(contracts, dict):
+        raise Blocked("mutations must be a map keyed by stable contract ids")
+    contracts = dict(contracts)
+    legacy = config.get("mutation")
+    if legacy is not None:
+        if not isinstance(legacy, dict):
+            raise Blocked("mutation must be a legacy contract object")
+        legacy_id = legacy.get("id", "spot-check")
+        if not isinstance(legacy_id, str) or not legacy_id.strip():
+            raise Blocked("legacy mutation id must be a nonempty string")
+        contracts.setdefault(legacy_id, legacy)
+    if not all(isinstance(key, str) and key.strip() and isinstance(value, dict) for key, value in contracts.items()):
+        raise Blocked("mutations must contain contract objects under nonempty stable ids")
+    return {key: {**value, "id": key} for key, value in contracts.items()}
+
+
+def mutation_command_spec(root: Path, gate_rules: dict, config: dict, mutation: dict) -> dict:
+    mutation_tests = mutation.get("testPaths")
+    if not isinstance(mutation_tests, list) or not mutation_tests or not all(isinstance(name, str) for name in mutation_tests):
+        raise Blocked("mutation.testPaths must name the focused suite that detects the mutant")
+    if not all(safe_repo_path(name) and is_test_path(name) for name in mutation_tests):
+        raise Blocked("mutation.testPaths must be safe repository test files")
+    mutation_specs = command_specs(root, gate_rules, config, set(mutation_tests))
+    if len(mutation_specs) != 1 or mutation_specs[0]["id"] != mutation.get("testCheckId"):
+        raise Blocked("mutation must select one focused test command matching testCheckId")
+    return mutation_specs[0]
+
+
+def mutation_observation(root: Path, gate_rules: dict, config: dict, changed: set[str], tests: set[str], commit_sha: str, base_sha: str, passed_specs: list[dict] | None = None) -> list[dict]:
+    contracts = mutation_contracts(config)
+    if not contracts:
+        return [single_mutation_observation(root, gate_rules, config, changed, tests, commit_sha, base_sha)]
+    inputs = {".driver/test-gate.json", ".driver/gate-rules.json"}
+    specs = {}
+    environment = os.environ.copy()
+    for key, contract in contracts.items():
+        name = contract.get("path")
+        if not isinstance(name, str) or not safe_repo_path(name):
+            raise Blocked("mutation target must be a safe repository file")
+        specs[key] = mutation_command_spec(root, gate_rules, config, contract)
+        inputs.update([name, *contract["testPaths"]])
+        if isinstance(contract.get("scriptEnv"), str):
+            environment.pop(contract["scriptEnv"], None)
+    if any(is_production_code_path(name) for name in changed):
+        current = any(contract.get("path") in changed and isinstance(contract.get("testPaths"), list)
+                      and contract["testPaths"] and all(isinstance(name, str) and name in tests for name in contract["testPaths"])
+                      for contract in contracts.values())
+        if not current:
+            raise Blocked("changed production code has only inherited entries; add a focused mutation contract for this change")
+    before = test_hashes(root, inputs)
+    fingerprint = worktree_fingerprint(root, base_sha)
+
+    def verify_contract_inputs() -> None:
+        if test_hashes(root, inputs) != before or worktree_fingerprint(root, base_sha) != fingerprint:
+            raise Blocked("contract inputs or worktree changed during mutation verification")
+
+    passed = {(spec["cwd"], tuple(spec["command"])) for spec in passed_specs or []}
+    heads = {}
+    for key, spec in specs.items():
+        identity = (spec["cwd"], tuple(spec["command"]))
+        if identity not in passed:
+            heads[key] = spec
+            passed.add(identity)
+
+    def head_job(key, spec):
+        with ExitStack() as cleanup:
+            snapshot = mutation_snapshot(root, base_sha, tests | set(spec['testFiles']), changed, cleanup)
+            head = run_command(root, snapshot, {**spec, 'contractId': f'head:{key}'}, phase="mutation-head-tests", commit_sha=commit_sha, base_sha=base_sha,
+                               expected="zero exit with at least one passing test on unmutated head", environment=environment)
+            verify_contract_inputs()
+            counts = validate_counts(head, spec, phase="unmutated head")
+            if head["exitCode"] or counts["failures"] or counts["errors"] or counts["passed"] <= 0:
+                raise GateFailure("configured mutation suite must pass on unmutated head")
+            return head
+
+    def mutant_job(key, contract):
+        observation = single_mutation_observation(root, gate_rules, {**config, "mutation": contract}, changed, tests, commit_sha, base_sha)
+        verify_mutation_attribution(root, contract, observation)
+        verify_contract_inputs()
+        return observation
+
+    mutation_jobs(root, heads, head_job)
+    return mutation_jobs(root, contracts, mutant_job)
+
+
+def mutation_snapshot(root: Path, base_sha: str, tests: set[str], changed: set[str], cleanup: ExitStack) -> Path:
+    snapshot = prepare_base_snapshot(root, base_sha, tests)
+    cleanup.callback(shutil.rmtree, snapshot)
+    for name in sorted(changed):
+        source, target = root / name, snapshot / name
+        if source.is_symlink():
+            raise Blocked('changed linked inputs cannot be materialized as regular private files')
+        if source.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read_bytes())
+            target.chmod(source.stat().st_mode & 0o777)
+        elif not source.exists() and not source.is_symlink():
+            if target.is_file() or target.is_symlink():
+                target.unlink()
+            elif target.exists():
+                raise Blocked('deleted input is not a regular file in the private tree')
+        else:
+            raise Blocked('changed input is not a regular file in the private tree')
+    # Worktree/index/refs are private; only immutable Git objects are shared.
+    git_value(snapshot, 'init', '--quiet', '--template=')
+    objects = Path(git_value(root, 'rev-parse', '--git-path', 'objects'))
+    objects = objects if objects.is_absolute() else root / objects
+    (snapshot / '.git/objects/info/alternates').write_text(str(objects.resolve()) + '\n')
+    git_value(snapshot, 'update-ref', 'refs/heads/test-gate', current_commit(root))
+    git_value(snapshot, 'symbolic-ref', 'HEAD', 'refs/heads/test-gate')
+    git_value(snapshot, 'update-ref', 'refs/remotes/origin/main', base_sha)
+    git_value(snapshot, 'read-tree', 'HEAD')
+    origin = run_git(root, 'remote', 'get-url', 'origin')
+    if origin.returncode == 0:
+        git_value(snapshot, 'remote', 'add', 'origin', origin.stdout.strip())
+    return snapshot
+
+
+def verify_mutation_attribution(root: Path, contract: dict, observation: dict) -> None:
+    content = (root / contract['path']).read_text(encoding='utf-8')
+    digest = sha256_bytes(content.replace(contract['before'], contract['after'], 1).encode('utf-8'))
+    record = observation['record']
+    expected = (contract['id'], contract['path'], digest, observation['exitCode'])
+    actual = (record.get('contractId'), record.get('mutationPath'), record.get('mutantSha256'), record.get('exitCode'))
+    if actual != expected:
+        raise Blocked('mutation result attribution mismatch')
+
+
+def single_mutation_observation(root: Path, gate_rules: dict, config: dict, changed: set[str], tests: set[str], commit_sha: str, base_sha: str) -> dict:
+    with ExitStack() as cleanup:
+        return _single_mutation_observation(root, gate_rules, config, changed, tests, commit_sha, base_sha, cleanup)
+
+
+def _single_mutation_observation(root: Path, gate_rules: dict, config: dict, changed: set[str], tests: set[str], commit_sha: str, base_sha: str, cleanup: ExitStack) -> dict:
     configured = config.get("mutation")
-    if not isinstance(configured, dict) or configured.get("path") not in changed:
+    if not isinstance(configured, dict):
         target = changed_code_mutation(root, changed, base_sha)
         name = target["path"]
         snapshot = prepare_base_snapshot(root, base_sha, tests)
+        cleanup.callback(shutil.rmtree, snapshot)
         for path_name in sorted(changed):
             source = root / path_name
             if source.is_file() and not source.is_symlink():
@@ -913,43 +1450,26 @@ def mutation_observation(root: Path, gate_rules: dict, config: dict, changed: se
         raise Blocked("mutation needs path, exact before/after text, testCheckId, and a why note")
     if not is_production_code_path(path_name) and not isinstance(env_name, str):
         raise Blocked("non-code mutation needs scriptEnv")
-    if not safe_repo_path(path_name) or path_name not in changed:
-        raise Blocked("mutation target must be a changed repository file in this diff")
+    if not safe_repo_path(path_name):
+        raise Blocked("mutation target must be a safe repository file")
     source = root / path_name
     if source.is_symlink() or not source.is_file():
         raise Blocked("mutation target is missing or linked")
     content = source.read_text(encoding="utf-8")
     if content.count(before) != 1 or before == after:
         raise Blocked("mutation text must match exactly once and change the target")
-    mutation_tests = mutation.get("testPaths")
-    if not isinstance(mutation_tests, list) or not mutation_tests or not all(isinstance(name, str) for name in mutation_tests):
-        raise Blocked("mutation.testPaths must name the focused suite that detects the mutant")
-    if not set(mutation_tests).issubset(changed) or not all(is_test_path(name) for name in mutation_tests):
-        raise Blocked("mutation.testPaths must be changed test files from this diff")
-    mutation_specs = command_specs(root, gate_rules, config, set(mutation_tests))
-    if len(mutation_specs) != 1 or mutation_specs[0]["id"] != check_id:
-        raise Blocked("mutation must select one focused test command matching testCheckId")
-    test_spec = mutation_specs[0]
+    test_spec = mutation_command_spec(root, gate_rules, config, mutation)
+    mutation_tests = mutation["testPaths"]
     if env_name is not None and not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", env_name):
         raise Blocked("mutation scriptEnv must be an uppercase environment variable name")
     mutated = content.replace(before, after, 1).encode("utf-8")
     digest = sha256_bytes(mutated)
-    if env_name is None:
-        snapshot = prepare_base_snapshot(root, base_sha, tests)
-        for changed_name in sorted(changed):
-            changed_source = root / changed_name
-            if changed_source.is_file() and not changed_source.is_symlink():
-                destination = snapshot / changed_name
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(changed_source.read_bytes())
-        (snapshot / path_name).write_bytes(mutated)
-    else:
-        mutant_path = root / EVIDENCE_REL / "mutants" / digest / Path(path_name).name
-        mutant_path.parent.mkdir(parents=True, exist_ok=True)
-        if not mutant_path.exists():
-            mutant_path.write_bytes(mutated)
+    snapshot = mutation_snapshot(root, base_sha, tests | set(mutation_tests), changed, cleanup)
+    mutant_path = snapshot / path_name
+    mutant_path.write_bytes(mutated)
     spec = {
         "id": f"mutation:{mutation.get('id', 'spot-check')}",
+        "contractId": mutation.get("id", "spot-check"),
         "command": test_spec["command"],
         "cwd": test_spec["cwd"],
         "testFiles": test_spec.get("testFiles", []),
@@ -963,7 +1483,7 @@ def mutation_observation(root: Path, gate_rules: dict, config: dict, changed: se
         environment[env_name] = str(mutant_path)
     observation = run_command(
         root,
-        snapshot if env_name is None else root,
+        snapshot,
         spec,
         phase="mutation-spot-check",
         commit_sha=commit_sha,
@@ -983,11 +1503,68 @@ def mutation_observation(root: Path, gate_rules: dict, config: dict, changed: se
     return observation
 
 
-def run_test_gate(root: Path, phase: str, base_override: str | None, commit_sha: str) -> dict:
+def change_only_warning(root: Path, kind: str = "config-only") -> str:
+    """Report the proof limitation without making annotation delivery a gate."""
+    warning = ("test-only: head tests passed; fail-first and mutation proof are not required" if kind == "test-only"
+               else "config-only: no mutation contract; relies on real pipeline run")
+    print(f"WARNING [test-gate]: {warning}")
+    checkout = os.environ.get("BUILDKITE_BUILD_CHECKOUT_PATH")
+    if os.environ.get("BUILDKITE") and checkout and root.resolve() == Path(checkout).resolve():
+        try:
+            subprocess.run(
+                ["buildkite-agent", "annotate", "--style", "warning", "--context", f"test-gate-{kind}", warning],
+                cwd=root, capture_output=True, text=True, check=True, timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            print("WARNING [test-gate]: could not publish Buildkite annotation; see warning above.")
+    return warning
+
+
+def select_mutation_contracts(config: dict, changed: set[str], mode: str) -> dict:
+    """Uncertain mappings and edits to proof inputs always select the full registry."""
+    if mode not in {'all', 'affected'}:
+        raise Blocked('mutation mode must be all or affected')
+    contracts = mutation_contracts(config)
+    valid_mapping = all(isinstance(contract.get('path'), str) and safe_repo_path(contract['path'])
+                        and isinstance(contract.get('testPaths'), list) and contract['testPaths']
+                        and all(isinstance(name, str) and safe_repo_path(name) for name in contract['testPaths'])
+                        for contract in contracts.values())
+    mapped = {name for contract in contracts.values() for name in [contract['path'], *contract['testPaths']]} if valid_mapping else set()
+    gate_inputs = {'Makefile', 'scripts/gate.py', 'scripts/test_gate_runner.py',
+                   'scripts/ci_install.py', 'scripts/model_negative_controls.mjs', 'scripts/review_preflight.mjs'}
+    proof_change = not valid_mapping or any(is_test_path(name) or name in gate_inputs
+        or set(PurePosixPath(name).parts) & {'tests', 'test', '__tests__', 'fixtures'}
+        or name.startswith(('.driver/', '.buildkite/', 'config/model-negative-controls', 'scripts/review_', 'lib/model-fidelity/', 'docs/design/'))
+        or 'gate' in PurePosixPath(name).stem
+        or (name.startswith('scripts/') and 'test' in PurePosixPath(name).stem) for name in changed)
+    full = mode == 'all' or proof_change or bool(changed - mapped)
+    selected = contracts if full else {key: contract for key, contract in contracts.items() if contract['path'] in changed or set(contract['testPaths']) & changed}
+    reason = 'explicit-full' if mode == 'all' else 'proof-input-change' if proof_change else 'unmapped-file' if changed - mapped else 'mapped-targets'
+    return {**{key: value for key, value in config.items() if key != 'mutation'},
+            'mutations': selected, 'mutationSelection': {'mode': mode, 'reason': reason, 'available': len(contracts), 'selected': len(selected)}}
+
+
+def run_test_gate(root: Path, phase: str, base_override: str | None, commit_sha: str, reason: str | None = None, mutation_mode: str = 'all') -> dict:
     gate_rules, config = load_rules(root)
+    requested_base = base_override or gate_rules.get('baseRef')
+    if not isinstance(requested_base, str) or not requested_base or requested_base.startswith('-'):
+        raise Blocked('base ref is missing or invalid')
+    require_fresh_anchor(root, gate_rules, commit_sha, requested_base)
     base_ref, base_sha = resolve_base(root, gate_rules, base_override)
     paths, tests, code, test_inputs = working_tree_paths(root, base_sha)
-    if not paths:
+    if phase == 'refresh':
+        if not reason or not reason.strip():
+            raise Blocked('refresh requires a nonempty reason')
+        if not tests:
+            raise Blocked('refresh requires changed tests and an existing fail-first lock')
+        specs = command_specs(root, gate_rules, config, tests)
+        lock = baseline_lock(root, gate_rules, config, base_ref, base_sha, commit_sha, tests, test_inputs, specs, reason, refresh=True)
+        return {'status': 'pass', 'phase': phase, 'reason': 'Fail-first lock refreshed; run the normal check and make gate.',
+                'commitSha': commit_sha, 'baseCommitSha': base_sha, 'lockPath': str(lock.relative_to(root))}
+    # Keep the exact loaded configuration for baseline/control-lock comparison.
+    # Selection is execution metadata, never a replacement for the locked inputs.
+    selected_config = select_mutation_contracts(config, paths, mutation_mode) if phase == 'check' else config
+    if not paths and not (phase == "check" and mutation_mode == "all" and mutation_contracts(config)):
         return {
             "status": "pass",
             "phase": phase,
@@ -1001,10 +1578,19 @@ def run_test_gate(root: Path, phase: str, base_override: str | None, commit_sha:
             raise Blocked('fixture correction requires a changed test specification')
         if code:
             raise Blocked(f"changed code has no changed tests: {', '.join(sorted(code))}")
+        if mutation_contracts(selected_config):
+            observations = mutation_observation(root, gate_rules, selected_config, paths, tests, commit_sha, base_sha)
+            return {
+                "status": "pass", "phase": phase,
+                "reason": "Inherited mutation contracts passed; no changed-test count or fail-first proof is claimed.",
+                "commitSha": commit_sha, "baseCommitSha": base_sha,
+                "mutationPaths": [item["record"]["mutationPath"] for item in observations], "mutationCaught": True,
+                "mutationSelection": selected_config.get("mutationSelection"),
+            }
         return {
             "status": "pass",
             "phase": phase,
-            "reason": "Documentation or non-code changes only; no test count or pass rate is claimed.",
+            "reason": change_only_warning(root) + "; no test count or pass rate is claimed.",
             "commitSha": commit_sha,
             "baseCommitSha": base_sha,
             "testsObserved": None,
@@ -1040,8 +1626,22 @@ def run_test_gate(root: Path, phase: str, base_override: str | None, commit_sha:
                 (p.get('checkId'), p.get('testHashes'), p.get('baseObservation', {}).get('testCounts'))
                 for p in old_hermetic if isinstance(p, dict)]:
             raise Blocked('hermetic correction proof missing or inconsistent with host contrast runs')
-    else:
+    elif code:
         lock = baseline_lock(root, gate_rules, config, base_ref, base_sha, commit_sha, tests, test_inputs, specs)
+    else:
+        verify_prior_locks(root, base_sha, test_hashes(root, test_inputs))
+        lock = None
+
+    before = test_hashes(root, test_inputs)
+
+    def verify_inputs() -> None:
+        if lock is not None:
+            verify_lock(root, base_sha, tests, test_inputs)
+        if not code:
+            _, current_tests, current_code, current_inputs = working_tree_paths(root, base_sha)
+            if (current_code or current_tests != tests or current_inputs != test_inputs
+                    or test_hashes(root, test_inputs) != before):
+                raise Blocked("test-only inputs or production source changed during the test run")
 
     for spec in specs:
         observation = run_command(
@@ -1053,33 +1653,41 @@ def run_test_gate(root: Path, phase: str, base_override: str | None, commit_sha:
             base_sha=base_sha,
             expected="zero exit with at least one passing test",
         )
-        verify_lock(root, base_sha, tests, test_inputs)
+        verify_inputs()
         counts = validate_counts(observation, spec, phase="implementation test run")
         if observation["exitCode"] != 0 or counts["failures"] or counts["errors"]:
             raise GateFailure(f"implementation tests failed: {spec['id']} exited {observation['exitCode']}")
         if counts["passed"] <= 0:
             raise Blocked(f"{spec['id']}: no passing tests were observed")
 
-    mutation_result = mutation_observation(root, gate_rules, config, paths, tests, commit_sha, base_sha)
-    verify_lock(root, base_sha, tests, test_inputs)
+    reason = change_only_warning(root, "test-only") if not code else "Fail-first lock, read-only test diff, host counts, implementation tests, and mutation spot-check passed."
+    mutation_details = {}
+    if code or mutation_contracts(selected_config):
+        mutation_result = mutation_observation(root, gate_rules, selected_config, paths, tests, commit_sha, base_sha, passed_specs=specs)
+        mutation_details = {"mutationPath": mutation_result[-1]["record"]["mutationPath"],
+                            "mutationPaths": [item["record"]["mutationPath"] for item in mutation_result],
+                            "mutationCaught": True}
+    verify_inputs()
     return {
         "status": "pass",
         "phase": "check",
-        "reason": "Fail-first lock, read-only test diff, host counts, implementation tests, and mutation spot-check passed.",
+        "reason": reason,
         "commitSha": commit_sha,
         "baseCommitSha": base_sha,
         "testFiles": sorted(tests),
-        "mutationPath": mutation_result["record"]["mutationPath"],
-        "mutationCaught": True,
-        "lockPath": str(lock.relative_to(root)),
+        **mutation_details,
+        "mutationSelection": selected_config.get("mutationSelection"),
+        **({"lockPath": str(lock.relative_to(root))} if lock is not None else {}),
     }
 
 
 def main(argv: list[str] | None = None) -> int:
     args = argparse.ArgumentParser(description=__doc__)
     args.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="repository root (defaults to this script's repository)")
-    args.add_argument("--phase", choices=("baseline", "check"), default="check")
-    args.add_argument("--base", help="override the baseRef from .driver/gate-rules.json")
+    args.add_argument("--phase", choices=("baseline", "check", "refresh"), default="check")
+    args.add_argument("--mutations", choices=("all", "affected"), default="all", help="full registry, or fail-safe PR target selection; proof-input edits always run all")
+    args.add_argument("--reason", help="required explanation for a lock refresh")
+    args.add_argument("--base", help="comparison revision only; configured live freshness anchor remains required")
     options = args.parse_args(argv)
     root = options.root.resolve()
     started = time.monotonic()
@@ -1090,7 +1698,7 @@ def main(argv: list[str] | None = None) -> int:
     result = None
     try:
         commit_sha = current_commit(root)
-        result = run_test_gate(root, options.phase, options.base, commit_sha)
+        result = run_test_gate(root, options.phase, options.base, commit_sha, options.reason, options.mutations)
         status = result["status"]
         reason = result["reason"]
         exit_code = 0

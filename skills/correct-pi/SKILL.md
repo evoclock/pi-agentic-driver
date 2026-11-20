@@ -7,7 +7,7 @@ license: MIT; see ../how/LICENSE
 
 # Correct repeated mistakes for Pi
 
-Adapted from Lauren Tan's pstack `correct` at `cursor/plugins@99743e9c151c8537cbbf1f98bb38f34ef3368453` (MIT). Preserve evidence-based mistake classes, architecture-before-prose, a failing check against an actual mistake and a rule/enforcer map. This method is not permission to read unrelated conversations, alter project instructions, install a lint tool, rewrite a repository, commit, run CI or push. Read `../how/WORKFLOW_BOUNDARIES.md` before effectful work.
+Adapted from Lauren Tan's pstack `correct` (MIT). Preserve evidence-based mistake classes, architecture-before-prose, a failing check against an actual mistake and a rule/enforcer map. This method is not permission to read unrelated conversations, alter project instructions, install a lint tool, rewrite a repository, commit, run CI or push. Read `../how/WORKFLOW_BOUNDARIES.md` before effectful work.
 
 ## 1. Find a repeated class
 
@@ -26,7 +26,7 @@ Inspect inventory and existing enforcement before adding a helper, function, scr
 
 ## 3. Prove the barrier and record ownership
 
-Reproduce a **real past mistake** at a safe, red-capable seam before claiming the new check prevents it. Record the observed failure from the same check that will guard future work, then the corrected case passing. If local and CI routes both exist and are separately approved, verify the same check in each; otherwise mark CI `unrun`. Make one verified unit per class, not an unsolicited series of commits. Document approved rules in a rule-to-enforcer table in the authorized project instruction destination, or propose the table without writing when that file is outside scope. On a later owner correction, update the fix and table; a rule with no enforcing check is a signal to improve structure. Remove an obsolete rule only after proving its mistake cannot occur.
+Reproduce a **real past mistake** at a safe, red-capable seam before claiming the new check prevents it. Record the observed failure from the same check that will guard future work, then the corrected case passing. If local and CI routes both exist and are separately approved, verify the same check in each; otherwise mark CI `unrun`. When returning only a plan with no observed check, end with `Local red/green: unrun; CI: unrun` rather than suggesting the proof ran. Make one verified unit per class, not an unsolicited series of commits. Document approved rules in a rule-to-enforcer table in the authorized project instruction destination, or propose the table without writing when that file is outside scope. In a plan, name the existing scanner as the enforcer of the proposed rule; a table entry without an identified enforcer cannot show how the rule is checked. On a later owner correction, update the fix and table; a rule with no enforcing check is a signal to improve structure. Remove an obsolete rule only after proving its mistake cannot occur.
 
 Hand back each class, two source pointers, chosen enforcement level, reason higher levels failed, observed red/green output, exception and runtime/CI gaps. Only the repository owner chooses any merge or publication.
 
@@ -34,3 +34,7 @@ Hand back each class, two source pointers, chosen enforcement level, reason high
 - **Refusal BDD:** Given only one occurrence, no permission for history/instructions/tests, or no safe red seam, when asked to install a global rule or claim prevention, then label the class unproven or work `blocked`/`unrun`, and do not mutate instructions, commit or manufacture green evidence.
 
 A skill discovered in Pi is not proof that any mistake is prevented.
+
+## Limits
+
+The red and green checks are enforced by the chosen repository mechanism, if any. This skill supplies guidance, not a runtime guard; a prose rule without a failing check is not prevention.

@@ -1,0 +1,23 @@
+{
+  "schema": "review-preflight.parser-observation.v1",
+  "date": "2026-11-17",
+  "regressionBase": "a5ca1e374765166e5823a7385fbe395526cf6a50",
+  "nativeFailFirst": {
+    "result": "pass",
+    "suites": [
+      {"path":"tests/test_model_negative_controls.mjs","tests":5,"failures":1,"errors":0},
+      {"path":"tests/test_model_obligations.mjs","tests":3,"failures":3,"errors":0}
+    ]
+  },
+  "officialBase": "98009d04a40d91413392d38f9b64d413cffad218",
+  "officialBaseline": "pass",
+  "officialCheck": "pass",
+  "totalContracts": 110,
+  "newControls": [
+    {"id":"review-obligation-token-boundaries","exit":1,"tests":3,"failures":1,"errors":0},
+    {"id":"review-obligation-block-comments","exit":1,"tests":3,"failures":2,"errors":0}
+  ],
+  "localFullGate": "pass",
+  "environmentWaivers": [],
+  "scope": "Sanitized observations; original native evidence and frozen locks remain unchanged in the verification checkout"
+}

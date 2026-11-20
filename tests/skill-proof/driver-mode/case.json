@@ -1,0 +1,1 @@
+{"prompt":"Route these requests without executing them: (1) ship a change to a review PR; (2) fix a typo in a function; (3) make a weekly build recap. Say which route applies to each.","mustInclude":["(?i)ship","(?i)ordinary","(?i)weekly-build-recap|weekly recap"]}

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "model-fidelity.records.v1",
+  "description": "Shared v1 record envelopes. The operation-specific payload and cross-field rules are validated by records.mjs.",
+  "oneOf": [
+    { "$ref": "#/$defs/plan" }, { "$ref": "#/$defs/design" },
+    { "$ref": "#/$defs/action-map" }, { "$ref": "#/$defs/environment" },
+    { "$ref": "#/$defs/evidence" }, { "$ref": "#/$defs/review" },
+    { "$ref": "#/$defs/view" }, { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/result" }, { "$ref": "#/$defs/caller-step" }
+  ],
+  "$defs": {
+    "plan": { "type": "object", "required": ["schema", "id", "goals", "currentGenerationRule", "allowedPostDeathCompletion", "initialConditions", "exclusions", "failureCases", "progressRequirements", "scope", "intendedRollback"], "properties": { "schema": { "const": "model-fidelity.plan.v1" } }, "additionalProperties": true },
+    "design": { "type": "object", "required": ["schema", "id", "planId", "mode", "sourceRefs", "modelRefs", "configRefs", "dependencyRefs", "actionIds", "environmentId"], "properties": { "schema": { "const": "model-fidelity.design.v1" }, "mode": { "enum": ["protocol", "light"] } }, "additionalProperties": true },
+    "action-map": { "type": "object", "required": ["schema", "actionId", "kind", "modelLocation", "actor", "session", "privilege", "realOperation", "sourceEvidenceIds", "preconditions", "observedValue", "observedFrom", "protectedInterval", "effectPoint", "assumptions"], "properties": { "schema": { "const": "model-fidelity.action-map.v1" } }, "additionalProperties": true },
+    "environment": { "type": "object", "required": ["schema", "id", "events", "omissions"], "properties": { "schema": { "const": "model-fidelity.environment.v1" } }, "additionalProperties": true },
+    "evidence": { "type": "object", "required": ["schema", "id", "claim", "artifactDigest", "origin"], "properties": { "schema": { "const": "model-fidelity.evidence.v1" } }, "additionalProperties": true },
+    "review": { "type": "object", "required": ["schema", "id", "bundleId", "reviewer", "provenance", "challengeSchedules", "evidenceIds", "unresolvedAssumptions"], "properties": { "schema": { "const": "model-fidelity.review.v1" } }, "additionalProperties": true },
+    "view": { "type": "object", "required": ["schema", "bundleDigest", "viewId", "mode", "states", "transitions", "findings"], "properties": { "schema": { "const": "model-fidelity.view.v1" } }, "additionalProperties": true },
+    "request": { "type": "object", "required": ["schema", "requestId", "unitId", "attemptId", "operation", "payload"], "properties": { "schema": { "const": "model-fidelity.request.v1" }, "operation": { "enum": ["prepare", "check", "assess", "diagram", "evaluate", "read"] } }, "additionalProperties": true },
+    "result": { "type": "object", "required": ["schema", "requestId", "unitId", "attemptId", "operation", "status", "continuation", "findings", "checks", "correspondence", "runtime", "diagrams", "artifactIds", "errors", "authorityCreated"], "properties": { "schema": { "const": "model-fidelity.result.v1" }, "continuation": { "enum": ["continue", "stop-red-line"] }, "rollback": { "enum": ["not-needed", "suggested", "deprecated", "observed", "failed", "unknown", "not-permitted"] }, "authorityCreated": { "const": false } }, "additionalProperties": true },
+    "caller-step": { "type": "object", "required": ["schema", "id", "unitId", "attemptId", "kind"], "properties": { "schema": { "const": "model-fidelity.caller-step.v1" }, "kind": { "enum": ["review", "runtime", "rollback", "red-line-stop"] } }, "additionalProperties": true }
+  }
+}

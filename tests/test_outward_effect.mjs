@@ -13,7 +13,7 @@ const runner = join(root, "tests/fixtures/outward-effect/crash-runner.mjs");
 const gh = join(root, "tests/fixtures/outward-effect/fake-gh.mjs");
 chmodSync(gh, 0o755);
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
-async function fixture(t, action, symlinkedCwd = false) {
+async function fixture(t, action, symlinkedCwd = false, failingChecks = false) {
   const parent = mkdtempSync(join(realpathSync(tmpdir()), "durable-outward-test-"));
   t.after(() => {
     if (process.platform !== "darwin") return;
@@ -33,7 +33,8 @@ async function fixture(t, action, symlinkedCwd = false) {
   git(cwd, "config", "user.name", "Fixture");
   git(cwd, "config", "user.email", "fixture@example.invalid");
   writeFileSync(join(cwd, "file.txt"), "sample\n");
-  git(cwd, "add", "file.txt");
+  writeFileSync(join(cwd, "Makefile"), `.PHONY: test-gate pre-push\ntest-gate pre-push:\n\t@exit ${failingChecks ? 1 : 0}\n`);
+  git(cwd, "add", "file.txt", "Makefile");
   git(cwd, "commit", "-q", "-m", "fixture");
   git(cwd, "remote", "add", "origin", remote);
   const targetHead = git(cwd, "rev-parse", "HEAD");
@@ -66,6 +67,16 @@ async function fixture(t, action, symlinkedCwd = false) {
     setState: (state) => writeFileSync(statePath, JSON.stringify(state)) };
 }
 
+// Why: the outward adapter must refuse a new push when the actual checkout fails verification.
+test("failed checkout gates prevent an outward push", async (t) => {
+  const f = await fixture(t, "push", false, true);
+  const result = f.invoke(null);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).ok, false);
+  assert.equal(git(f.cwd, "ls-remote", "origin", "refs/heads/feat/test"), "");
+});
+
+// Why: crash recovery must observe remote effects without unsafe replay.
 test("kill before push: admitted checkpoint needs a new confirmed call", async (t) => {
   const f = await fixture(t, "push");
   const killed = f.invoke("before-effect");
@@ -77,6 +88,7 @@ test("kill before push: admitted checkpoint needs a new confirmed call", async (
   assert.equal(git(f.cwd, "ls-remote", "origin", "refs/heads/feat/test").split("\t")[0], f.request.targetHead);
 });
 
+// Why: crash recovery must observe remote effects without unsafe replay.
 test("kill after push before commit: remote proof resolves without replay", async (t) => {
   const f = await fixture(t, "push");
   const killed = f.invoke("after-effect");
@@ -90,6 +102,7 @@ test("kill after push before commit: remote proof resolves without replay", asyn
   assert.equal(JSON.parse(resumed.stdout).status, "verified");
 });
 
+// Why: crash recovery must observe remote effects without unsafe replay.
 test("kill after PR create before commit: matching private draft is observed, not created again", async (t) => {
   const f = await fixture(t, "pr-create");
   const killed = f.invoke("after-effect");
@@ -101,6 +114,7 @@ test("kill after PR create before commit: matching private draft is observed, no
   assert.equal(f.state().writes, 1);
 });
 
+// Why: crash recovery must observe remote effects without unsafe replay.
 test("kill after PR update before commit: exact updated draft is observed without a second PATCH", async (t) => {
   const f = await fixture(t, "pr-update");
   const killed = f.invoke("after-effect");
@@ -113,6 +127,7 @@ test("kill after PR update before commit: exact updated draft is observed withou
 });
 
 for (const action of ["pr-create", "pr-update"]) {
+  // Why: crash recovery must observe remote effects without unsafe replay.
   test(`kill before ${action}: new confirmed call applies once`, async (t) => {
     const f = await fixture(t, action);
     const killed = f.invoke("before-effect");
@@ -125,6 +140,7 @@ for (const action of ["pr-create", "pr-update"]) {
   });
 }
 
+// Why: crash recovery must observe remote effects without unsafe replay.
 test("a symlinked journey cwd resolves to the same canonical repository", async (t) => {
   const f = await fixture(t, "push", true);
   const result = f.invoke(null);
@@ -133,6 +149,7 @@ test("a symlinked journey cwd resolves to the same canonical repository", async 
 });
 
 for (const mismatch of ["multiple", "title-body"]) {
+  // Why: crash recovery must observe remote effects without unsafe replay.
   test(`PR ${mismatch} ambiguity after a crash blocks without a second create`, async (t) => {
     const f = await fixture(t, "pr-create");
     const killed = f.invoke("after-effect");
@@ -148,6 +165,7 @@ for (const mismatch of ["multiple", "title-body"]) {
   });
 }
 
+// Why: crash recovery must observe remote effects without unsafe replay.
 test("transient push observation failure blocks, then a new effect ID observes the landed push", async (t) => {
   const f = await fixture(t, "push");
   const first = f.invoke(null, true);
@@ -161,6 +179,7 @@ test("transient push observation failure blocks, then a new effect ID observes t
   assert.equal(git(f.cwd, "ls-remote", "origin", "refs/heads/feat/test").split("\t")[0], f.request.targetHead);
 });
 
+// Why: crash recovery must observe remote effects without unsafe replay.
 test("transient PR observation failure blocks, then a new effect ID observes the existing draft", async (t) => {
   const f = await fixture(t, "pr-create");
   const first = f.invoke(null, true);
@@ -173,6 +192,7 @@ test("transient PR observation failure blocks, then a new effect ID observes the
   assert.equal(f.state().writes, 1);
 });
 
+// Why: crash recovery must observe remote effects without unsafe replay.
 test("outward records reject a stray worker role", async (t) => {
   const f = await fixture(t, "push");
   const store = await openDurableSeamStore({ directory: join(f.parent, "store"), orphanWaitMs: 100 });
@@ -184,6 +204,7 @@ test("outward records reject a stray worker role", async (t) => {
   } finally { await store.close(); }
 });
 
+// Why: crash recovery must observe remote effects without unsafe replay.
 test("PR creation rejects an unused PR number before any remote write", async (t) => {
   const f = await fixture(t, "pr-create");
   f.request.number = 1;
@@ -193,6 +214,7 @@ test("PR creation rejects an unused PR number before any remote write", async (t
   assert.equal(f.state().writes, 0);
 });
 
+// Why: crash recovery must observe remote effects without unsafe replay.
 test("existing exact push target verifies despite a changed local HEAD", async (t) => {
   const f = await fixture(t, "push");
   git(f.cwd, "push", "-q", "origin", `${f.request.targetHead}:refs/heads/feat/test`);
@@ -205,6 +227,7 @@ test("existing exact push target verifies despite a changed local HEAD", async (
   assert.equal(git(f.cwd, "ls-remote", "origin", "refs/heads/feat/test").split("\t")[0], f.request.targetHead);
 });
 
+// Why: crash recovery must observe remote effects without unsafe replay.
 test("existing exact PR update target verifies despite a stale prior-body digest", async (t) => {
   const f = await fixture(t, "pr-update");
   const state = f.state();
@@ -217,6 +240,7 @@ test("existing exact PR update target verifies despite a stale prior-body digest
   assert.equal(f.state().writes, 0);
 });
 
+// Why: crash recovery must observe remote effects without unsafe replay.
 test("ambiguous remote push after crash blocks without replay", async (t) => {
   const f = await fixture(t, "push");
   const killed = f.invoke("after-effect");

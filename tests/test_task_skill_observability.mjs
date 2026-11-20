@@ -94,9 +94,15 @@ function harness(journal = [], session = 's1') {
 }
 
 // Why: observability cannot certify itself through an author-modified shared verifier, including in public exports.
+// e741ef55 matched fc04023 (#136); the runner then changed in d5e74ed (#144),
+// 1e8d3d4 (#177), and b38cb17 (#185). This PR refreshes the pin again after
+// the multi-contract, outer-reporter, test-only warning, checkout-path annotation guard,
+// and base-snapshot child environment isolation changes. The intermediate main digest is not reused.
+// This pin includes bounded cleanup of completed base and mutant snapshots after their host observations.
+// It also covers the reviewed 380s per-command ceiling (MAX_COMMAND_SECONDS), matching .driver/test-gate.json.
 test('shared verifier matches the trusted pre-observer implementation', () => {
   const path = 'scripts/test_gate_runner.py';
-  const digest = 'e741ef55f909c3af8eb135a40b6de1001af7ef369cb924b5fb6d4be6a2915d8a';
+  const digest = 'aa88bd50649b1689215ca5c652d646f7f2cd825bc58073d96b6399a9f94932ee';
   const file = new URL(`../${path}`, import.meta.url);
   assert.ok(existsSync(file), `trusted verification file missing: ${path}`);
   assert.equal(createHash('sha256').update(readFileSync(file)).digest('hex'), digest, path);

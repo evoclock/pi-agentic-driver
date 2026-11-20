@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { readFileSync } from "node:fs";
+import { buildStallNudge, createStallDetector, DEFAULT_STALL_CONFIG } from "./stall_detector_pi.js";
 
 export const LOOP_COMMAND = "loop-until-done";
 const CONFIG = new URL("../../.agentic-driver/loop-until-done.defaults.json", import.meta.url);
@@ -151,22 +152,58 @@ export function registerLoopUntilDone(pi, now = () => Date.now(), config = loadL
   config = loadLoopConfig(() => JSON.stringify(config));
   REGISTERED.add(pi);
   const budget = createLoopBudget((data) => pi.appendEntry(ENTRY_TYPE, data), now, config);
+  const detector = createStallDetector(DEFAULT_STALL_CONFIG, now);
+  let idleCheck = null;
+  const stopIdleCheck = () => { if (idleCheck !== null) clearInterval(idleCheck); idleCheck = null; };
+  const canNudge = () => {
+    const state = budget.snapshot();
+    const current = now();
+    return state && state.remaining > 0 && !state.expired && Number.isSafeInteger(current)
+      && current >= state.startedAt && current - state.startedAt < config.maxDurationMs;
+  };
+  const chase = () => {
+    if (!canNudge()) { detector.exhaust(); return false; }
+    const reason = detector.requestRecovery();
+    if (!reason) return false;
+    try { pi.sendUserMessage(buildStallNudge(reason)); }
+    catch { return false; }
+    return true;
+  };
   let pendingWake = null;
   let admitted = false;
   let successful = false;
   const cancelWake = () => { if (pendingWake !== null) clearTimeout(pendingWake); pendingWake = null; };
   pi.on("tool_call", (event) => {
     const result = budget.guard(event);
-    if (event?.toolName === "agentic_worker_dispatch" && event?.input?.action === "dispatch" && !result && budget.snapshot()) admitted = true;
+    if (event?.toolName === "agentic_worker_dispatch" && event?.input?.action === "dispatch" && !result && budget.snapshot()) {
+      if (!admitted) {
+        detector.reset();
+        detector.beginRun();
+        stopIdleCheck();
+        idleCheck = setInterval(() => {
+          detector.checkIdle();
+          if (detector.state() === "stalled") chase();
+          if (detector.state() === "recovery-attempted" || detector.state() === "exhausted") stopIdleCheck();
+        }, DEFAULT_STALL_CONFIG.idleTimeoutMs);
+        idleCheck.unref?.();
+      }
+      admitted = true;
+    } else if (admitted && event?.toolName !== "agentic_worker_dispatch") detector.observeToolCall(event);
     return result;
   });
+  pi.on("message_end", (event) => { if (admitted) detector.observeAssistantMessage(event?.message); });
   pi.on("tool_result", (event) => {
     if (admitted && event?.toolName === "agentic_worker_dispatch" && !event?.isError) successful = true;
   });
   pi.on("agent_settled", () => {
+    stopIdleCheck();
     if (!admitted) return;
     admitted = false;
-    if (!successful) return;
+    const stalled = detector.state() === "stalled" && chase();
+    const chased = detector.state() === "recovery-attempted";
+    detector.endRun();
+    if (!canNudge()) detector.exhaust();
+    if (!successful || stalled || chased) { successful = false; return; }
     successful = false;
     const state = budget.snapshot();
     if (!state || state.remaining < 1 || state.expired || pendingWake !== null) return;
@@ -180,15 +217,17 @@ export function registerLoopUntilDone(pi, now = () => Date.now(), config = loadL
     }, delay);
   });
   for (const event of ["session_start", "session_tree"]) {
-    pi.on(event, (_event, ctx) => { cancelWake(); admitted = false; successful = false; budget.restore(ctx.sessionManager.getEntries()); });
+    pi.on(event, (_event, ctx) => { cancelWake(); stopIdleCheck(); detector.reset(); admitted = false; successful = false; budget.restore(ctx.sessionManager.getEntries()); });
   }
-  pi.on("session_shutdown", () => { cancelWake(); admitted = false; successful = false; budget.restore([]); });
+  pi.on("session_shutdown", () => { cancelWake(); stopIdleCheck(); detector.reset(); admitted = false; successful = false; budget.restore([]); });
   pi.registerCommand(LOOP_COMMAND, {
     description: `Work toward a checkable goal with up to ${config.maxSteps} dispatch attempts and a ${config.maxDurationMs} ms time ceiling`,
     argumentHint: `<1-${config.maxSteps} steps> <approved goal> :: <observable exit check> | stop`,
     handler: async (args, ctx) => {
       if (args?.trim() === "stop") {
         cancelWake();
+        stopIdleCheck();
+        detector.exhaust();
         budget.stop();
         ctx?.ui?.notify?.("Loop stopped. No remaining step allowance.", "info");
         return;

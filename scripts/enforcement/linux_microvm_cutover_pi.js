@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { isNativeTuiContext } from "./native_tui_context.js";
+import { registerLinuxGuestChecks } from "./linux_microvm_checks_pi.js";
 
 export const LINUX_MICROVM_CUTOVER_TOOL = "agentic_linux_microvm_cutover";
 export const LINUX_MICROVM_CUTOVER_SCHEMA = "agentic-driver.linux-microvm-cutover.v1";
@@ -695,6 +696,7 @@ export function registerLinuxMicroVMCutoverInterface(pi, options = {}) {
         target: { type: "string", maxLength: 255, description: "Where the microVM runs: user@host, an ip, or the literal local. Relays the user's explicit choice; a new target is saved only after the user's native confirmation." },
       },
     }, execute });
+  registerLinuxGuestChecks(pi, options);
   pi.registerCommand?.("agentic-linux-microvm-cutover", { description: "Run the native-confirmed Linux microVM proof",
     handler: async (args, context) => commandArgumentsPresent(args)
       ? denied("denied", reason("input", "command-arguments-not-allowed", "Linux microVM cutover accepts no command arguments"))

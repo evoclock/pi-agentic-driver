@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 import { openDurableSeamStore } from "../scripts/enforcement/durable_assignment_pi.js";
 import {
   executeHerdrCommunication,
@@ -12,7 +13,121 @@ import {
   findUnconfirmedDelivery,
   resetHerdrDeliveriesForTests,
   TRUSTED_HERDR_EXECUTABLE,
+  HERDR_COMMUNICATION_PARAMETERS,
+  resolveTrustedHerdrExecutable,
+  trustedHerdrExecutableRealPath,
 } from "../scripts/enforcement/herdr_communication_pi.js";
+
+// Existing communication fixtures exercise process injection, not filesystem trust.
+// Keep this fake home inside repository scratch, never the operator's installation.
+function pinnedHerdrFixture({ version = "0.9.1", escaped = false, pinned = true, layout = "herdr" } = {}) {
+  const home = realpathSync(mkdtempSync(join(process.cwd(), "scratch/pinned-herdr-")));
+  const store = join(home, ".local/share/herdr");
+  const bin = join(home, ".local/bin");
+  const versionDir = join(escaped ? `${store}-escape` : store, version);
+  const binary = join(versionDir, layout);
+  const link = join(bin, "herdr");
+  mkdirSync(store, { recursive: true, mode: 0o755 });
+  mkdirSync(bin, { recursive: true, mode: 0o755 });
+  mkdirSync(join(binary, ".."), { recursive: true, mode: 0o755 });
+  writeFileSync(binary, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  if (pinned) symlinkSync(binary, link);
+  const homebrew = join(home, "Cellar/herdr/0.9.5/bin/herdr");
+  mkdirSync(join(homebrew, ".."), { recursive: true });
+  writeFileSync(homebrew, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const options = { testHomeDir: home, testUid: process.getuid(), testPlatform: "darwin",
+    testHomebrewExecutablePath: join(home, "missing-homebrew") };
+  return { home, store, bin, versionDir, binary, link, homebrew, options };
+}
+
+// Why: the explicit owned pin must work without Homebrew and take precedence when both are installed.
+test("trusted executable prefers the pinned direct version layout", () => {
+  const f = pinnedHerdrFixture();
+  assert.doesNotThrow(() => {
+    assert.equal(trustedHerdrExecutableRealPath(f.link, f.options), f.binary);
+    assert.equal(resolveTrustedHerdrExecutable(f.options), f.link);
+    assert.equal(resolveTrustedHerdrExecutable({ ...f.options, testHomebrewExecutablePath: f.homebrew }), f.link);
+  });
+});
+
+// Why: another uid cannot supply a trusted pinned executable even with otherwise safe modes.
+test("pinned executable rejects the wrong owner", () => {
+  const f = pinnedHerdrFixture();
+  assert.throws(() => trustedHerdrExecutableRealPath(f.link, { ...f.options, testUid: process.getuid() + 1 }));
+});
+
+// Why: each protected component must resist writes by other principals, not just the executable itself.
+test("pinned executable rejects writable binary, version, store and link parent", () => {
+  const f = pinnedHerdrFixture();
+  for (const path of [f.binary, f.versionDir, f.store, f.bin]) {
+    for (const mode of [0o775, 0o757]) {
+      chmodSync(path, mode);
+      assert.throws(() => trustedHerdrExecutableRealPath(f.link, f.options), path);
+      chmodSync(path, 0o755);
+    }
+  }
+});
+
+// Why: a valid-looking link or version symlink must not escape the canonical installation store.
+test("pinned executable rejects direct and version-directory symlink escapes", () => {
+  const escaped = pinnedHerdrFixture({ escaped: true });
+  assert.throws(() => trustedHerdrExecutableRealPath(escaped.link, escaped.options));
+  const f = pinnedHerdrFixture();
+  renameSync(f.versionDir, join(f.home, "outside-version"));
+  symlinkSync(join(f.home, "outside-version"), f.versionDir);
+  assert.throws(() => trustedHerdrExecutableRealPath(f.link, f.options));
+  const cellar = pinnedHerdrFixture({ pinned: false });
+  symlinkSync(cellar.homebrew, cellar.link);
+  assert.throws(() => trustedHerdrExecutableRealPath(cellar.link, cellar.options));
+});
+
+// Why: only the exact numeric version/direct binary layout is trusted, never arbitrary nested paths or non-executables.
+test("pinned executable rejects invalid versions, layouts, types and permissions", () => {
+  for (const version of ["latest", "0.9", "v0.9.1", "0.9.1-beta", "01.9.1"]) {
+    const f = pinnedHerdrFixture({ version });
+    assert.throws(() => trustedHerdrExecutableRealPath(f.link, f.options), version);
+  }
+  const nested = pinnedHerdrFixture({ layout: "other/herdr" });
+  assert.throws(() => trustedHerdrExecutableRealPath(nested.link, nested.options));
+  const f = pinnedHerdrFixture();
+  chmodSync(f.binary, 0o644);
+  assert.throws(() => trustedHerdrExecutableRealPath(f.link, f.options));
+  renameSync(f.binary, join(f.home, "saved-binary"));
+  mkdirSync(f.binary, { mode: 0o755 });
+  assert.throws(() => trustedHerdrExecutableRealPath(f.link, f.options));
+});
+
+// Why: an absent or untrusted pin must preserve the existing Cellar fallback without applying pinned ownership rules to Homebrew.
+test("trusted executable preserves Homebrew fallback and validation", () => {
+  const f = pinnedHerdrFixture({ pinned: false });
+  const options = { ...f.options, testHomebrewExecutablePath: f.homebrew, testUid: process.getuid() + 1 };
+  chmodSync(f.homebrew, 0o777);
+  assert.equal(trustedHerdrExecutableRealPath(f.homebrew), f.homebrew);
+  assert.doesNotThrow(() => assert.equal(resolveTrustedHerdrExecutable(options), f.homebrew));
+  symlinkSync(f.binary, f.link);
+  assert.doesNotThrow(() => assert.equal(resolveTrustedHerdrExecutable(options), f.homebrew));
+  assert.throws(() => resolveTrustedHerdrExecutable({ ...options, testHomebrewExecutablePath: f.binary }),
+    { code: "trusted_executable_unavailable" });
+});
+
+// Why: neither environment variable can redirect production resolution when both fixed candidates are absent.
+test("trusted executable ignores PATH-only and HERDR_BIN_PATH installations", () => {
+  const f = pinnedHerdrFixture({ pinned: false });
+  const previous = { PATH: process.env.PATH, HERDR_BIN_PATH: process.env.HERDR_BIN_PATH };
+  try {
+    process.env.PATH = join(f.homebrew, "..");
+    delete process.env.HERDR_BIN_PATH;
+    assert.throws(() => resolveTrustedHerdrExecutable(f.options), { code: "trusted_executable_unavailable" });
+    process.env.HERDR_BIN_PATH = f.homebrew;
+    assert.throws(() => resolveTrustedHerdrExecutable(f.options), { code: "trusted_executable_unavailable" });
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  for (const key of Object.keys(f.options)) assert.equal(HERDR_COMMUNICATION_PARAMETERS.properties[key], undefined);
+});
 
 function info(role, status = "idle", seq = 1, type = "agent_info") {
   return { code: 0, stdout: JSON.stringify({ type, agent: { name: role, agent: "pi", status, state_change_seq: seq, repository: root } }) };
@@ -35,8 +150,31 @@ const roles = ["reviewer", "reviewer-foo", "foo-reviewer"];
 
 test.beforeEach(() => resetHerdrDeliveriesForTests());
 
+const worktreeFixtures = [];
+test.after(() => { for (const fixture of worktreeFixtures) fixture.cleanup(); });
+
+// Why: callers without a pane need a validated public workspace id to select a spawn target.
+test("list and get expose only validated worker workspace ids", async () => {
+  const agent = { name: "worker", agent: "pi", status: "idle", repository: root, pane_id: "w7:p10", tab_id: "w7:t3" };
+  const runProcess = async ({ argv }) => ({ code: 0, stdout: JSON.stringify(argv[0] === "tab" ? { tabs: [] } : argv[1] === "list" ? { type: "agent_list", agents: [agent] } : { type: "agent_info", agent }) });
+  const list = await executeHerdrCommunication({ action: "list" }, { cwd: root }, { runProcess });
+  const get = await executeHerdrCommunication({ action: "get", role: "worker" }, { cwd: root }, { runProcess });
+  assert.equal(list.ok, true, JSON.stringify(list));
+  assert.equal(get.ok, true, JSON.stringify(get));
+  assert.equal(list.roles[0].workspaceId, "w7");
+  assert.equal(get.observation.workspaceId, "w7");
+  agent.pane_id = "invalid:p10";
+  const invalid = await executeHerdrCommunication({ action: "get", role: "worker" }, { cwd: root }, { runProcess });
+  assert.notEqual(invalid.observation?.workspaceId, "invalid");
+});
+
 function leasedWorktreeFixture() {
-  const directory = mkdtempSync(join(root, "scratch/herdr-communication-worktree-"));
+  let helper;
+  try { helper = createRequire(import.meta.url)("../scripts/pad_test_treehouse.js"); } catch {}
+  assert.ok(helper, "Treehouse fixture helper is required");
+  const fixture = helper.createTestTreehouse();
+  worktreeFixtures.push(fixture);
+  const directory = fixture.root;
   const repository = join(directory, "trusted");
   const worktree = join(directory, "pool", "trusted");
   mkdirSync(repository);
@@ -44,9 +182,9 @@ function leasedWorktreeFixture() {
   git(repository, ["init", "-q"]);
   git(repository, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
     "commit", "-q", "--allow-empty", "-m", "fixture"]);
-  git(repository, ["worktree", "add", "-q", "--detach", worktree, "HEAD"]);
+  fixture.addWorktree(repository, worktree, ["-q", "--detach"], ["HEAD"]);
   const lease = { path: worktree, status: "leased", lease_id: "0123456789abcdef0123456789abcdef" };
-  return { directory, repository, worktree, lease };
+  return { directory, repository, worktree, lease, addWorktree: fixture.addWorktree };
 }
 
 // Why: a genuine leased linked worktree must be reachable by Herdr communication after spawn.
@@ -114,7 +252,7 @@ test("communication rejects unleased, unrelated, and replaced worktree targets",
 test("communication refuses mismatched leased worktree targets", async () => {
   const f = leasedWorktreeFixture();
   const other = join(f.directory, "pool", "other");
-  execFileSync("git", ["-C", f.repository, "worktree", "add", "-q", "--detach", other, "HEAD"]);
+  f.addWorktree(f.repository, other, ["-q", "--detach"], ["HEAD"]);
   const result = await executeHerdrCommunication(
     { action: "get", role: "worker" }, { cwd: f.repository },
     { treehouseStatus: JSON.stringify([f.lease, { ...f.lease, path: other, lease_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }]),
@@ -134,7 +272,7 @@ test("communication accepts dynamically eligible siblings and their leased workt
   execFileSync("git", ["-C", sibling, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
     "commit", "-q", "--allow-empty", "-m", "fixture"]);
   const siblingWorktree = join(f.directory, "pool", "sibling");
-  execFileSync("git", ["-C", sibling, "worktree", "add", "-q", "--detach", siblingWorktree, "HEAD"]);
+  f.addWorktree(sibling, siblingWorktree, ["-q", "--detach"], ["HEAD"]);
   const beforeProfile = process.env.PI_CODING_AGENT_DIR;
   const profile = join(f.directory, "profile");
   mkdirSync(join(profile, "config"), { recursive: true });
@@ -461,13 +599,32 @@ test("offline delivery identity survives reopen, lost attribution holds and repe
   f.calls.length = 0;
   const held = await executeHerdrCommunication({ action: "delivery", deliveryId: first.deliveryId }, { cwd: root }, resumed);
   assert.equal(held.held, true);
-  assert.equal(held.deliveryState, "unknown");
+  assert.equal(held.deliveryState, "held");
   const repeated = await executeHerdrCommunication(request, { cwd: root }, resumed);
   assert.equal(repeated.deliveryId, first.deliveryId);
   assert.equal(repeated.promptSent, false);
   assert.equal(repeated.held, true);
   assert.deepEqual(f.calls, []);
   assert.equal(f.promptCount, 1);
+});
+
+// Why: a persisted attribution hold must keep its own state on every read, not masquerade as unknown.
+test("persisted held delivery round-trips without transport", async (t) => {
+  const { store } = await offlineStore(t);
+  const f = deliveryFixture();
+  const options = { runProcess: f.runProcess, offlinePersistence: store };
+  const sent = await executeHerdrCommunication(
+    { action: "submit", role: "worker", prompt: "hold after handoff", timeoutMs: 1000 }, { cwd: root }, options,
+  );
+  const saved = await store.get("delivery", sent.deliveryId);
+  await store.update("delivery", sent.deliveryId, saved.digest, { state: "held", code: "attribution-lost" });
+  f.calls.length = 0;
+  for (let i = 0; i < 2; i += 1) {
+    const observed = await executeHerdrCommunication({ action: "delivery", deliveryId: sent.deliveryId }, { cwd: root }, options);
+    assert.equal(observed.deliveryState, "held");
+    assert.equal(observed.held, true);
+  }
+  assert.deepEqual(f.calls, []);
 });
 
 // Why: an already proven report must remain available after reopening.
@@ -555,6 +712,16 @@ function deliveryFixture({ status = "idle", report = "fresh worker findings", fa
   };
   return { calls, runProcess, setStatus: (value) => { currentStatus = value; }, markAnswered: () => { answered = true; }, get promptCount() { return promptCount; }, get echoedPrompt() { return echoedPrompt; } };
 }
+
+// Why: a later check can bind the worker kind to the delivery receipt.
+test("delivery receipt exposes the recorded agent kind", async () => {
+  const f = deliveryFixture();
+  const options = { runProcess: f.runProcess };
+  const sent = await executeHerdrCommunication({ action: "submit", role: "worker", prompt: "kind receipt", timeoutMs: 1000 }, { cwd: root }, options);
+  assert.equal(sent.ok, true, JSON.stringify(sent));
+  const receipt = await executeHerdrCommunication({ action: "delivery", deliveryId: sent.deliveryId }, { cwd: root }, options);
+  assert.equal(receipt.agentKind, "pi");
+});
 
 // Why: a busy worker must not receive a queued brief prematurely.
 test("persisted busy-worker brief stays queued until a delivery query observes idle", async (t) => {
@@ -805,9 +972,10 @@ test("delivery query walks delivered to answered with report markers", async () 
   assert.equal(pending.deliveryState, "delivered");
   assert.equal(pending.nonAuthorizing, true);
   assert.equal(pending.authorityCreated, false);
-  // The sequence gate observes no activity since the handoff, so the query
-  // is a single read-only get observation with no read and no attribution.
-  assert.deepEqual(f.calls.slice(before).map((call) => call.action), ["get"]);
+  // Input echo may precede a status-sequence change. Read the ordinary tail
+  // for receipt, but do not expand history when activity is unchanged.
+  assert.equal(pending.inputReceived, false);
+  assert.deepEqual(f.calls.slice(before).map((call) => call.action), ["get", "read"]);
   f.markAnswered();
   const beforeAnswered = f.calls.length;
   const answered = await executeHerdrCommunication(

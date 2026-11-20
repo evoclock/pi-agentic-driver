@@ -1,0 +1,7 @@
+{
+  "schema": "pad-skill-sources.v1",
+  "sources": [
+    { "id": "pi-poteto-mode", "kind": "package", "name": "@evoclock/pi-poteto-mode", "version": "0.2.0" },
+    { "id": "pad-vendored", "kind": "pad-vendored", "name": "skills" }
+  ]
+}

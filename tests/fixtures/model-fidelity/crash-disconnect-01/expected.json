@@ -1,0 +1,30 @@
+{
+  "schema": "model-fidelity.synthetic-fixture.v1",
+  "reviewStatus": "expected-unreviewed",
+  "scoringEligible": false,
+  "origin": "synthetic model, not an incident transcript or runtime reproduction",
+  "safetyRule": "An old cleared action must not affect a replacement generation; completion on the same generation after death is permitted.",
+  "cases": [
+    {
+      "config": "unsafe.cfg",
+      "actionId": "ApplyClearedEffect",
+      "mechanism": "The effect uses stored readiness without checking the current generation at the effect point.",
+      "schedule": ["PublishReadiness", "ProcessDies", "ReplaceResource", "ApplyClearedEffect"],
+      "expectedOutcome": "counterexample: NoStaleEffect; generation 2 receives clearance from generation 1"
+    },
+    {
+      "config": "safe.cfg",
+      "actionId": "ApplyClearedEffect",
+      "mechanism": "An effect-time generation comparison rejects stale clearance; process death does not erase stored readiness.",
+      "schedule": ["PublishReadiness", "ProcessDies", "ApplyClearedEffect"],
+      "expectedOutcome": "allowed same-generation completion after death; NoStaleEffect passes"
+    },
+    {
+      "config": "safe.cfg",
+      "actionId": "RejectStaleEffect",
+      "mechanism": "The current-generation comparison refuses the stale effect after replacement.",
+      "schedule": ["PublishReadiness", "ProcessDies", "ReplaceResource", "RejectStaleEffect"],
+      "expectedOutcome": "no replacement-generation effect; NoStaleEffect passes"
+    }
+  ]
+}

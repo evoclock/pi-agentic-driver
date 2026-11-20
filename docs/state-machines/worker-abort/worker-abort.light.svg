@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3868 600" width="3868" height="600" role="img" aria-labelledby="bb-t bb-d">
+<title id="bb-t">Guarded worker abort</title><desc id="bb-d">Delivery is not settlement. Only the worker invokes cancellation.</desc>
+<style>
+text{font-family:Geist,"Geist Sans",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;font-variant-numeric:tabular-nums}
+.bb-title{font-size:36px;font-weight:300;letter-spacing:-.015em}
+.bb-subtitle{font-size:14px;font-weight:400}
+.bb-kicker-top{font-size:10.5px;font-weight:500;letter-spacing:2.6px}
+.bb-meta{font-size:11px;font-weight:400;letter-spacing:.03em}
+.bb-meter-big{font-size:42px;font-weight:300;letter-spacing:-.02em}
+.bb-meter-unit{font-size:17px;font-weight:300}
+.bb-meter-track{stroke-width:1;fill:none}
+.bb-meter-solid,.bb-meter-part{stroke-width:3;fill:none}
+.bb-meter-part{stroke-dasharray:2 3}
+.bb-rule{stroke-width:1;fill:none}
+.bb-zone{stroke-width:1}
+.bb-zone-kicker{font-size:10.5px;font-weight:500;letter-spacing:2.6px}
+.bb-zone-title{font-size:21px;font-weight:400;letter-spacing:-.005em}
+.bb-zone-sub{font-size:11.5px}
+.bb-node-box{stroke-width:1}
+.bb-node.status-planned .bb-node-box{stroke-dasharray:4 4}
+.bb-kicker{font-size:10.5px;font-weight:500;letter-spacing:2.4px}
+.bb-node-title{font-size:17px;font-weight:500;letter-spacing:-.005em}
+.bb-copy{font-size:13.5px;font-weight:400}
+.bb-hint{font-size:11.5px;font-weight:400;letter-spacing:.02em}
+.bb-status-text{font-size:9.5px;font-weight:600;letter-spacing:1.9px}
+.bb-dot{stroke-width:1.1;fill:none}
+.bb-edge{fill:none;stroke-width:1.25;stroke-linejoin:round;stroke-linecap:round}
+.bb-edge.control{stroke-dasharray:3 4}
+.bb-edge.failure{stroke-dasharray:.1 4.5;stroke-width:1.8}
+.bb-edge.is-planned{opacity:.4}
+.bb-label{font-size:11.5px;font-weight:500;letter-spacing:.02em;paint-order:stroke;stroke-width:6px;stroke-linejoin:round}
+.bb-legend-text{font-size:12px;font-weight:400}
+.bb-finding-text{font-size:9px;font-weight:600;letter-spacing:1.6px}
+.iso-face{stroke-width:.8;stroke-linejoin:round}
+.bb-node.status-planned .iso-face{fill:none;stroke-dasharray:4 4;stroke-width:1}
+.iso-hatch line{stroke-width:.8;opacity:.45}
+.iso-label-knockout{paint-order:stroke;stroke-width:6px;stroke-linejoin:round}
+.bb-canvas{fill:#fbf9f6}
+.bb-title,.bb-zone-title,.bb-node-title,.bb-meter-big,.bb-meter-unit{fill:#2f2a27}
+.bb-subtitle,.bb-copy,.bb-hint,.bb-legend-text,.bb-meta,.bb-kicker,.bb-zone-kicker,.bb-kicker-top,.bb-zone-sub{fill:#716961}
+.bb-rule,.bb-meter-track{stroke:#dcdad7}
+.bb-meter-solid{stroke:#2f2a27}
+.bb-meter-part{stroke:#716961}
+.bb-zone{fill:#f5f3f0;stroke:#dcdad7}
+.bb-node-box{fill:#fffdfa;stroke:#dcdad7}
+.bb-node.status-planned .bb-node-box{fill:none;stroke:#c2bfbc}
+.bb-node.status-planned .bb-node-title{fill:#716961}
+.bb-status-text{fill:#716961}
+.bb-status.is-implemented .bb-status-text{fill:#716961}
+.bb-dot{stroke:#716961}
+.bb-dot-fill{fill:#716961}
+.bb-status.is-implemented .bb-dot{stroke:#2f2a27}
+.bb-status.is-implemented .bb-dot-fill{fill:#2f2a27}
+.bb-edge.data{stroke:#888079}
+.bb-edge.control{stroke:#747c86}
+.bb-edge.failure{stroke:#9b4a36}
+.bb-arrow.data{fill:#888079}
+.bb-arrow.control{fill:#747c86}
+.bb-arrow.failure{fill:#9b4a36}
+.bb-label,.iso-label-knockout{stroke:#fbf9f6}
+.bb-label.data{fill:#716961}
+.bb-label.control{fill:#4c535c}
+.bb-label.failure{fill:#9b4a36}
+.bb-flow{stroke:#2f2a27;stroke-opacity:.55}
+.bb-finding-text,.bb-finding-inline{fill:#9b4a36}
+.bb-node.has-finding .bb-node-box{stroke:#9b4a36}
+.bb-pseudo-fill{fill:#2f2a27}
+.bb-pseudo-ring{fill:#fbf9f6;stroke:#2f2a27;stroke-width:1.3}
+.bb-pseudo-choice{fill:#fffdfa}
+.bb-node.is-selected .bb-node-box,.bb-node[tabindex]:focus .bb-node-box{stroke:#2f2a27}
+.cat-sage .bb-mark,.bb-mark.cat-sage{fill:#427f61}
+.cat-slate .bb-mark,.bb-mark.cat-slate{fill:#4a5c73}
+.cat-rust .bb-mark,.bb-mark.cat-rust{fill:#995d3f}</style>
+<defs><marker id="bb-arrow-data" viewBox="0 0 10 10" refX="8.6" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path class="bb-arrow data" d="M 0 1 L 10 5 L 0 9 z"/></marker><marker id="bb-arrow-control" viewBox="0 0 10 10" refX="8.6" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path class="bb-arrow control" d="M 0 1 L 10 5 L 0 9 z"/></marker><marker id="bb-arrow-failure" viewBox="0 0 10 10" refX="8.6" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse"><path class="bb-arrow failure" d="M 0 1 L 10 5 L 0 9 z"/></marker></defs>
+<rect class="bb-canvas" x="0" y="0" width="3868" height="600"/>
+<text class="bb-title" x="40" y="100">Guarded worker abort</text>
+<text class="bb-subtitle" x="40" y="130">Delivery is not settlement. Only the worker invokes cancellation.</text>
+<g class="bb-zone-group cat-sage">
+<rect class="bb-zone cat-sage" x="365.8" y="186" width="3462.2" height="335.5" rx="6"/>
+<circle class="bb-mark" cx="392.8" cy="207.5" r="5"/>
+<text class="bb-zone-title" x="405.8" y="214">Per-turn abort</text>
+</g>
+<g class="bb-edges">
+<path class="bb-edge data map-item" d="M 411.8 324.5 L 1060.4 324.5" marker-end="url(#bb-arrow-data)" data-from="start" data-to="guards"/>
+<path class="bb-edge data map-item" d="M 1094.4 324.5 L 1622.1 324.5" marker-end="url(#bb-arrow-data)" data-from="guards" data-to="delivered"/>
+<path class="bb-edge failure map-item" d="M 1077.4 341.5 L 1077.4 475.5" marker-end="url(#bb-arrow-failure)" data-from="guards" data-to="refused"/>
+<path class="bb-edge data map-item" d="M 1892.1 324.5 L 2419.7 324.5" marker-end="url(#bb-arrow-data)" data-from="delivered" data-to="worker"/>
+<path class="bb-edge data map-item" d="M 2453.7 324.5 L 2981.3 324.5" marker-end="url(#bb-arrow-data)" data-from="worker" data-to="requested"/>
+<path class="bb-edge failure map-item" d="M 2436.7 341.5 L 2436.7 475.5" marker-end="url(#bb-arrow-failure)" data-from="worker" data-to="worker-refused"/>
+<path class="bb-edge data map-item" d="M 3251.3 324.5 L 3782 324.5" marker-end="url(#bb-arrow-data)" data-from="requested" data-to="settled"/>
+<g class="bb-edge-label map-item"><text class="bb-label data" x="736.1" y="328.1" text-anchor="middle">abort</text></g>
+<g class="bb-edge-label map-item"><text class="bb-label data" x="1358.3" y="328.1" text-anchor="middle">validate [target_current] / publish_or_original</text></g>
+<g class="bb-edge-label map-item"><text class="bb-label failure" x="1077.4" y="412.1" text-anchor="middle">validate [target_invalid] / audit_refusal</text></g>
+<g class="bb-edge-label map-item"><text class="bb-label data" x="2155.9" y="328.1" text-anchor="middle">event_loop_yields / watch_or_poll</text></g>
+<g class="bb-edge-label map-item"><text class="bb-label data" x="2717.5" y="328.1" text-anchor="middle">check [current_and_queue_safe] / ack_then_ctx_abort</text></g>
+<g class="bb-edge-label map-item"><text class="bb-label failure" x="2436.7" y="412.1" text-anchor="middle">check [invalid_or_queue_pending] / ack_refusal</text></g>
+<g class="bb-edge-label map-item"><text class="bb-label data" x="3516.7" y="328.1" text-anchor="middle">get_or_read [cancelled_or_idle]</text></g>
+</g>
+<g class="bb-node bb-pseudo map-item cat-sage" data-id="start"><circle class="bb-pseudo-fill" cx="397.8" cy="324.5" r="9"/></g>
+<g class="bb-node bb-pseudo map-item cat-sage" data-id="guards"><polygon class="bb-pseudo-ring bb-pseudo-choice" points="1077.4,307.5 1094.4,324.5 1077.4,341.5 1060.4,324.5"/><text class="bb-copy" x="1077.4" y="300.5" text-anchor="middle">Target guards</text></g>
+<g class="bb-node map-item cat-sage" data-id="delivered">
+<rect class="bb-node-box" x="1622.1" y="272" width="270" height="105" rx="7"/>
+<circle class="bb-mark" cx="1648.1" cy="298" r="4"/>
+<text class="bb-node-title" x="1644.1" y="330">Request delivered</text>
+</g>
+<g class="bb-node bb-pseudo map-item cat-slate" data-id="worker"><polygon class="bb-pseudo-ring bb-pseudo-choice" points="2436.7,307.5 2453.7,324.5 2436.7,341.5 2419.7,324.5"/><text class="bb-copy" x="2436.7" y="300.5" text-anchor="middle">Worker guards</text></g>
+<g class="bb-node map-item cat-slate" data-id="requested">
+<rect class="bb-node-box" x="2981.3" y="272" width="270" height="105" rx="7"/>
+<circle class="bb-mark" cx="3007.3" cy="298" r="4"/>
+<text class="bb-node-title" x="3003.3" y="330">Abort requested</text>
+</g>
+<g class="bb-node bb-pseudo map-item cat-slate" data-id="settled"><circle class="bb-pseudo-ring" cx="3796" cy="324.5" r="12"/><circle class="bb-pseudo-fill" cx="3796" cy="324.5" r="7"/><text class="bb-copy" x="3796" y="354.5" text-anchor="middle">Settlement observed</text></g>
+<g class="bb-node bb-pseudo map-item cat-rust" data-id="refused"><circle class="bb-pseudo-ring" cx="1077.4" cy="489.5" r="12"/><circle class="bb-pseudo-fill" cx="1077.4" cy="489.5" r="7"/><text class="bb-copy" x="1077.4" y="519.5" text-anchor="middle">Request refused</text></g>
+<g class="bb-node bb-pseudo map-item cat-rust" data-id="worker-refused"><circle class="bb-pseudo-ring" cx="2436.7" cy="489.5" r="12"/><circle class="bb-pseudo-fill" cx="2436.7" cy="489.5" r="7"/><text class="bb-copy" x="2436.7" y="519.5" text-anchor="middle">Worker refused</text></g>
+<g class="bb-legend" aria-label="Legend"><path class="bb-rule" d="M 40 548 H 3828"/><circle class="bb-mark cat-sage" cx="44" cy="566" r="4"/><text class="bb-legend-text" x="56" y="570">Coordinator</text><circle class="bb-mark cat-slate" cx="147.575" cy="566" r="4"/><text class="bb-legend-text" x="159.575" y="570">Worker</text><circle class="bb-mark cat-rust" cx="219.52499999999998" cy="566" r="4"/><text class="bb-legend-text" x="231.52499999999998" y="570">Refusal</text><path class="bb-edge data" d="M 293.79999999999995 566 L 315.79999999999995 566"/><text class="bb-legend-text" x="323.79999999999995" y="570">Data flow</text><path class="bb-edge failure" d="M 398.72499999999997 566 L 420.72499999999997 566"/><text class="bb-legend-text" x="428.72499999999997" y="570">Failure flow</text></g>
+</svg>

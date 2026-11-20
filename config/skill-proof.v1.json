@@ -1,0 +1,30 @@
+{
+  "schema": "pi-agentic-driver.skill-proof.v1",
+  "skills": {
+    "review-ready": { "kind": "behavior", "codeTests": ["tests/test_review_ready_skill.mjs"], "acceptance": "Guidance trial required separately; packaging tests do not establish behavior proof." },
+    "decision-gate": { "kind": "code", "tests": ["tests/test_skill_shape.mjs"], "acceptance": "Contract/model checks only; behavior proof unconfigured: no shared proof model selected. Revisit behavior registration when configured." },
+    "tasks": { "kind": "code", "tests": ["tests/test_session_tasks_tool.mjs", "tests/test_task_promotion.mjs"] },
+    "pulse": { "kind": "code", "tests": ["tests/test_pulse_core.mjs", "tests/test_pulse_run.mjs"] },
+    "decision-to-spec": { "kind": "code", "tests": ["tests/test_relay_cli.mjs", "skills/decision-to-spec/fixtures/test_contract_readback.mjs"] },
+    "evidence-first-delivery-workflow": { "kind": "code", "tests": ["tests/test_evidence_first_delivery_plan.mjs", "tests/test_skill_links.mjs"] },
+    "model-fidelity": { "kind": "code", "tests": ["tests/test_model_fidelity_skill.mjs"] },
+    "crew-tracker-sync": { "kind": "behavior", "codeTests": ["tests/test_crew_tracker_validator.mjs"] },
+    "harvest-lessons": { "kind": "code", "tests": ["tests/test_harvest_lessons.mjs", "tests/test_skill_dependencies.mjs"] },
+    "correct-pi": { "kind": "behavior" },
+    "public-pr-wording": { "kind": "code", "tests": ["tests/test_public_pr_wording.mjs"] },
+    "test-gate": { "kind": "code", "tests": ["tests/test_test_gate.py", "tests/test_test_gate_control_lock.py"] },
+    "skill-usage-eval": { "kind": "code", "tests": ["tests/test_skill_usage_eval.mjs", "tests/test_skill_usage_handcheck.mjs"] },
+    "session-handover": { "kind": "code", "tests": ["tests/test_session_handover.py"] },
+    "ralph": { "kind": "code", "tests": ["tests/test_ralph.py"] },
+    "workflow-runner": { "kind": "code", "tests": ["tests/test_workflow_runner.mjs", "tests/test_workflow_runner_tools.mjs", "tests/test_workflow_runner_crash.mjs"] },
+    "driver-mode": { "kind": "behavior" },
+    "weekly-build-recap": { "kind": "code", "tests": ["skills/weekly-build-recap/test_recap.py"] },
+    "release-public": { "kind": "code", "privateOnly": true, "tests": ["tests/test_release_public.py"] },
+    "driver-principle-boundary-only-authority": { "kind": "behavior" },
+    "driver-principle-cite-your-status": { "kind": "behavior" },
+    "driver-principle-dependency-policy": { "kind": "behavior" },
+    "driver-principle-evidence": { "kind": "behavior" },
+    "driver-principle-fail-loud": { "kind": "behavior" },
+    "driver-principle-working-memory-is-not-authority": { "kind": "behavior" }
+  }
+}

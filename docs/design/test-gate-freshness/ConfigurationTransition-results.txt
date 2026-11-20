@@ -1,0 +1,60 @@
+=== safe ===
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Running breadth-first search Model-Checking with fp 69 and seed -4264198021354185200 with 1 worker on 10 cores with 16384MB heap and 64MB offheap memory [pid: sanitized] (Mac OS X 27.0.1 aarch64, Homebrew 27.0.1.0.3 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file <sanitized>/ConfigurationTransition.tla
+Parsing file <sanitized>/Naturals.tla
+Semantic processing of module Naturals
+Semantic processing of module ConfigurationTransition
+Starting... (2026-11-17 12:49:57)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-11-17 12:49:57.
+Model checking completed. No error has been found.
+  Estimates of the probability that TLC did not check all reachable states
+  because two distinct states had the same fingerprint:
+  calculated (optimistic):  val = 2.9E-18
+15 states generated, 6 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 5.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 2 and the 95th percentile is 2).
+Finished in 00s at (2026-11-17 12:49:57)
+
+=== unsafe ===
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Running breadth-first search Model-Checking with fp 55 and seed -6508316404656333383 with 1 worker on 10 cores with 16384MB heap and 64MB offheap memory [pid: sanitized] (Mac OS X 27.0.1 aarch64, Homebrew 27.0.1.0.3 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file <sanitized>/ConfigurationTransition.tla
+Parsing file <sanitized>/Naturals.tla
+Semantic processing of module Naturals
+Semantic processing of module ConfigurationTransition
+Starting... (2026-11-17 12:49:57)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-11-17 12:49:57.
+Error: Invariant LockCoversCheckedConfiguration is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ lockConfig = 0
+/\ checked = FALSE
+/\ config = 0
+/\ workspace = 0
+/\ originalLock = 0
+
+State 2: <AppendContract line 8, col 19 to line 9, col 70 of module ConfigurationTransition>
+/\ lockConfig = 0
+/\ checked = FALSE
+/\ config = 1
+/\ workspace = 0
+/\ originalLock = 0
+
+State 3: <Check line 15, col 10 to line 16, col 69 of module ConfigurationTransition>
+/\ lockConfig = 0
+/\ checked = TRUE
+/\ config = 1
+/\ workspace = 0
+/\ originalLock = 0
+
+7 states generated, 5 distinct states found, 2 states left on queue.
+The depth of the complete state graph search is 3.
+The average outdegree of the complete state graph is 2 (minimum is 2, the maximum 2 and the 95th percentile is 2).
+Finished in 00s at (2026-11-17 12:49:57)

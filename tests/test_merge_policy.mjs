@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   loadMergePolicy, detectMerge, evaluateMerge, gatherMergeEvidence, reviewRecord,
-  mergePolicyPath, DEFAULT_MERGE_POLICY, HUMAN_MERGES_ONLY, AGENTS_AFTER_CHECKS_AND_REVIEW, MERGE_POLICY_SCHEMA,
+  mergePolicyPath, DEFAULT_MERGE_POLICY, HUMAN_MERGES_ONLY, AGENTS_AFTER_CHECKS_AND_REVIEW, AGENT_PR_MERGE, MERGE_POLICY_SCHEMA,
 } from "../scripts/enforcement/merge_policy.js";
 import { guardToolCall, registerAttendedAuthorityGuard } from "../scripts/enforcement/attended_authority_guard.js";
 
@@ -30,8 +30,8 @@ test("default is human-merges-only when no config exists", () => {
 });
 
 // Why: only profile policy may select the merge mode.
-test("config selects either value from the profile directory only", () => {
-  for (const policy of [HUMAN_MERGES_ONLY, AGENTS_AFTER_CHECKS_AND_REVIEW]) {
+test("config selects all three values from the profile directory only", () => {
+  for (const policy of [HUMAN_MERGES_ONLY, AGENTS_AFTER_CHECKS_AND_REVIEW, AGENT_PR_MERGE]) {
     assert.deepEqual(loadMergePolicy({ env: profile({ schema: MERGE_POLICY_SCHEMA, policy }) }), { policy, source: "config" });
   }
   assert.match(mergePolicyPath({ PI_CODING_AGENT_DIR: "/p" }), /\/p\/config\/merge-policy\.v1\.json$/);
@@ -46,7 +46,7 @@ test("unknown, malformed or schema-less config fails closed to the default", () 
 
 // Why: merge command variants must reach the policy boundary.
 test("merge commands are detected in common shapes", () => {
-  assert.deepEqual(detectMerge("gh pr merge 12 --squash"), { merge: true, form: "gh", ref: "12" });
+  assert.deepEqual(detectMerge("gh pr merge 12 --squash"), { merge: true, form: "gh", ref: "12", auto: false, matchHeadCommit: "" });
   assert.equal(detectMerge("/opt/bin/gh 'pr' merge 12").ref, "12");
   assert.equal(detectMerge("gh pr merge").ref, "");
   for (const flag of ["--repo o/r", "-R o/r", "--repo=o/r", "-Ro/r"]) assert.equal(detectMerge(`gh pr merge 12 ${flag}`).ref, "", flag);
@@ -57,6 +57,15 @@ test("merge commands are detected in common shapes", () => {
   assert.equal(detectMerge("gh pr view 12").merge, false);
 });
 
+// Why: value-taking flags must not steal the ref or conceal another repository.
+test("auto merge parses a pinned head and value-taking flags", () => {
+  assert.deepEqual(detectMerge(`gh pr merge 12 --auto --squash --delete-branch --subject "x" --match-head-commit ${SHA}`),
+    { merge: true, form: "gh", ref: "12", auto: true, matchHeadCommit: SHA });
+  for (const flag of ["--repo o/r", "-R o/r", "--unknown value"]) {
+    assert.equal(detectMerge(`gh pr merge 12 --auto ${flag}`).ref, "");
+  }
+});
+
 const green = {
   headSha: SHA, author: "evoclock", mergerSession: "merger-1",
   checks: [{ state: "SUCCESS" }, { state: "SKIPPED" }],
@@ -64,6 +73,25 @@ const green = {
 };
 const { mergerSession: _m, ...greenFromGithub } = green;
 const gh = detectMerge("gh pr merge 12");
+
+// Why: an auto-merge must be pinned to the independently reviewed head and held while checks wait.
+test("agent-pr-merge allows only pinned reviewed heads with safe check and merge states", () => {
+  const auto = detectMerge(`gh pr merge 12 --auto --squash --match-head-commit ${SHA}`);
+  const pending = { ...green, mergeStateStatus: "BLOCKED", checks: [{ state: "PENDING" }] };
+  assert.equal(evaluateMerge(AGENT_PR_MERGE, auto, pending).allow, true);
+  assert.equal(evaluateMerge(AGENT_PR_MERGE, gh, green).allow, true);
+  assert.equal(evaluateMerge(AGENT_PR_MERGE, detectMerge("gh pr merge 12 --auto"), pending).allow, false);
+  assert.equal(evaluateMerge(AGENT_PR_MERGE, detectMerge(`gh pr merge 12 --auto --match-head-commit ${"b".repeat(40)}`), pending).allow, false);
+  for (const status of ["CLEAN", "UNSTABLE", "UNKNOWN"]) {
+    assert.equal(evaluateMerge(AGENT_PR_MERGE, auto, { ...pending, mergeStateStatus: status }).allow, false, status);
+  }
+  for (const state of ["FAILURE", "CANCELLED"]) assert.equal(evaluateMerge(AGENT_PR_MERGE, auto, { ...pending, checks: [{ state }] }).allow, false);
+  for (const state of ["QUEUED", "IN_PROGRESS", "EXPECTED"]) assert.equal(evaluateMerge(AGENT_PR_MERGE, auto, { ...pending, checks: [{ state }] }).allow, true);
+  assert.equal(evaluateMerge(AGENT_PR_MERGE, auto, { ...pending, checks: [] }).allow, false);
+  assert.equal(evaluateMerge(AGENT_PR_MERGE, auto, { ...pending, review: { ...green.review, recordedBySession: green.mergerSession } }).allow, false);
+  assert.equal(evaluateMerge(AGENTS_AFTER_CHECKS_AND_REVIEW, auto, green).allow, false);
+  assert.equal(evaluateMerge(HUMAN_MERGES_ONLY, auto, green).allow, false);
+});
 
 // Why: passing checks do not override a human-only merge policy.
 test("human-merges-only refuses even with full evidence", () => {
@@ -98,7 +126,7 @@ test("evidence reads PR head, checks and the profile review record", () => {
   mkdirSync(join(env.PI_CODING_AGENT_DIR, "merge-reviews"));
   writeFileSync(join(env.PI_CODING_AGENT_DIR, "merge-reviews", `${SHA}.json`), JSON.stringify(green.review));
   const run = (cmd, args) => {
-    assert.deepEqual([cmd, ...args], ["gh", "pr", "view", "12", "--json", "headRefOid,statusCheckRollup,author"]);
+    assert.deepEqual([cmd, ...args], ["gh", "pr", "view", "12", "--json", "headRefOid,statusCheckRollup,author,mergeStateStatus"]);
     return JSON.stringify({ headRefOid: SHA, author: { login: "evoclock" }, statusCheckRollup: [{ conclusion: "SUCCESS" }, { state: "PENDING" }] });
   };
   const evidence = gatherMergeEvidence("12", { run, env });
@@ -128,6 +156,20 @@ for (const [label, ctx] of [["headless bot", HEADLESS], ["direct Pi use", TUI]])
   });
 }
 
+// Why: the new policy must read the same independent review evidence in TUI and headless sessions without prompting.
+test('guard reads agent-pr-merge evidence without a prompt', async () => {
+  for (const base of [HEADLESS, TUI]) {
+    let prompted = false;
+    const context = { ...base, sessionManager: { getSessionId: () => 'merger-1' }, ui: { confirm: async () => { prompted = true; return true; } } };
+    const result = await guardToolCall(merge(`gh pr merge 12 --auto --match-head-commit ${SHA}`), context, {
+      context, loadMergePolicy: () => ({ policy: AGENT_PR_MERGE, source: 'config' }),
+      gatherMergeEvidence: () => ({ ...greenFromGithub, mergeStateStatus: 'BLOCKED', checks: [{ state: 'PENDING' }] }),
+    });
+    assert.equal(result, undefined);
+    assert.equal(prompted, false);
+  }
+});
+
 // Why: only merge calls consult merge policy; other calls follow opt-in.
 test("non-merge commands follow the interactive opt-in without loading merge policy", async () => {
   const options = { context: HEADLESS, loadMergePolicy: () => { throw new Error("must not load"); } };
@@ -144,7 +186,6 @@ test("bypass forms are refused under both policy values", () => {
   for (const command of [
     "gh pr merge 12 --admin",
     "gh pr merge 12 --squash --admin",
-    "gh pr merge 12 --auto",
     "gh pr merge 12 --auto --admin",
     "gh api -X PUT repos/o/r/branches/main/protection --input p.json",
     "gh api -X DELETE repos/o/r/branches/main/protection/enforce_admins",
@@ -155,7 +196,7 @@ test("bypass forms are refused under both policy values", () => {
   ]) {
     const detection = detectMerge(command);
     assert.equal(detection.form, "bypass", command);
-    for (const policy of [HUMAN_MERGES_ONLY, AGENTS_AFTER_CHECKS_AND_REVIEW]) {
+    for (const policy of [HUMAN_MERGES_ONLY, AGENTS_AFTER_CHECKS_AND_REVIEW, AGENT_PR_MERGE]) {
       const decision = evaluateMerge(policy, detection, green);
       assert.equal(decision.allow, false, `${policy}: ${command}`);
       assert.match(decision.reason, /every merge policy/);

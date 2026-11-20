@@ -1,0 +1,1 @@
+{"schema":"model-fidelity.design.v1","id":"candidate","planId":"original","mode":"protocol","sourceRefs":["candidate.txt"],"modelRefs":[],"configRefs":[],"dependencyRefs":[],"actionIds":["ObserveGeneration","ApplyClearedEffect"],"environmentId":"synthetic"}

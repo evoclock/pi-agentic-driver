@@ -1,0 +1,14 @@
+{
+  "schema": "pad-user.v1",
+  "checks": {
+    "runner": "auto",
+    "macos": { "image": "<REVIEWED_ALREADY_LOCAL_MACOS_CONTAINER_IMAGE>" }
+  },
+  "secrets": {
+    "openai": { "service": "<OPENAI_KEYCHAIN_SERVICE>", "account": "<OPENAI_KEYCHAIN_ACCOUNT>" },
+    "typesafe": { "service": "<TYPESAFE_KEYCHAIN_SERVICE>", "account": "<TYPESAFE_KEYCHAIN_ACCOUNT>" }
+  },
+  "progress": { "noProgressLimit": 3, "safetyCeiling": 50 },
+  "attempts": { "max": 2 },
+  "model": { "policy": "subscription", "localRoute": "<LOCAL_MODEL_ROUTE>" }
+}

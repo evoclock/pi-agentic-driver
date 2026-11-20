@@ -4,10 +4,9 @@ description: Use the session task list to track work and promote owner-authorize
 license: AGPL-3.0-only
 ---
 
-# tasks — unified session task list + board promotion (v1)
+# Tasks
 
-Owner-facing skill for the pi-agentic-driver session task list and
-owner-initiated promotion to the durable `TASKS.md` board.
+Use this skill to plan work with session tasks and promote owner-chosen items to the durable `TASKS.md` board. The tools keep the board writer separate from session working memory.
 
 ## Prior art and credit
 
@@ -38,7 +37,7 @@ The widget and pill refresh after every task mutation and on `session_start` or
 replacement is swallowed and never turns a successful mutation or `/tasks`
 command into an error.
 
-## What this skill owns
+## Steps
 
 1. The **session task list** — working memory for the current session. Every
    task carries `metadata.origin` (`coordinator` or `worker`, with
@@ -129,7 +128,6 @@ a present but stale or mismatched projection is an error. Exit 0 only when
 operational; otherwise return a machine-readable error list. It never
 mutates state, writes the board, or promotes.
 
-## Out of scope in v1
+## Limits
 
-No Obsidian work. No automatic worker proposal store. No session-end prompt.
-No completed-task promotion. No external board writer-authority changes.
+The session and board tools enforce promotion fields, confirmation and idempotency. This skill's planning and reporting instructions are guidance. There is no automatic promotion, session-end prompt or external board writer.

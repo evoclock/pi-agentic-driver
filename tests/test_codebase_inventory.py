@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -77,6 +78,56 @@ class InventoryTest(RepoFixture):
         self.git('add', 'src/main.js')
         self.assertTrue(check(self.repo)[0])
 
+    def test_check_generates_missing_and_refreshes_ignored_inventory(self):
+        """Why: fresh clones and ignored local artifacts must be usable by make gate."""
+        self.put('src/main.js', 'export function first() {}\n')
+        command = [sys.executable, str(ROOT / 'scripts/codebase_inventory.py'), '--source-root', str(self.repo), '--check']
+        first = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        output = self.repo / 'pipeline_output/codebase_inventory.jsonl'
+        self.assertEqual(output.read_bytes(), generate(self.repo))
+        self.put('.gitignore', 'pipeline_output/codebase_inventory.jsonl\n')
+        output.write_text('stale\n')
+        refreshed = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(refreshed.returncode, 0, refreshed.stdout + refreshed.stderr)
+        self.assertEqual(output.read_bytes(), generate(self.repo))
+        self.assertEqual(check(self.repo), (True, 'local inventory matches the staged source'))
+        self.assertNotIn(b'codebase_inventory.jsonl', subprocess.check_output(['git', '-C', str(self.repo), 'ls-files']))
+
+    def test_tracked_check_compares_without_writing_for_rollback(self):
+        """Why: restoring a tracked inventory must restore the strict comparison path."""
+        self.put('src/main.js', 'export function first() {}\n')
+        self.put('pipeline_output/codebase_inventory.jsonl', 'stale\n')
+        completed = subprocess.run([sys.executable, str(ROOT / 'scripts/codebase_inventory.py'),
+                                   '--source-root', str(self.repo), '--check'], capture_output=True)
+        self.assertEqual(completed.returncode, 1)
+        self.assertEqual((self.repo / 'pipeline_output/codebase_inventory.jsonl').read_text(), 'stale\n')
+
+    def test_code_phage_generates_missing_inventory_before_prior_art_lookup(self):
+        """Why: a fresh checkout must find prior art rather than infer absence from a missing artifact."""
+        self.put('src/worker.js', 'export function deliver() { return 1; }\n')
+        self.put('src/prior.js', 'export function deliver() { return 2; }\n')
+        module = (ROOT / 'lib/code-phage-core.mjs').as_uri()
+        script = f'import {{ analyzeCodePhage }} from {json.dumps(module)}; console.log(JSON.stringify(analyzeCodePhage({{root: process.argv[1], goal: "deliver worker", candidatePaths: ["src/worker.js"]}})));'
+        completed = subprocess.run(['node', '--input-type=module', '-e', script, str(self.repo)], capture_output=True, text=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout)
+        self.assertNotEqual(result['priorArt']['status'], 'missing')
+        self.assertTrue((self.repo / 'pipeline_output/codebase_inventory.jsonl').is_file())
+        self.assertTrue(result['priorArt']['matches'], result)
+
+    def test_refresh_fixture_accepts_an_absent_workspace_inventory(self):
+        """Why: fresh checkouts must run refresh-hook tests before any local inventory exists."""
+        missing = self.repo / 'absent-workspace-inventory.jsonl'
+        with patch.dict(globals(), WORKSPACE_INVENTORY=missing):
+            try:
+                RefreshHookTest.setUpClass()
+                RefreshHookTest.tearDownClass()
+            except OSError as error:
+                self.fail(f'refresh fixture requires an inventory before generation: {error}')
+            self.assertIsNone(RefreshHookTest._workspace_inventory)
+            self.assertFalse(missing.exists())
+
     def test_ignored_but_staged_inventory_still_fails(self):
         """Why: ignore rules must not bless a tracked inventory that would leak in public."""
         self.put('pipeline_output/codebase_inventory.jsonl', 'stale\n')
@@ -93,13 +144,14 @@ class RefreshHookTest(RepoFixture):
 
     @classmethod
     def setUpClass(cls):
-        cls._workspace_inventory = WORKSPACE_INVENTORY.read_bytes()
+        cls._workspace_inventory = WORKSPACE_INVENTORY.read_bytes() if WORKSPACE_INVENTORY.exists() else None
 
     @classmethod
     def tearDownClass(cls):
-        current = WORKSPACE_INVENTORY.read_bytes()
+        current = WORKSPACE_INVENTORY.read_bytes() if WORKSPACE_INVENTORY.exists() else None
         if current != cls._workspace_inventory:
-            WORKSPACE_INVENTORY.write_bytes(cls._workspace_inventory)
+            if cls._workspace_inventory is not None:
+                WORKSPACE_INVENTORY.write_bytes(cls._workspace_inventory)
             raise AssertionError("inventory refresh test mutated the workspace inventory")
 
     def run_hook(self, *args, stdin="", cwd=None):
@@ -225,7 +277,7 @@ class RefreshHookTest(RepoFixture):
 
     def test_path_outside_a_git_work_tree_skips_without_touching_the_workspace(self):
         """Why: edits outside Git cannot mutate the coordinator inventory."""
-        before = WORKSPACE_INVENTORY.read_bytes()
+        before = WORKSPACE_INVENTORY.read_bytes() if WORKSPACE_INVENTORY.exists() else None
         with tempfile.TemporaryDirectory() as outside:
             path = Path(outside) / "main.py"
             path.write_text("def outside():\n    pass\n")
@@ -234,7 +286,8 @@ class RefreshHookTest(RepoFixture):
             self.assertEqual(result.stdout, "")
             self.assertEqual(result.stderr, "")
             self.assertFalse((Path(outside) / "pipeline_output" / "codebase_inventory.jsonl").exists())
-        self.assertEqual(WORKSPACE_INVENTORY.read_bytes(), before)
+        after = WORKSPACE_INVENTORY.read_bytes() if WORKSPACE_INVENTORY.exists() else None
+        self.assertEqual(after, before)
 
 
 if __name__ == "__main__":

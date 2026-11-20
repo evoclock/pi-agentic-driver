@@ -65,12 +65,14 @@ function baseEntry(overrides = {}) {
 // Exact record shape
 // ---------------------------------------------------------------------------
 
+// Why: accept a valid persisted nudge entry.
 test("a valid nudge entry passes validation with no errors", () => {
   const result = validateLedgerEntry(baseEntry());
   assert.deepEqual(result.errors, []);
   assert.equal(result.ok, true);
 });
 
+// Why: reject records outside the ledger schema.
 test("exact top-level keys: no key outside the closed shape is accepted", () => {
   const entry = baseEntry();
   entry.sneaky = "value";
@@ -79,6 +81,7 @@ test("exact top-level keys: no key outside the closed shape is accepted", () => 
   assert.ok(result.errors.some((e) => e.includes("entry.sneaky: key outside the closed record shape")));
 });
 
+// Why: report absent mandatory fields individually.
 test("every REQUIRED top-level key is named individually when absent", () => {
   for (const key of [
     "ledgerVersion", "entryId", "journeyId", "timestamp", "action", "role",
@@ -93,6 +96,7 @@ test("every REQUIRED top-level key is named individually when absent", () => {
   }
 });
 
+// Why: keep replacement-specific fields distinct from nudge delivery.
 test("a replacement entry requires replacementRole and rejects nudge-only delivery fields", () => {
   const replacement = baseEntry({
     action: "replacement",
@@ -110,6 +114,7 @@ test("a replacement entry requires replacementRole and rejects nudge-only delive
   assert.ok(validateLedgerEntry(withDelivery).errors.some((e) => e.includes("nudge-only field")));
 });
 
+// Why: preserve exact sent-message integrity for either action.
 test("both actions require messageText, messageSha256, and messageBytes", () => {
   for (const action of ["nudge", "replacement"]) {
     for (const key of ["messageText", "messageSha256", "messageBytes"]) {
@@ -124,6 +129,7 @@ test("both actions require messageText, messageSha256, and messageBytes", () => 
   assert.ok(validateLedgerEntry(wrongBytes).errors.some((e) => e.includes("must equal the UTF-8 byte count")));
 });
 
+// Why: reject malformed dispatch provenance.
 test("dispatchAuthorization shape: closed keys, closed sources, closed provenance kinds, hex digests", () => {
   const bad = baseEntry();
   bad.dispatchAuthorization = { ...AUTH, extra: true, source: "telepathy", scopeDigest: "nope" };
@@ -133,6 +139,7 @@ test("dispatchAuthorization shape: closed keys, closed sources, closed provenanc
   assert.ok(result.errors.some((e) => e.includes("scopeDigest: must be lowercase SHA-256 hex")));
 });
 
+// Why: constrain provenance to known authority sources.
 test("authorityProvenance kind is closed to direct-instruction | session-task | board-envelope", () => {
   const bad = baseEntry();
   bad.dispatchAuthorization = { ...AUTH, scopeDigest: AUTH.scopeDigest || sha256Hex("x"), authorityProvenance: { kind: "vibes", reference: "r", capturedAt: "t" } };
@@ -140,6 +147,7 @@ test("authorityProvenance kind is closed to direct-instruction | session-task | 
   assert.ok(result.errors.some((e) => e.includes("authorityProvenance.kind")));
 });
 
+// Why: Git observations must have complete digest shapes.
 test("preGit requires 40-hex head and 64-hex digests; postGit is optional but equally strict", () => {
   const bad = baseEntry({ preGit: { head: "zz", statusDigest: "b".repeat(64), diffDigest: "c".repeat(64) } });
   assert.ok(validateLedgerEntry(bad).errors.some((e) => e.includes("preGit.head")));
@@ -148,6 +156,7 @@ test("preGit requires 40-hex head and 64-hex digests; postGit is optional but eq
   assert.equal(validateLedgerEntry(baseEntry({ postGit: { head: "d".repeat(40), statusDigest: "e".repeat(64), diffDigest: "f".repeat(64) } })).ok, true);
 });
 
+// Why: prevent unknown result labels from entering the ledger.
 test("result enum is closed and includes the requested phase", () => {
   const bad = baseEntry({ result: "vibed" });
   assert.ok(validateLedgerEntry(bad).errors.some((e) => e.includes("entry.result")));
@@ -157,6 +166,7 @@ test("result enum is closed and includes the requested phase", () => {
 // Digest recomputation
 // ---------------------------------------------------------------------------
 
+// Why: direct authority recomputation preserves exact bytes.
 test("direct source: authorityDigest recomputes from the exact stepPrompt bytes with no normalization", () => {
   const entry = baseEntry();
   const recomputed = recomputeEntryDigests(entry);
@@ -169,6 +179,7 @@ test("direct source: authorityDigest recomputes from the exact stepPrompt bytes 
   assert.notEqual(sha256Hex("implement the module\n"), recomputed.authorityDigest);
 });
 
+// Why: queue authority digests use captured immutable fields.
 test("queue source: authorityDigest recomputes from canonical JSON of immutable captured fields, mutable fields excluded", () => {
   const entry = baseEntry();
   entry.dispatchAuthorization = {
@@ -187,6 +198,7 @@ test("queue source: authorityDigest recomputes from canonical JSON of immutable 
   })));
 });
 
+// Why: canonicalization must preserve meaningful differences.
 test("ledger canonical JSON preserves explicit null, literal bytes, array order, and exact Unicode code points", () => {
   assert.equal(nudgeCanonicalJsonString({ b: 1, a: null }), '{"a":null,"b":1}');
   assert.equal(nudgeCanonicalJsonString({ values: [3, 1, 2] }), '{"values":[3,1,2]}');
@@ -197,6 +209,7 @@ test("ledger canonical JSON preserves explicit null, literal bytes, array order,
   assert.notEqual(nudgeCanonicalJsonString({ text: "é" }), nudgeCanonicalJsonString({ text: "e\u0301" }));
 });
 
+// Why: missing optional task text has a stable digest representation.
 test("queue source: missing title/description is explicit null in the digest material", () => {
   const material = { id: "task-9", capturedAt: "2026-09-21T10:00:00.000Z" };
   const digest = sha256Hex(nudgeCanonicalJsonString({
@@ -212,6 +225,7 @@ test("queue source: missing title/description is explicit null in the digest mat
   assert.equal(recomputeEntryDigests(entry).ok, true);
 });
 
+// Why: board HMACs are not independently recomputable without the key.
 test("board source: digests are preserved, not recomputed (keyed verification needs the HMAC secret)", () => {
   const entry = baseEntry();
   entry.dispatchAuthorization = {
@@ -226,6 +240,7 @@ test("board source: digests are preserved, not recomputed (keyed verification ne
   assert.ok(!recomputed.errors.some((e) => e.includes("authorityDigest mismatch")));
 });
 
+// Why: scope widening cannot preserve the prior scope digest.
 test("scopeDigest recomputes from sorted, deduplicated operation classes", () => {
   const scopeObject = {
     operationClasses: [...new Set([...AUTH.operationClasses].sort())],
@@ -244,6 +259,7 @@ test("scopeDigest recomputes from sorted, deduplicated operation classes", () =>
   assert.ok(result.errors.some((e) => e.includes("scopeDigest mismatch")));
 });
 
+// Why: malformed evidence should return a structured error.
 test("malformed digest material returns an error instead of throwing", () => {
   const entry = baseEntry();
   entry.dispatchAuthorization = { ...entry.dispatchAuthorization, operationClasses: 7 };
@@ -251,6 +267,7 @@ test("malformed digest material returns an error instead of throwing", () => {
   assert.equal(recomputeEntryDigests(entry).ok, false);
 });
 
+// Why: message byte changes must be visible in integrity checks.
 test("messageSha256 and messageBytes recompute from the exact sent text", () => {
   const entry = baseEntry();
   entry.messageSha256 = "0".repeat(64);
@@ -265,6 +282,7 @@ test("messageSha256 and messageBytes recompute from the exact sent text", () => 
 // Two-phase entries
 // ---------------------------------------------------------------------------
 
+// Why: a request is recorded before its action completes.
 test("buildRequestedEntry mints a valid requested entry with message integrity fields", () => {
   const entry = buildRequestedEntry({
     journeyId: "j1", timestamp: "2026-09-21T10:05:00.000Z", action: "nudge",
@@ -288,11 +306,13 @@ test("buildRequestedEntry mints a valid requested entry with message integrity f
   assert.equal(validateLedgerEntry(entry).ok, true);
 });
 
+// Why: prohibit a terminal without an earlier request.
 test("a nudge or replacement without a ledger pre-entry is forbidden", () => {
   const ledger = [];
   assert.throws(() => appendTerminalResult(ledger, "missing", { result: "delivered" }), /pre-entry/);
 });
 
+// Why: one terminal updates the correct requested entry.
 test("appendTerminalResult links the terminal phase to the requested entry by entryId", () => {
   const entry = buildRequestedEntry({
     journeyId: "j1", timestamp: "t", action: "nudge", role: "r", journeyStep: 1,
@@ -319,16 +339,18 @@ test("appendTerminalResult links the terminal phase to the requested entry by en
   assert.equal(interrupted[0].result, "requested");
 });
 
+// Why: terminals cannot rewrite the immutable request payload.
 test("appendTerminalResult rejects keys outside the terminal allowlist", () => {
   const entry = baseEntry();
   assert.throws(
     () => appendTerminalResult([entry], entry.entryId, {
       result: "delivered", deliveryState: "delivered", messageText: "overwritten",
     }),
-    (error) => error?.code === "invalid-input" && /messageText/.test(error.message),
+    (error) => error?.code === "invalid-input" && error.message.includes("messageText"),
   );
 });
 
+// Why: a request is not itself a terminal outcome.
 test("appendTerminalResult refuses a terminal result of requested", () => {
   const entry = buildRequestedEntry({
     journeyId: "j", timestamp: "t", action: "nudge", role: "r", journeyStep: 1,
@@ -346,10 +368,60 @@ test("appendTerminalResult refuses a terminal result of requested", () => {
   assert.throws(() => appendTerminalResult([entry], entry.entryId, { result: "requested" }), /cannot be requested/);
 });
 
+// Why: only a requested pre-entry may receive one terminal; a second outcome cannot replace audit evidence.
+test("a request takes exactly one terminal and refuses a different terminal", () => {
+  const request = baseEntry();
+  const settled = appendTerminalResult([request], request.entryId, {
+    result: "delivered", deliveryState: "delivered",
+  });
+  assert.equal(settled[0].result, "delivered");
+  assert.throws(
+    () => appendTerminalResult(settled, request.entryId, { result: "rejected", deliveryState: "rejected-before-delivery" }),
+    (error) => error?.code === "already-terminal",
+  );
+  assert.equal(settled[0].result, "delivered");
+});
+
+// Why: a delivery receipt and its result must describe the same nudge outcome.
+test("nudge result and delivery state cannot contradict each other on new writes", () => {
+  const request = baseEntry();
+  assert.throws(
+    () => appendTerminalResult([request], request.entryId, { result: "delivered", deliveryState: "unknown" }),
+    (error) => error?.code === "invalid-ledger-entry",
+  );
+  assert.equal(validateLedgerEntry(baseEntry({ result: "rejected", deliveryState: "delivered" })).ok, false);
+});
+
+// Why: validate the entire result×delivery contract, including historical missing delivery fields.
+test("closed nudge result and delivery combinations preserve legacy missing states", () => {
+  const allowed = {
+    requested: [undefined], delivered: [undefined, "delivered"],
+    rejected: [undefined, "rejected-before-delivery"],
+    unknown: [undefined, "unknown"],
+    spawned: [], failed: [undefined, "delivered", "rejected-before-delivery", "unknown"],
+    parked: [undefined, "delivered", "rejected-before-delivery", "unknown"],
+  };
+  for (const result of Object.keys(allowed)) {
+    for (const deliveryState of [undefined, "delivered", "rejected-before-delivery", "unknown"]) {
+      const entry = baseEntry({ result, ...(deliveryState === undefined ? {} : { deliveryState }) });
+      assert.equal(validateLedgerEntry(entry).ok, allowed[result].includes(deliveryState), `${result} / ${deliveryState}`);
+    }
+  }
+});
+
+// Why: the immutable terminal record must not be rewritten even by a repeated identical result.
+test("a repeated terminal cannot update an existing terminal", () => {
+  const request = baseEntry();
+  const settled = appendTerminalResult([request], request.entryId, { result: "unknown", deliveryState: "unknown" });
+  assert.throws(() => appendTerminalResult(settled, request.entryId, { result: "unknown", deliveryState: "unknown" }),
+    (error) => error?.code === "already-terminal");
+});
+
 // ---------------------------------------------------------------------------
 // Receipt serialization
 // ---------------------------------------------------------------------------
 
+// Why: the journey receipt retains exact bounded ledger evidence.
 test("serializeLedgerSection emits a bounded, digest-linked section with both phases", () => {
   const entry = buildRequestedEntry({
     journeyId: "j", timestamp: "t", action: "nudge", role: "r", journeyStep: 1,
@@ -371,6 +443,7 @@ test("serializeLedgerSection emits a bounded, digest-linked section with both ph
   assert.equal(section.digest, sha256Hex(section.body));
 });
 
+// Why: capacity overflow cannot silently truncate audit evidence.
 test("receipt capacity: maxBytes is required and exceeding it fails closed", () => {
   const entry = buildRequestedEntry({
     journeyId: "j", timestamp: "t", action: "nudge", role: "r", journeyStep: 1,
@@ -405,25 +478,38 @@ function anchorLedger() {
       { head: "2".repeat(40), statusDigest: "2".repeat(64), diffDigest: "2".repeat(64) }),
     mk("e3", "failed",
       { head: "3".repeat(40), statusDigest: "3".repeat(64), diffDigest: "3".repeat(64) }),
-    mk("e4", "spawned",
+    { ...mk("e4", "spawned",
       { head: "4".repeat(40), statusDigest: "4".repeat(64), diffDigest: "4".repeat(64) },
-      { head: "5".repeat(40), statusDigest: "5".repeat(64), diffDigest: "5".repeat(64) }),
+      { head: "5".repeat(40), statusDigest: "5".repeat(64), diffDigest: "5".repeat(64) }), action: "replacement", replacementRole: "reviewer" },
   ];
 }
 
+// Why: the selected boundary is the last accepted outcome.
 test("revert anchor: the last accepted entry is selected; requested-only and failed entries are never anchors", () => {
   const selection = selectRevertAnchor(anchorLedger(), {});
   assert.equal(selection.ok, true);
   assert.equal(selection.anchor.entryId, "e4");
-  assert.equal(selection.anchor.action, "nudge");
+  assert.equal(selection.anchor.action, "replacement");
 });
 
+// Why: an unknown or rejected nudge is not proof of an accepted recovery boundary.
+test("revert anchors accept only delivered nudges or spawned replacements", () => {
+  const ledger = [
+    baseEntry({ entryId: "delivered", result: "delivered", deliveryState: "delivered" }),
+    baseEntry({ entryId: "rejected", result: "rejected", deliveryState: "rejected-before-delivery" }),
+    baseEntry({ entryId: "unknown", result: "unknown", deliveryState: "unknown" }),
+  ];
+  assert.equal(selectRevertAnchor(ledger).anchor.entryId, "delivered");
+});
+
+// Why: an unaccepted entry cannot be used as a revert boundary.
 test("revert anchor with no accepted entry fails with a named code", () => {
   const selection = selectRevertAnchor([{ ...baseEntry(), result: "requested" }], {});
   assert.equal(selection.ok, false);
   assert.equal(selection.code, "no-accepted-entry");
 });
 
+// Why: compare both sides of a recorded Git boundary.
 test("revert anchor: current observations are compared against pre AND post Git boundaries", () => {
   const selection = selectRevertAnchor(anchorLedger(), {
     repository: "/repo", branch: undefined, head: "5".repeat(40),
@@ -436,6 +522,7 @@ test("revert anchor: current observations are compared against pre AND post Git 
   assert.equal(selection.atBoundary, true);
 });
 
+// Why: a changed HEAD must remain visible as a mismatch.
 test("revert anchor: a drifted HEAD is reported as evidence, never as a verdict", () => {
   const selection = selectRevertAnchor(anchorLedger(), {
     repository: "/repo", head: "f".repeat(40), statusDigest: null, diffDigest: null,
@@ -445,6 +532,7 @@ test("revert anchor: a drifted HEAD is reported as evidence, never as a verdict"
   assert.equal(selection.atBoundary, false);
 });
 
+// Why: revert selection includes a human-review procedure.
 test("revert anchor: the bounded owner procedure is returned with the anchor", () => {
   const selection = selectRevertAnchor(anchorLedger(), {});
   assert.ok(Array.isArray(selection.procedure));

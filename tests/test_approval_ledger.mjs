@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, appendFileSync, utimesSync } from "node:fs";
 import { join } from "node:path";
-import { recordApproval, verifyApprovals, authorizeApproval, recordApprovalUse, approvalPaths, withApprovalLock, reserveApprovalUse } from "../scripts/enforcement/approval_ledger_pi.js";
+import { recordApproval, verifyApprovals, authorizeApproval, recordApprovalUse, approvalGrantStatus, approvalPaths, withApprovalLock, reserveApprovalUse } from "../scripts/enforcement/approval_ledger_pi.js";
 
 function fixture() {
   mkdirSync("scratch", { recursive: true });
@@ -74,8 +74,61 @@ test("scope, relayer, expiry and use limit fail closed", async () => {
   assert.equal(authorizeApproval(root, entry.id, check).id, entry.id);
   assert.throws(() => authorizeApproval(root, entry.id, { ...check, role: "other" }));
   assert.throws(() => authorizeApproval(root, entry.id, { ...check, tier: 3 }));
-  await recordApprovalUse(root, entry.id, "spawn", "example", "reserved");
+  await reserveApprovalUse(root, entry.id, check);
   assert.throws(() => authorizeApproval(root, entry.id, check));
+});
+// Why: an outcome without a reservation identity can settle an unrelated use, so it must be refused.
+test("terminal approval outcome requires its reserved use", async () => {
+  const root = fixture(); const entry = await recordApproval(root, input());
+  await reserveApprovalUse(root, entry.id, { tier: 1, repository: "example", action: "spawn", model: "local/example", role: "worker" });
+  await assert.rejects(recordApprovalUse(root, entry.id, "spawn", "example", "spawned"), /reserved use/);
+});
+// Why: each reservation admits at most one terminal, including under concurrent writers.
+test("a reserved use settles once without changing legacy ledger lines", async () => {
+  const root = fixture(); const entry = await recordApproval(root, input());
+  const original = readFileSync(approvalPaths(root).ledger, "utf8");
+  const request = { tier: 1, repository: "example", action: "spawn", model: "local/example", role: "worker" };
+  const { useId } = await reserveApprovalUse(root, entry.id, request);
+  const legacy = JSON.stringify({ use: "old-unlinked-outcome", ledgerId: entry.id, action: "spawn", target: "example", result: "spawned", at: new Date().toISOString() }) + "\n";
+  appendFileSync(approvalPaths(root).uses, legacy);
+  await assert.rejects(recordApprovalUse(root, entry.id, "spawn", "second", "spawned", useId), /reserved use/);
+  await recordApprovalUse(root, entry.id, "spawn", "example", "spawned", useId);
+  await assert.rejects(recordApprovalUse(root, entry.id, "spawn", "example", "spawned", useId), /already settled/);
+  assert.equal(readFileSync(approvalPaths(root).ledger, "utf8"), original);
+  assert.deepEqual(readFileSync(approvalPaths(root).uses, "utf8").trim().split("\n").map((line) => JSON.parse(line).use), [useId, "old-unlinked-outcome", useId]);
+  assert.equal(readFileSync(approvalPaths(root).uses, "utf8").includes(legacy), true);
+});
+// Why: a path cannot inherit repository scope without verified same-repository worktree evidence.
+test("empty path scope refuses arbitrary path and forged worktree evidence", async () => {
+  const root = fixture(); const entry = await recordApproval(root, input());
+  const request = { tier: 1, repository: "example", action: "spawn", model: "local/example", role: "worker", path: "/tmp/foreign-slot" };
+  assert.throws(() => authorizeApproval(root, entry.id, request), /approval does not cover action/);
+  assert.throws(() => authorizeApproval(root, entry.id, { ...request, worktreeTarget: { worktreePath: request.path, repositoryPath: "/tmp/example" } }), /approval does not cover action/);
+});
+
+// Why: a partial outcome must close a reservation exactly once without returning single-use grant capacity.
+test("partial terminal use is attributable and never refunds a reserved approval", async () => {
+  const root = fixture(); const entry = await recordApproval(root, input());
+  const request = { tier: 1, repository: "example", action: "spawn", model: "local/example", role: "worker" };
+  const { useId } = await reserveApprovalUse(root, entry.id, request);
+  await recordApprovalUse(root, entry.id, "spawn", "example", "partial", useId, "tab_created");
+  const uses = readFileSync(approvalPaths(root).uses, "utf8").trim().split("\n").map(JSON.parse);
+  assert.deepEqual(uses.map((use) => use.result), ["reserved", "partial"]);
+  assert.equal(uses[1].partial, "tab_created");
+  await assert.rejects(recordApprovalUse(root, entry.id, "spawn", "example", "spawned", useId), /already settled/);
+  assert.throws(() => authorizeApproval(root, entry.id, request), /approval does not cover action/);
+});
+// Why: all grant views use one closed derived status and reservations remain spent after settlement.
+test("grant status has active, used-up, expired and revoked states", async () => {
+  const root = fixture(); const entry = await recordApproval(root, { ...input(), kind: "standing" });
+  const request = { tier: 1, repository: "example", action: "spawn", model: "local/example", role: "worker" };
+  assert.equal(approvalGrantStatus(entry, [], []), "active");
+  const { useId } = await reserveApprovalUse(root, entry.id, request);
+  await recordApprovalUse(root, entry.id, "spawn", "example", "spawned", useId);
+  const uses = readFileSync(approvalPaths(root).uses, "utf8").trim().split("\n").map(JSON.parse);
+  assert.equal(approvalGrantStatus(entry, [], uses), "used-up");
+  assert.equal(approvalGrantStatus(entry, [], uses, new Date(Date.now() + 9 * 86400000)), "expired");
+  assert.equal(approvalGrantStatus(entry, [entry.id], uses), "revoked");
 });
 // Why: deliberate empty lists have defined wildcard meaning without widening other fields.
 test("an explicit empty roles or models list covers any role or model", async () => {

@@ -1,0 +1,390 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 49 and seed 4708927692526639161 with 1 worker on 10 cores with 14564MB heap and 64MB offheap memory [pid: <PROCESS_ID>] (Mac OS X 27.0.1 aarch64, Homebrew 27.0.1.0.3 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file <WORKTREE>/Gap8ExitGate.tla
+Parsing file <WORKTREE>/.tlc-meta-71762/Naturals.tla
+Parsing file <WORKTREE>/.tlc-meta-71762/FiniteSets.tla
+Parsing file <WORKTREE>/.tlc-meta-71762/Sequences.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module Gap8ExitGate
+Starting... (2026-11-16 14:46:24)
+Implied-temporal checking--satisfiability problem has 1 branches.
+Computing initial states...
+Computed 2 initial states...
+Computed 4 initial states...
+Computed 8 initial states...
+Computed 16 initial states...
+Finished computing initial states: 32 distinct states generated at 2026-11-16 14:46:24.
+Progress(31) at 2026-11-16 14:46:25: 12,124 states generated, 4,187 distinct states found, 0 states left on queue.
+Checking temporal properties for the complete state space with 4187 total distinct states at (2026-11-16 14:46:25)
+Error: Temporal properties were violated.
+
+Error: The following behavior constitutes a counter-example:
+
+State 1: <Initial predicate>
+/\ phase = "working"
+/\ zeroAtDone = FALSE
+/\ passAtDone = FALSE
+/\ coveredAtDone = FALSE
+/\ gaps = {}
+/\ commit = 0
+/\ prevGaps = {}
+/\ covered = TRUE
+/\ zero = FALSE
+/\ res = [ lint |-> [st |-> "none", at |-> 0],
+  types |-> [st |-> "none", at |-> 0],
+  inv |-> [st |-> "none", at |-> 0] ]
+/\ freshAtDone = FALSE
+/\ passes = 0
+/\ declaredAtDone = {}
+/\ declared = {"lint"}
+/\ staleStreak = 0
+/\ gapsAtDone = {}
+
+State 2: <Receipt line 47, col 12 to line 51, col 48 of module Gap8ExitGate>
+/\ phase = "checking"
+/\ zeroAtDone = FALSE
+/\ passAtDone = FALSE
+/\ coveredAtDone = FALSE
+/\ gaps = {}
+/\ commit = 1
+/\ prevGaps = {}
+/\ covered = TRUE
+/\ zero = FALSE
+/\ res = [ lint |-> [st |-> "none", at |-> 0],
+  types |-> [st |-> "none", at |-> 0],
+  inv |-> [st |-> "none", at |-> 0] ]
+/\ freshAtDone = FALSE
+/\ passes = 0
+/\ declaredAtDone = {}
+/\ declared = {"lint"}
+/\ staleStreak = 0
+/\ gapsAtDone = {}
+
+State 3: <RunCheck line 53, col 13 to line 58, col 49 of module Gap8ExitGate>
+/\ phase = "checking"
+/\ zeroAtDone = FALSE
+/\ passAtDone = FALSE
+/\ coveredAtDone = FALSE
+/\ gaps = {}
+/\ commit = 1
+/\ prevGaps = {}
+/\ covered = TRUE
+/\ zero = FALSE
+/\ res = [ lint |-> [st |-> "fail", at |-> 1],
+  types |-> [st |-> "none", at |-> 0],
+  inv |-> [st |-> "none", at |-> 0] ]
+/\ freshAtDone = FALSE
+/\ passes = 0
+/\ declaredAtDone = {}
+/\ declared = {"lint"}
+/\ staleStreak = 0
+/\ gapsAtDone = {}
+
+State 4: <Return line 84, col 11 to line 94, col 29 of module Gap8ExitGate>
+/\ phase = "working"
+/\ zeroAtDone = FALSE
+/\ passAtDone = FALSE
+/\ coveredAtDone = FALSE
+/\ gaps = {"lint"}
+/\ commit = 1
+/\ prevGaps = {"lint"}
+/\ covered = TRUE
+/\ zero = FALSE
+/\ res = [ lint |-> [st |-> "fail", at |-> 1],
+  types |-> [st |-> "none", at |-> 0],
+  inv |-> [st |-> "none", at |-> 0] ]
+/\ freshAtDone = FALSE
+/\ passes = 1
+/\ declaredAtDone = {}
+/\ declared = {"lint"}
+/\ staleStreak = 1
+/\ gapsAtDone = {}
+
+State 5: <Receipt line 47, col 12 to line 51, col 48 of module Gap8ExitGate>
+/\ phase = "checking"
+/\ zeroAtDone = FALSE
+/\ passAtDone = FALSE
+/\ coveredAtDone = FALSE
+/\ gaps = {"lint"}
+/\ commit = 2
+/\ prevGaps = {"lint"}
+/\ covered = TRUE
+/\ zero = FALSE
+/\ res = [ lint |-> [st |-> "fail", at |-> 1],
+  types |-> [st |-> "none", at |-> 0],
+  inv |-> [st |-> "none", at |-> 0] ]
+/\ freshAtDone = FALSE
+/\ passes = 1
+/\ declaredAtDone = {}
+/\ declared = {"lint"}
+/\ staleStreak = 1
+/\ gapsAtDone = {}
+
+State 6: <RunCheck line 53, col 13 to line 58, col 49 of module Gap8ExitGate>
+/\ phase = "checking"
+/\ zeroAtDone = FALSE
+/\ passAtDone = FALSE
+/\ coveredAtDone = FALSE
+/\ gaps = {"lint"}
+/\ commit = 2
+/\ prevGaps = {"lint"}
+/\ covered = TRUE
+/\ zero = FALSE
+/\ res = [ lint |-> [st |-> "fail", at |-> 2],
+  types |-> [st |-> "none", at |-> 0],
+  inv |-> [st |-> "none", at |-> 0] ]
+/\ freshAtDone = FALSE
+/\ passes = 1
+/\ declaredAtDone = {}
+/\ declared = {"lint"}
+/\ staleStreak = 1
+/\ gapsAtDone = {}
+
+State 7: <Return line 84, col 11 to line 94, col 29 of module Gap8ExitGate>
+/\ phase = "working"
+/\ zeroAtDone = FALSE
+/\ passAtDone = FALSE
+/\ coveredAtDone = FALSE
+/\ gaps = {"lint"}
+/\ commit = 2
+/\ prevGaps = {"lint"}
+/\ covered = TRUE
+/\ zero = FALSE
+/\ res = [ lint |-> [st |-> "fail", at |-> 2],
+  types |-> [st |-> "none", at |-> 0],
+  inv |-> [st |-> "none", at |-> 0] ]
+/\ freshAtDone = FALSE
+/\ passes = 2
+/\ declaredAtDone = {}
+/\ declared = {"lint"}
+/\ staleStreak = 2
+/\ gapsAtDone = {}
+
+State 8: <Receipt line 47, col 12 to line 51, col 48 of module Gap8ExitGate>
+/\ phase = "checking"
+/\ zeroAtDone = FALSE
+/\ passAtDone = FALSE
+/\ coveredAtDone = FALSE
+/\ gaps = {"lint"}
+/\ commit = 1
+/\ prevGaps = {"lint"}
+/\ covered = TRUE
+/\ zero = FALSE
+/\ res = [ lint |-> [st |-> "fail", at |-> 2],
+  types |-> [st |-> "none", at |-> 0],
+  inv |-> [st |-> "none", at |-> 0] ]
+/\ freshAtDone = FALSE
+/\ passes = 2
+/\ declaredAtDone = {}
+/\ declared = {"lint"}
+/\ staleStreak = 2
+/\ gapsAtDone = {}
+
+State 9: <RunCheck line 53, col 13 to line 58, col 49 of module Gap8ExitGate>
+/\ phase = "checking"
+/\ zeroAtDone = FALSE
+/\ passAtDone = FALSE
+/\ coveredAtDone = FALSE
+/\ gaps = {"lint"}
+/\ commit = 1
+/\ prevGaps = {"lint"}
+/\ covered = TRUE
+/\ zero = FALSE
+/\ res = [ lint |-> [st |-> "fail", at |-> 1],
+  types |-> [st |-> "none", at |-> 0],
+  inv |-> [st |-> "none", at |-> 0] ]
+/\ freshAtDone = FALSE
+/\ passes = 2
+/\ declaredAtDone = {}
+/\ declared = {"lint"}
+/\ staleStreak = 2
+/\ gapsAtDone = {}
+
+State 10: <Return line 84, col 11 to line 94, col 29 of module Gap8ExitGate>
+/\ phase = "working"
+/\ zeroAtDone = FALSE
+/\ passAtDone = FALSE
+/\ coveredAtDone = FALSE
+/\ gaps = {"lint"}
+/\ commit = 1
+/\ prevGaps = {"lint"}
+/\ covered = TRUE
+/\ zero = FALSE
+/\ res = [ lint |-> [st |-> "fail", at |-> 1],
+  types |-> [st |-> "none", at |-> 0],
+  inv |-> [st |-> "none", at |-> 0] ]
+/\ freshAtDone = FALSE
+/\ passes = 3
+/\ declaredAtDone = {}
+/\ declared = {"lint"}
+/\ staleStreak = 3
+/\ gapsAtDone = {}
+
+State 11: <Receipt line 47, col 12 to line 51, col 48 of module Gap8ExitGate>
+/\ phase = "checking"
+/\ zeroAtDone = FALSE
+/\ passAtDone = FALSE
+/\ coveredAtDone = FALSE
+/\ gaps = {"lint"}
+/\ commit = 2
+/\ prevGaps = {"lint"}
+/\ covered = TRUE
+/\ zero = FALSE
+/\ res = [ lint |-> [st |-> "fail", at |-> 1],
+  types |-> [st |-> "none", at |-> 0],
+  inv |-> [st |-> "none", at |-> 0] ]
+/\ freshAtDone = FALSE
+/\ passes = 3
+/\ declaredAtDone = {}
+/\ declared = {"lint"}
+/\ staleStreak = 3
+/\ gapsAtDone = {}
+
+State 12: <RunCheck line 53, col 13 to line 58, col 49 of module Gap8ExitGate>
+/\ phase = "checking"
+/\ zeroAtDone = FALSE
+/\ passAtDone = FALSE
+/\ coveredAtDone = FALSE
+/\ gaps = {"lint"}
+/\ commit = 2
+/\ prevGaps = {"lint"}
+/\ covered = TRUE
+/\ zero = FALSE
+/\ res = [ lint |-> [st |-> "fail", at |-> 2],
+  types |-> [st |-> "none", at |-> 0],
+  inv |-> [st |-> "none", at |-> 0] ]
+/\ freshAtDone = FALSE
+/\ passes = 3
+/\ declaredAtDone = {}
+/\ declared = {"lint"}
+/\ staleStreak = 3
+/\ gapsAtDone = {}
+
+State 13: <Return line 84, col 11 to line 94, col 29 of module Gap8ExitGate>
+/\ phase = "working"
+/\ zeroAtDone = FALSE
+/\ passAtDone = FALSE
+/\ coveredAtDone = FALSE
+/\ gaps = {"lint"}
+/\ commit = 2
+/\ prevGaps = {"lint"}
+/\ covered = TRUE
+/\ zero = FALSE
+/\ res = [ lint |-> [st |-> "fail", at |-> 2],
+  types |-> [st |-> "none", at |-> 0],
+  inv |-> [st |-> "none", at |-> 0] ]
+/\ freshAtDone = FALSE
+/\ passes = 4
+/\ declaredAtDone = {}
+/\ declared = {"lint"}
+/\ staleStreak = 3
+/\ gapsAtDone = {}
+
+State 14: <Receipt line 47, col 12 to line 51, col 48 of module Gap8ExitGate>
+/\ phase = "checking"
+/\ zeroAtDone = FALSE
+/\ passAtDone = FALSE
+/\ coveredAtDone = FALSE
+/\ gaps = {"lint"}
+/\ commit = 1
+/\ prevGaps = {"lint"}
+/\ covered = TRUE
+/\ zero = FALSE
+/\ res = [ lint |-> [st |-> "fail", at |-> 2],
+  types |-> [st |-> "none", at |-> 0],
+  inv |-> [st |-> "none", at |-> 0] ]
+/\ freshAtDone = FALSE
+/\ passes = 4
+/\ declaredAtDone = {}
+/\ declared = {"lint"}
+/\ staleStreak = 3
+/\ gapsAtDone = {}
+
+State 15: <RunCheck line 53, col 13 to line 58, col 49 of module Gap8ExitGate>
+/\ phase = "checking"
+/\ zeroAtDone = FALSE
+/\ passAtDone = FALSE
+/\ coveredAtDone = FALSE
+/\ gaps = {"lint"}
+/\ commit = 1
+/\ prevGaps = {"lint"}
+/\ covered = TRUE
+/\ zero = FALSE
+/\ res = [ lint |-> [st |-> "fail", at |-> 1],
+  types |-> [st |-> "none", at |-> 0],
+  inv |-> [st |-> "none", at |-> 0] ]
+/\ freshAtDone = FALSE
+/\ passes = 4
+/\ declaredAtDone = {}
+/\ declared = {"lint"}
+/\ staleStreak = 3
+/\ gapsAtDone = {}
+
+State 16: <Return line 84, col 11 to line 94, col 29 of module Gap8ExitGate>
+/\ phase = "working"
+/\ zeroAtDone = FALSE
+/\ passAtDone = FALSE
+/\ coveredAtDone = FALSE
+/\ gaps = {"lint"}
+/\ commit = 1
+/\ prevGaps = {"lint"}
+/\ covered = TRUE
+/\ zero = FALSE
+/\ res = [ lint |-> [st |-> "fail", at |-> 1],
+  types |-> [st |-> "none", at |-> 0],
+  inv |-> [st |-> "none", at |-> 0] ]
+/\ freshAtDone = FALSE
+/\ passes = 4
+/\ declaredAtDone = {}
+/\ declared = {"lint"}
+/\ staleStreak = 3
+/\ gapsAtDone = {}
+
+State 17: <Receipt line 47, col 12 to line 51, col 48 of module Gap8ExitGate>
+/\ phase = "checking"
+/\ zeroAtDone = FALSE
+/\ passAtDone = FALSE
+/\ coveredAtDone = FALSE
+/\ gaps = {"lint"}
+/\ commit = 2
+/\ prevGaps = {"lint"}
+/\ covered = TRUE
+/\ zero = FALSE
+/\ res = [ lint |-> [st |-> "fail", at |-> 1],
+  types |-> [st |-> "none", at |-> 0],
+  inv |-> [st |-> "none", at |-> 0] ]
+/\ freshAtDone = FALSE
+/\ passes = 4
+/\ declaredAtDone = {}
+/\ declared = {"lint"}
+/\ staleStreak = 3
+/\ gapsAtDone = {}
+
+State 18: <RunCheck line 53, col 13 to line 58, col 49 of module Gap8ExitGate>
+/\ phase = "checking"
+/\ zeroAtDone = FALSE
+/\ passAtDone = FALSE
+/\ coveredAtDone = FALSE
+/\ gaps = {"lint"}
+/\ commit = 2
+/\ prevGaps = {"lint"}
+/\ covered = TRUE
+/\ zero = FALSE
+/\ res = [ lint |-> [st |-> "fail", at |-> 2],
+  types |-> [st |-> "none", at |-> 0],
+  inv |-> [st |-> "none", at |-> 0] ]
+/\ freshAtDone = FALSE
+/\ passes = 4
+/\ declaredAtDone = {}
+/\ declared = {"lint"}
+/\ staleStreak = 3
+/\ gapsAtDone = {}
+
+Back to state 13: <Return line 84, col 11 to line 94, col 29 of module Gap8ExitGate>
+
+Finished checking temporal properties in 00s at 2026-11-16 14:46:25
+12124 states generated, 4187 distinct states found, 0 states left on queue.
+Finished in 00s at (2026-11-16 14:46:25)
+exit=13

@@ -4,6 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsS
 import { join, resolve } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { recordApproval, checkRelayRequests } from "../scripts/enforcement/approval_ledger_pi.js";
 import { executeHerdrSpawnWorker, executeHerdrRegisterRepository, registerHerdrLifecycleInterface } from "../scripts/enforcement/herdr_lifecycle_pi.js";
 import { guardToolCall, needsOwner } from "../scripts/enforcement/attended_authority_guard.js";
@@ -11,9 +12,16 @@ const fixtureDir = resolve(fileURLToPath(new URL("./fixtures/relay-incident-2026
 const names = ["alpha", "beta", "gamma", "agent-skill-vault"];
 const model = "fixture/example";
 const owner = "example-owner";
+const worktreeFixtures = [];
+test.after(() => { for (const fixture of worktreeFixtures) fixture.cleanup(); });
+
 function setup() {
-  mkdirSync("scratch", { recursive: true });
-  const root = mkdtempSync(join(process.cwd(), "scratch/incident-"));
+  let helper;
+  try { helper = createRequire(import.meta.url)("../scripts/pad_test_treehouse.js"); } catch {}
+  assert.ok(helper, "Treehouse fixture helper is required");
+  const fixture = helper.createTestTreehouse();
+  worktreeFixtures.push(fixture);
+  const root = fixture.root;
   const coordinator = join(root, "coordinator");
   const profile = join(root, "profile");
   mkdirSync(coordinator); mkdirSync(join(profile, "config"), { recursive: true });
@@ -43,7 +51,7 @@ function setup() {
     },
   };
   const approval = (name, tier = 1, action = "spawn") => ({ kind: "relay", relayer: "bot", channel: "chat", sourceMessageId: name, quote: `Approve ${action} ${name}`, quotedQuestion: `May I ${action} ${name}?`, givenAt: new Date(Date.now() - 1000).toISOString(), tier, scope: { repo: name, actions: [action], models: [model], roles: [name] } });
-  return { root, profile, log, context, options, approval };
+  return { root, profile, log, context, options, approval, addWorktree: fixture.addWorktree };
 }
 const params = (name, ledgerId) => ({ placement: "tab", role: name, model, repository: name, ...(ledgerId ? { authority: { ledgerId } } : {}) });
 // Why: missing relay coverage must produce a usable owner request.
@@ -151,7 +159,7 @@ test("valid authority does not bypass origin, realpath, worktree or Git common-d
     if (kind === "symlink") symlinkSync(join(f.root, "alpha"), join(f.root, name));
     if (kind === "worktree") {
       execFileSync("git", ["-C", join(f.root, "alpha"), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "fixture"]);
-      execFileSync("git", ["-C", join(f.root, "alpha"), "worktree", "add", "-q", "-b", "fixture-branch", join(f.root, name)]);
+      f.addWorktree(join(f.root, "alpha"), join(f.root, name), ["-q", "-b", "fixture-branch"]);
     }
     if (kind === "external-common") {
       const target = join(f.root, name);
@@ -285,7 +293,7 @@ test.skip("registration rejects a worktree and an out-of-scope approval", async 
   const f = setup();
   const detached = join(f.root, "detached");
   execFileSync("git", ["-C", join(f.root, "alpha"), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "fixture"]);
-  execFileSync("git", ["-C", join(f.root, "alpha"), "worktree", "add", "-q", "-b", "fixture-branch", detached]);
+  f.addWorktree(join(f.root, "alpha"), detached, ["-q", "-b", "fixture-branch"]);
   const entry = await recordApproval(f.profile, f.approval("detached", 2, "register"));
   const response = { runGh: () => ({ status: 0, stdout: JSON.stringify({ nameWithOwner: `${owner}/detached`, visibility: "PRIVATE" }) }) };
   assert.equal((await executeHerdrRegisterRepository({ name: "detached", ledgerId: entry.id }, f.context, response)).status, "needs-owner");
@@ -333,7 +341,7 @@ test("a repository-only ledger grant does not cover a new worktree target", asyn
   execFileSync("git", ["-C", repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "--allow-empty", "-m", "init"]);
   const target = join(f.root, "pool", "slot", "alpha");
   mkdirSync(join(f.root, "pool", "slot"), { recursive: true });
-  execFileSync("git", ["-C", repo, "worktree", "add", "-q", "-b", "slot", target]);
+  f.addWorktree(repo, target, ["-q", "-b", "slot"]);
   const leaseId = "0123456789abcdef0123456789abcdef";
   f.options.treehouseStatus = () => JSON.stringify([{ name: "1", path: target, status: "leased", lease_id: leaseId, lease_holder: "fixture" }]);
   // This grant names repository, action, model and role, but no path. It must
@@ -364,7 +372,7 @@ for (const revokedAuthority of ["lease", "origin"]) {
     execFileSync("git", ["-C", repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "--allow-empty", "-m", "init"]);
     const target = join(f.root, "pool", "slot", "alpha");
     mkdirSync(join(f.root, "pool", "slot"), { recursive: true });
-    execFileSync("git", ["-C", repo, "worktree", "add", "-q", "-b", "slot", target]);
+    f.addWorktree(repo, target, ["-q", "-b", "slot"]);
     let leased = true;
     f.options.treehouseStatus = () => JSON.stringify(leased
       ? [{ path: target, status: "leased", lease_id: "0123456789abcdef0123456789abcdef" }]

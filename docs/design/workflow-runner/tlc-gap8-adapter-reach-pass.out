@@ -1,0 +1,115 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Running breadth-first search Model-Checking with fp 52 and seed -7046828398558588691 with 1 worker on 10 cores with 16384MB heap and 64MB offheap memory [pid: <PROCESS_ID>] (Mac OS X 27.0.1 aarch64, Homebrew 27.0.1.0.3 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file <WORKTREE>/.scratch/g8-linux-adapter/Gap8LinuxAdapter.tla
+Parsing file <TLC_TEMP>
+Semantic processing of module Naturals
+Semantic processing of module Gap8LinuxAdapter
+Starting... (2026-11-17 11:21:22)
+Computing initial states...
+Computed 2 initial states...
+Finished computing initial states: 4 distinct states generated at 2026-11-17 11:21:22.
+Error: Invariant NeverGuestPass is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ runArgv = 0
+/\ cancelled = FALSE
+/\ source = "none"
+/\ pinnedArgv = 1
+/\ tui = TRUE
+/\ resultRun = 0
+/\ receiptDigest = 1
+/\ passed = FALSE
+/\ nativeAtRun = FALSE
+/\ switched = TRUE
+/\ executed = FALSE
+/\ phase = "requested"
+/\ confirmed = FALSE
+/\ stagedDigest = 0
+/\ guestRun = 0
+/\ payloadUnchanged = TRUE
+/\ unavailable = FALSE
+
+State 2: <Confirm line 24, col 12 to line 28, col 77 of module Gap8LinuxAdapter>
+/\ runArgv = 0
+/\ cancelled = FALSE
+/\ source = "none"
+/\ pinnedArgv = 1
+/\ tui = TRUE
+/\ resultRun = 0
+/\ receiptDigest = 1
+/\ passed = FALSE
+/\ nativeAtRun = FALSE
+/\ switched = TRUE
+/\ executed = FALSE
+/\ phase = "confirmed"
+/\ confirmed = TRUE
+/\ stagedDigest = 0
+/\ guestRun = 0
+/\ payloadUnchanged = TRUE
+/\ unavailable = FALSE
+
+State 3: <Stage line 29, col 10 to line 34, col 67 of module Gap8LinuxAdapter>
+/\ runArgv = 1
+/\ cancelled = FALSE
+/\ source = "none"
+/\ pinnedArgv = 1
+/\ tui = TRUE
+/\ resultRun = 0
+/\ receiptDigest = 1
+/\ passed = FALSE
+/\ nativeAtRun = FALSE
+/\ switched = TRUE
+/\ executed = FALSE
+/\ phase = "staged"
+/\ confirmed = TRUE
+/\ stagedDigest = 1
+/\ guestRun = 0
+/\ payloadUnchanged = TRUE
+/\ unavailable = FALSE
+
+State 4: <Run line 35, col 8 to line 42, col 63 of module Gap8LinuxAdapter>
+/\ runArgv = 1
+/\ cancelled = FALSE
+/\ source = "none"
+/\ pinnedArgv = 1
+/\ tui = TRUE
+/\ resultRun = 0
+/\ receiptDigest = 1
+/\ passed = FALSE
+/\ nativeAtRun = TRUE
+/\ switched = TRUE
+/\ executed = TRUE
+/\ phase = "running"
+/\ confirmed = TRUE
+/\ stagedDigest = 1
+/\ guestRun = 1
+/\ payloadUnchanged = TRUE
+/\ unavailable = FALSE
+
+State 5: <Result line 43, col 11 to line 50, col 72 of module Gap8LinuxAdapter>
+/\ runArgv = 1
+/\ cancelled = FALSE
+/\ source = "guest"
+/\ pinnedArgv = 1
+/\ tui = TRUE
+/\ resultRun = 1
+/\ receiptDigest = 1
+/\ passed = TRUE
+/\ nativeAtRun = TRUE
+/\ switched = TRUE
+/\ executed = TRUE
+/\ phase = "finished"
+/\ confirmed = TRUE
+/\ stagedDigest = 1
+/\ guestRun = 1
+/\ payloadUnchanged = TRUE
+/\ unavailable = FALSE
+
+37 states generated, 21 distinct states found, 3 states left on queue.
+The depth of the complete state graph search is 5.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 3 and the 95th percentile is 3).
+Finished in 00s at (2026-11-17 11:21:22)
+
+checkerExit=12

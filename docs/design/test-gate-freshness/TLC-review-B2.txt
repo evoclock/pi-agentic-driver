@@ -1,0 +1,354 @@
+=== BaseFreshness-reach-merge ===
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Running breadth-first search Model-Checking with fp 56 and seed 3137503094017165902 with 1 worker on 10 cores with 16384MB heap and 64MB offheap memory [pid: sanitized] (Mac OS X 27.0.1 aarch64, Homebrew 27.0.1.0.3 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file <sanitized>/BaseFreshness.tla
+Parsing file <sanitized>/Naturals.tla
+Semantic processing of module Naturals
+Semantic processing of module BaseFreshness
+Starting... (2026-11-17 17:09:22)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-11-17 17:09:22.
+Error: Invariant NeverMerged is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ classification = "none"
+/\ lockFresh = TRUE
+/\ reviewFresh = TRUE
+/\ comparison = 0
+/\ head = 0
+/\ main = 0
+/\ stage = "lease"
+/\ lease = 0
+
+State 2: <Next line 34, col 30 to line 34, col 136 of module BaseFreshness>
+/\ classification = "none"
+/\ lockFresh = TRUE
+/\ reviewFresh = TRUE
+/\ comparison = 0
+/\ head = 0
+/\ main = 0
+/\ stage = "lock"
+/\ lease = 0
+
+State 3: <Next line 34, col 30 to line 34, col 136 of module BaseFreshness>
+/\ classification = "none"
+/\ lockFresh = TRUE
+/\ reviewFresh = TRUE
+/\ comparison = 0
+/\ head = 0
+/\ main = 0
+/\ stage = "review"
+/\ lease = 0
+
+State 4: <Next line 34, col 30 to line 34, col 136 of module BaseFreshness>
+/\ classification = "none"
+/\ lockFresh = TRUE
+/\ reviewFresh = TRUE
+/\ comparison = 0
+/\ head = 0
+/\ main = 0
+/\ stage = "push"
+/\ lease = 0
+
+State 5: <Next line 34, col 30 to line 34, col 136 of module BaseFreshness>
+/\ classification = "none"
+/\ lockFresh = TRUE
+/\ reviewFresh = TRUE
+/\ comparison = 0
+/\ head = 0
+/\ main = 0
+/\ stage = "ci"
+/\ lease = 0
+
+State 6: <Next line 34, col 30 to line 34, col 136 of module BaseFreshness>
+/\ classification = "none"
+/\ lockFresh = TRUE
+/\ reviewFresh = TRUE
+/\ comparison = 0
+/\ head = 0
+/\ main = 0
+/\ stage = "merged"
+/\ lease = 0
+
+135 states generated, 41 distinct states found, 11 states left on queue.
+The depth of the complete state graph search is 6.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 3 and the 95th percentile is 3).
+Finished in 00s at (2026-11-17 17:09:22)
+
+=== BaseFreshness-reach-stale ===
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Running breadth-first search Model-Checking with fp 24 and seed -3257881962937696990 with 1 worker on 10 cores with 16384MB heap and 64MB offheap memory [pid: sanitized] (Mac OS X 27.0.1 aarch64, Homebrew 27.0.1.0.3 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file <sanitized>/BaseFreshness.tla
+Parsing file <sanitized>/Naturals.tla
+Semantic processing of module Naturals
+Semantic processing of module BaseFreshness
+Starting... (2026-11-17 17:09:22)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-11-17 17:09:22.
+Error: Invariant NeverStale is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ classification = "none"
+/\ lockFresh = TRUE
+/\ reviewFresh = TRUE
+/\ comparison = 0
+/\ head = 0
+/\ main = 0
+/\ stage = "lease"
+/\ lease = 0
+
+State 2: <Next line 34, col 30 to line 34, col 136 of module BaseFreshness>
+/\ classification = "none"
+/\ lockFresh = TRUE
+/\ reviewFresh = TRUE
+/\ comparison = 0
+/\ head = 0
+/\ main = 1
+/\ stage = "lease"
+/\ lease = 0
+
+State 3: <Next line 34, col 30 to line 34, col 136 of module BaseFreshness>
+/\ classification = "stale"
+/\ lockFresh = TRUE
+/\ reviewFresh = TRUE
+/\ comparison = 0
+/\ head = 1
+/\ main = 1
+/\ stage = "lease"
+/\ lease = 1
+
+8 states generated, 5 distinct states found, 2 states left on queue.
+The depth of the complete state graph search is 3.
+The average outdegree of the complete state graph is 2 (minimum is 2, the maximum 2 and the 95th percentile is 2).
+Finished in 00s at (2026-11-17 17:09:22)
+
+=== BaseFreshness-unsafe-lock ===
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Running breadth-first search Model-Checking with fp 84 and seed 5240949283489015324 with 1 worker on 10 cores with 16384MB heap and 64MB offheap memory [pid: sanitized] (Mac OS X 27.0.1 aarch64, Homebrew 27.0.1.0.3 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file <sanitized>/BaseFreshness.tla
+Parsing file <sanitized>/Naturals.tla
+Semantic processing of module Naturals
+Semantic processing of module BaseFreshness
+Starting... (2026-11-17 17:09:23)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-11-17 17:09:23.
+Error: Invariant NoLockOnStaleBase is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ classification = "none"
+/\ lockFresh = TRUE
+/\ reviewFresh = TRUE
+/\ comparison = 0
+/\ head = 0
+/\ main = 0
+/\ stage = "lease"
+/\ lease = 0
+
+State 2: <Next line 34, col 30 to line 34, col 136 of module BaseFreshness>
+/\ classification = "none"
+/\ lockFresh = TRUE
+/\ reviewFresh = TRUE
+/\ comparison = 0
+/\ head = 0
+/\ main = 1
+/\ stage = "lease"
+/\ lease = 0
+
+State 3: <Next line 34, col 30 to line 34, col 136 of module BaseFreshness>
+/\ classification = "none"
+/\ lockFresh = FALSE
+/\ reviewFresh = TRUE
+/\ comparison = 0
+/\ head = 0
+/\ main = 1
+/\ stage = "lock"
+/\ lease = 0
+
+10 states generated, 6 distinct states found, 3 states left on queue.
+The depth of the complete state graph search is 3.
+The average outdegree of the complete state graph is 2 (minimum is 2, the maximum 2 and the 95th percentile is 2).
+Finished in 00s at (2026-11-17 17:09:23)
+
+=== BaseFreshness-unsafe-missing ===
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Running breadth-first search Model-Checking with fp 102 and seed -2273984472789274040 with 1 worker on 10 cores with 16384MB heap and 64MB offheap memory [pid: sanitized] (Mac OS X 27.0.1 aarch64, Homebrew 27.0.1.0.3 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file <sanitized>/BaseFreshness.tla
+Parsing file <sanitized>/Naturals.tla
+Semantic processing of module Naturals
+Semantic processing of module BaseFreshness
+Starting... (2026-11-17 17:09:24)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-11-17 17:09:24.
+Error: Invariant StaleNeverClassifiedAsMissingTest is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ classification = "none"
+/\ lockFresh = TRUE
+/\ reviewFresh = TRUE
+/\ comparison = 0
+/\ head = 0
+/\ main = 0
+/\ stage = "lease"
+/\ lease = 0
+
+State 2: <Next line 34, col 30 to line 34, col 136 of module BaseFreshness>
+/\ classification = "none"
+/\ lockFresh = TRUE
+/\ reviewFresh = TRUE
+/\ comparison = 0
+/\ head = 0
+/\ main = 1
+/\ stage = "lease"
+/\ lease = 0
+
+State 3: <Next line 34, col 30 to line 34, col 136 of module BaseFreshness>
+/\ classification = "missing"
+/\ lockFresh = TRUE
+/\ reviewFresh = TRUE
+/\ comparison = 0
+/\ head = 0
+/\ main = 1
+/\ stage = "lease"
+/\ lease = 0
+
+9 states generated, 6 distinct states found, 3 states left on queue.
+The depth of the complete state graph search is 3.
+The average outdegree of the complete state graph is 2 (minimum is 2, the maximum 2 and the 95th percentile is 2).
+Finished in 00s at (2026-11-17 17:09:24)
+
+=== BaseFreshness-unsafe-override ===
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Running breadth-first search Model-Checking with fp 3 and seed -3882416331963591686 with 1 worker on 10 cores with 16384MB heap and 64MB offheap memory [pid: sanitized] (Mac OS X 27.0.1 aarch64, Homebrew 27.0.1.0.3 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file <sanitized>/BaseFreshness.tla
+Parsing file <sanitized>/Naturals.tla
+Semantic processing of module Naturals
+Semantic processing of module BaseFreshness
+Starting... (2026-11-17 17:09:24)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-11-17 17:09:24.
+Error: Invariant NoLockOnStaleBase is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ classification = "none"
+/\ lockFresh = TRUE
+/\ reviewFresh = TRUE
+/\ comparison = 0
+/\ head = 0
+/\ main = 0
+/\ stage = "lease"
+/\ lease = 0
+
+State 2: <Next line 34, col 30 to line 34, col 136 of module BaseFreshness>
+/\ classification = "none"
+/\ lockFresh = TRUE
+/\ reviewFresh = TRUE
+/\ comparison = 0
+/\ head = 0
+/\ main = 1
+/\ stage = "lease"
+/\ lease = 0
+
+State 3: <Next line 34, col 30 to line 34, col 136 of module BaseFreshness>
+/\ classification = "none"
+/\ lockFresh = FALSE
+/\ reviewFresh = TRUE
+/\ comparison = 0
+/\ head = 0
+/\ main = 1
+/\ stage = "lock"
+/\ lease = 0
+
+10 states generated, 6 distinct states found, 3 states left on queue.
+The depth of the complete state graph search is 3.
+The average outdegree of the complete state graph is 2 (minimum is 2, the maximum 2 and the 95th percentile is 2).
+Finished in 00s at (2026-11-17 17:09:24)
+
+=== BaseFreshness-unsafe-review ===
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Running breadth-first search Model-Checking with fp 98 and seed 7468317607966217433 with 1 worker on 10 cores with 16384MB heap and 64MB offheap memory [pid: sanitized] (Mac OS X 27.0.1 aarch64, Homebrew 27.0.1.0.3 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file <sanitized>/BaseFreshness.tla
+Parsing file <sanitized>/Naturals.tla
+Semantic processing of module Naturals
+Semantic processing of module BaseFreshness
+Starting... (2026-11-17 17:09:25)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-11-17 17:09:25.
+Error: Invariant NoReviewOnStaleHead is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ classification = "none"
+/\ lockFresh = TRUE
+/\ reviewFresh = TRUE
+/\ comparison = 0
+/\ head = 0
+/\ main = 0
+/\ stage = "lease"
+/\ lease = 0
+
+State 2: <Next line 34, col 30 to line 34, col 136 of module BaseFreshness>
+/\ classification = "none"
+/\ lockFresh = TRUE
+/\ reviewFresh = TRUE
+/\ comparison = 0
+/\ head = 0
+/\ main = 0
+/\ stage = "lock"
+/\ lease = 0
+
+State 3: <Next line 34, col 30 to line 34, col 136 of module BaseFreshness>
+/\ classification = "none"
+/\ lockFresh = TRUE
+/\ reviewFresh = TRUE
+/\ comparison = 0
+/\ head = 0
+/\ main = 1
+/\ stage = "lock"
+/\ lease = 0
+
+State 4: <Next line 34, col 30 to line 34, col 136 of module BaseFreshness>
+/\ classification = "none"
+/\ lockFresh = TRUE
+/\ reviewFresh = FALSE
+/\ comparison = 0
+/\ head = 0
+/\ main = 1
+/\ stage = "review"
+/\ lease = 0
+
+33 states generated, 15 distinct states found, 7 states left on queue.
+The depth of the complete state graph search is 4.
+The average outdegree of the complete state graph is 2 (minimum is 0, the maximum 3 and the 95th percentile is 3).
+Finished in 00s at (2026-11-17 17:09:25)
+
+=== BaseFreshness ===
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Running breadth-first search Model-Checking with fp 82 and seed -4203567454879380221 with 1 worker on 10 cores with 16384MB heap and 64MB offheap memory [pid: sanitized] (Mac OS X 27.0.1 aarch64, Homebrew 27.0.1.0.3 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file <sanitized>/BaseFreshness.tla
+Parsing file <sanitized>/Naturals.tla
+Semantic processing of module Naturals
+Semantic processing of module BaseFreshness
+Starting... (2026-11-17 17:09:26)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-11-17 17:09:26.
+Model checking completed. No error has been found.
+  Estimates of the probability that TLC did not check all reachable states
+  because two distinct states had the same fingerprint:
+  calculated (optimistic):  val = 1.0E-15
+337 states generated, 72 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 10.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 3 and the 95th percentile is 2).
+Finished in 00s at (2026-11-17 17:09:26)

@@ -59,6 +59,7 @@ const TIER_CLASSES = {
   ELEVATED: ["GC-PKG", "GC-FSW"],
 };
 
+// Why: A missing or changed taxonomy would invalidate classification.
 test("taxonomy loads, is complete, and its SHA-256 is stable", async () => {
   const raw = await readFile(TAXONOMY_FILE, "utf8");
   const taxonomy = JSON.parse(raw);
@@ -83,6 +84,7 @@ test("taxonomy loads, is complete, and its SHA-256 is stable", async () => {
   );
 });
 
+// Why: Guest rules must match the reviewed host taxonomy.
 test("fixture embeds the exact shipped taxonomy and self-verifies its digest", async () => {
   const sha = (await runFixture(["--gc-taxonomy-sha"])).trim();
   assert.equal(sha, TAXONOMY_SHA256);
@@ -99,6 +101,7 @@ test("fixture embeds the exact shipped taxonomy and self-verifies its digest", a
   assert.equal(embedded, shipped, "embedded copy drifted from the shipped taxonomy");
 });
 
+// Why: Critical violations must terminate immediately.
 test("CRITICAL rule trips the killswitch immediately", async () => {
   const dir = await tempState();
   try {
@@ -119,6 +122,7 @@ test("CRITICAL rule trips the killswitch immediately", async () => {
   }
 });
 
+// Why: High severity must terminate without pressure delay.
 test("HIGH rule trips the killswitch immediately", async () => {
   const dir = await tempState();
   try {
@@ -131,6 +135,7 @@ test("HIGH rule trips the killswitch immediately", async () => {
   }
 });
 
+// Why: Elevated pressure must trip only at its threshold.
 test("ELEVATED rules accumulate pressure and trip only at the threshold", async () => {
   const dir = await tempState();
   const state = join(dir, "s");
@@ -160,6 +165,7 @@ test("ELEVATED rules accumulate pressure and trip only at the threshold", async 
   }
 });
 
+// Why: Residual anomalies must accumulate without premature trips.
 test("ANOMALY residual class accumulates and does not trip below threshold", async () => {
   const dir = await tempState();
   const state = join(dir, "s");
@@ -178,6 +184,7 @@ test("ANOMALY residual class accumulates and does not trip below threshold", asy
   }
 });
 
+// Why: Trip evidence must be typed, attributable, and redacted.
 test("killswitch log carries the versioned schema, taxonomy digest, and redaction", async () => {
   const dir = await tempState();
   try {
@@ -200,6 +207,7 @@ test("killswitch log carries the versioned schema, taxonomy digest, and redactio
   }
 });
 
+// Why: Untrusted subjects must not exceed the log bound.
 test("log truncates oversized subject values to the 512-byte bound", async () => {
   const dir = await tempState();
   try {
@@ -214,6 +222,7 @@ test("log truncates oversized subject values to the 512-byte bound", async () =>
 
 // --- Step 2: detection (shims, watchers, liveness) ---
 
+// Why: Locked guests must deny commands outside learned allowlists.
 test("shim denies an unlisted executable after the learning window with a redacted command line", async () => {
   const dir = await tempState();
   try {
@@ -234,6 +243,7 @@ test("shim denies an unlisted executable after the learning window with a redact
   }
 });
 
+// Why: Learning must end before the locked decision takes effect.
 test("observed-first-use allowlist: learning window allows, lock denies unlisted", async () => {
   const dir = await tempState();
   try {
@@ -260,6 +270,7 @@ test("observed-first-use allowlist: learning window allows, lock denies unlisted
   }
 });
 
+// Why: Learning must not permit known dangerous commands.
 test("classified dangerous commands deny even during the learning window", async () => {
   const dir = await tempState();
   try {
@@ -273,6 +284,7 @@ test("classified dangerous commands deny even during the learning window", async
   }
 });
 
+// Why: Unauthorized file writes and shim tampering must be detected.
 test("fs-watcher detects writes outside the allowlist and shim-tree tampering", async () => {
   const dir = await tempState();
   try {
@@ -291,6 +303,7 @@ test("fs-watcher detects writes outside the allowlist and shim-tree tampering", 
   }
 });
 
+// Why: Guest sockets must trigger immediate containment.
 test("net-watcher denies any socket entry immediately (GC-NET-001)", async () => {
   const dir = await tempState();
   try {
@@ -310,6 +323,7 @@ test("net-watcher denies any socket entry immediately (GC-NET-001)", async () =>
   }
 });
 
+// Why: Loss of the monitor must fail closed.
 test("a dead monitor loop is a containment-integrity killswitch", async () => {
   const dir = await tempState();
   try {
@@ -328,6 +342,7 @@ test("a dead monitor loop is a containment-integrity killswitch", async () => {
   }
 });
 
+// Why: Embedded guest code and proof mode must retain their contract.
 test("guest payload: init embeds the core verbatim, shims dispatch, proof mode unchanged", async () => {
   const fixtureSource = await readFile(FIXTURE, "utf8");
   // The guest init runs the containment session only when /job.sh exists;
@@ -341,6 +356,12 @@ test("guest payload: init embeds the core verbatim, shims dispatch, proof mode u
   // inotifyd upgrade is optional; the sweep fallback is unconditional in the fs loop branch.
   assert.match(fixtureSource, /have_inotifyd=true/);
   assert.ok(fixtureSource.includes('find / -newer'));
+  // Why: Killing the parent first can terminate the dispatcher before it stops surviving job-group children.
+  const denyKill = fixtureSource.slice(fixtureSource.indexOf('if [ -f "$session/kill" ]; then', fixtureSource.indexOf('GC_DISPATCH_EOF')));
+  assert.ok(
+    denyKill.indexOf('kill -KILL 0 2>/dev/null || true') < denyKill.indexOf('kill -KILL "$PPID" 2>/dev/null || true'),
+    "a tripped denial must stop the verified job process group before the guarded parent fallback",
+  );
 });
 
 // --- Step 3: containment envelope + host receipt v2 ---
@@ -462,6 +483,7 @@ function envelopeExtract(transcript, fixtureId, reportPath = undefined) {
   });
 }
 
+// Why: Terminal line endings must not corrupt evidence validation.
 test("envelope parse recomputes the log digest from a pty-mangled (CRLF) transcript", async () => {
   const fixtureId = "microvm-" + "a".repeat(24);
   const { body, expectedLogSha } = envelopeTranscript(fixtureId, envelopePayloadLines(fixtureId));
@@ -485,6 +507,7 @@ test("envelope parse recomputes the log digest from a pty-mangled (CRLF) transcr
   await rm(dir, { recursive: true, force: true });
 });
 
+// Why: Missing evidence cannot be accepted as a clean run.
 test("missing containment evidence fails closed (containment-evidence-missing)", async () => {
   const fixtureId = "microvm-" + "b".repeat(24);
   const dir = await tempState();
@@ -497,6 +520,7 @@ test("missing containment evidence fails closed (containment-evidence-missing)",
   await rm(dir, { recursive: true, force: true });
 });
 
+// Why: Clean runs must have a terminal event.
 test("a clean session without killswitch ends with the session-end terminal event", async () => {
   const fixtureId = "microvm-" + "c".repeat(24);
   const lines = envelopePayloadLines(fixtureId);
@@ -516,6 +540,7 @@ test("a clean session without killswitch ends with the session-end terminal even
   await rm(dir, { recursive: true, force: true });
 });
 
+// Why: Altered evidence must be rejected.
 test("a tampered killswitch digest chain is rejected", async () => {
   const fixtureId = "microvm-" + "d".repeat(24);
   const { body } = envelopeTranscript(fixtureId, envelopePayloadLines(fixtureId), { digestOverride: "0".repeat(64) });
@@ -528,6 +553,7 @@ test("a tampered killswitch digest chain is rejected", async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+// Why: Closed containment evidence must validate as verified.
 test("v2 receipt with a closed containment block validates; killswitch trip is VERIFIED", () => {
   const fixtureId = "microvm-" + "e".repeat(24);
   const scriptHash = "1".repeat(64);
@@ -538,6 +564,7 @@ test("v2 receipt with a closed containment block validates; killswitch trip is V
   assert.equal(validated.containment.killswitch.tripped, true);
 });
 
+// Why: Containment cannot silently accept legacy receipt shapes.
 test("containment run without the v2 receipt is containment-evidence-missing (fail-closed)", () => {
   const fixtureId = "microvm-" + "f".repeat(24);
   const scriptHash = "1".repeat(64);
@@ -547,6 +574,7 @@ test("containment run without the v2 receipt is containment-evidence-missing (fa
   );
 });
 
+// Why: Plain proof mode retains its legacy receipt contract.
 test("v1 receipts without a containment block still validate (backward compat)", () => {
   const fixtureId = "microvm-" + "0".repeat(24);
   const scriptHash = "1".repeat(64);
@@ -554,6 +582,7 @@ test("v1 receipts without a containment block still validate (backward compat)",
   assert.equal(validated.status, "VERIFIED");
 });
 
+// Why: Malformed containment fields must not pass validation.
 test("containment block fields are closed and digest-typed", () => {
   const fixtureId = "microvm-" + "9".repeat(24);
   const scriptHash = "1".repeat(64);
@@ -568,6 +597,7 @@ test("containment block fields are closed and digest-typed", () => {
   assert.throws(() => validateLinuxMicroVMReceipt(badTrip, stubFactsShape(fixtureId), fixtureId, scriptHash, { containment: true }));
 });
 
+// Why: Only envelope markers may extend accepted receipt output.
 test("receipt-extra-output is relaxed solely for envelope markers on v2 receipts", () => {
   const fixtureId = "microvm-" + "7".repeat(24);
   const scriptHash = "1".repeat(64);
@@ -612,6 +642,7 @@ function allocationHarness(confirmBodies, executedArgs) {
   };
 }
 
+// Why: Confirmed resource settings must reach the fixture unchanged.
 test("configured allocation flows into the confirmation text and fixture args", async () => {
   const dir = await tempState();
   try {
@@ -632,6 +663,7 @@ test("configured allocation flows into the confirmation text and fixture args", 
   }
 });
 
+// Why: Default allocations must remain stable.
 test("unconfigured allocation keeps the proof defaults (1 vCPU, 128 MiB)", async () => {
   const dir = await tempState();
   try {
@@ -649,6 +681,7 @@ test("unconfigured allocation keeps the proof defaults (1 vCPU, 128 MiB)", async
   }
 });
 
+// Why: Invalid allocation must fail before a guest starts.
 test("an invalid allocation rejects the whole target config (fail-closed)", async () => {
   const dir = await tempState();
   try {
@@ -665,6 +698,7 @@ test("an invalid allocation rejects the whole target config (fail-closed)", asyn
   }
 });
 
+// Why: Tool options must not bypass allocation confirmation.
 test("the model cannot set the allocation: the tool surface stays closed", async () => {
   const tools = {};
   const pi = { registerTool: (tool) => { tools[tool.name] = tool; }, registerCommand: () => {} };
@@ -684,6 +718,7 @@ test("the model cannot set the allocation: the tool surface stays closed", async
 
 // --- Repair step: B1, H1, H2, H4, M1, M3, M4 ---
 
+// Why: Receipt output must be parseable in both supported shapes.
 test("B1: the real receipt printf emits parseable JSON for v1 and v2 shapes", () => {
   const common = ["v1", "test-host", "microvm-" + "4".repeat(24), "agentic-driver-fid",
     "AGENTIC_MICROVM_PROBE:x", "a".repeat(64), "1".repeat(64), "b".repeat(64)];
@@ -708,6 +743,7 @@ function runFixtureSync(args) {
   return child.stdout;
 }
 
+// Why: Trip evidence must be immutable after termination.
 test("H1: the log freezes at trip — appends after a killswitch trip are refused", async () => {
   const dir = await tempState();
   try {
@@ -722,6 +758,7 @@ test("H1: the log freezes at trip — appends after a killswitch trip are refuse
   }
 });
 
+// Why: Late records must not invalidate the trip digest.
 test("H1: trailing post-trip records do not invalidate the evidence digest chain", async () => {
   const fixtureId = "microvm-" + "5".repeat(24);
   const { body, expectedLogSha } = envelopeTranscript(fixtureId, envelopePayloadLines(fixtureId));
@@ -737,6 +774,7 @@ test("H1: trailing post-trip records do not invalidate the evidence digest chain
   await rm(dir, { recursive: true, force: true });
 });
 
+// Why: Duplicate envelopes could forge a successful result.
 test("H2: a second envelope pair is rejected as a forgery attempt", async () => {
   const fixtureId = "microvm-" + "6".repeat(24);
   const { body } = envelopeTranscript(fixtureId, envelopePayloadLines(fixtureId), { includeEnvelope: false });
@@ -751,6 +789,7 @@ test("H2: a second envelope pair is rejected as a forgery attempt", async () => 
   await rm(dir, { recursive: true, force: true });
 });
 
+// Why: Multiple escape routes must classify before execution.
 test("H4: busybox applet bypass, credential reads, env probing, manifests, and dev writes classify", async () => {
   const dir = await tempState();
   try {
@@ -781,6 +820,7 @@ test("H4: busybox applet bypass, credential reads, env probing, manifests, and d
   }
 });
 
+// Why: Receipts must carry the compact typed event summary.
 test("M1: the containment block carries the schema and compact histogram", async () => {
   const fixtureId = "microvm-" + "8".repeat(24);
   const { body, expectedLogSha } = envelopeTranscript(fixtureId, envelopePayloadLines(fixtureId));
@@ -794,6 +834,7 @@ test("M1: the containment block carries the schema and compact histogram", async
   await rm(dir, { recursive: true, force: true });
 });
 
+// Why: Learning observations must remain auditable.
 test("M3: learning-window observations are logged as events", async () => {
   const dir = await tempState();
   try {
@@ -808,6 +849,7 @@ test("M3: learning-window observations are logged as events", async () => {
   }
 });
 
+// Why: Log floods must preserve event accounting.
 test("M4: flood degrades to summary-only records without dropping events", async () => {
   const dir = await tempState();
   try {
@@ -827,6 +869,7 @@ test("M4: flood degrades to summary-only records without dropping events", async
 // --- Repair pass: R1 (sweep/inotifyd coexistence + nested writes), R2 (full
 // applet shim surface), plus heredoc-render regression guards ---
 
+// Why: Event monitoring must supplement rather than replace sweeping.
 test("R1: inotifyd runs in the background beside the recursive sweep, never replacing it", async () => {
   const fixtureSource = await readFile(FIXTURE, "utf8");
   assert.doesNotMatch(fixtureSource, /exec \/bin\/inotifyd/, "inotifyd must not exec-replace the fs-watcher subshell (the sweep would never run)");
@@ -840,6 +883,7 @@ test("R1: inotifyd runs in the background beside the recursive sweep, never repl
   assert.ok(fixtureSource.includes("grep -Ev '^/(tmp/session|proc|sys|dev|gc)'"));
 });
 
+// Why: Nested unauthorized writes must not evade monitoring.
 test("R1: nested writes at depth >= 2 under a watched root are detected", async () => {
   const dir = await tempState();
   try {
@@ -854,6 +898,7 @@ test("R1: nested writes at depth >= 2 under a watched root are detected", async 
   }
 });
 
+// Why: Every applet must reach classification without recursive dispatch.
 test("R2: every BusyBox applet is shimmed and the dispatcher is recursion-safe", async () => {
   const fixtureSource = await readFile(FIXTURE, "utf8");
   assert.ok(fixtureSource.includes("for name in $applet_list; do"), "shims must be built from the full applet list");
@@ -907,9 +952,9 @@ async function realDispatchSandbox(tools = ["wget"]) {
   const sandbox = await tempState();
   // Sandbox layout mirrors the guest: gc/core.sh, shims/<tool> reaching the
   // dispatcher via argv[0] (like the guest symlinks), and job scripts run by
-  // a PATH-resolving shell. The guest job shell is dash; on the host bash
-  // stands in — both resolve every external command through PATH and have
-  // no applet table, which is exactly the property under regression.
+  // a PATH-resolving shell. The guest dispatcher uses BusyBox ash extensions;
+  // host bash supports those expansions while the job shell still resolves
+  // external commands through PATH.
   mkdirSync(join(sandbox, "gc"), { recursive: true });
   mkdirSync(join(sandbox, "shims"), { recursive: true });
   writeFileSync(join(sandbox, "gc", "core.sh"), cBody);
@@ -918,6 +963,7 @@ async function realDispatchSandbox(tools = ["wget"]) {
   assert.ok(sha256, "sha256sum must be resolvable for the real killswitch digest path");
   const dispatch = dBody
     .replace("#!/bin/busybox sh", "#!/bin/sh")
+    .replace("#!/bin/sh", "#!/bin/bash")
     .replace("\nPATH=/bin\n", `\nPATH=${dirname(sha256)}:/usr/bin:/bin\n`)
     .replace(". /gc/core.sh", `. ${join(sandbox, "gc", "core.sh")}`)
     .replace("session=/tmp/session/.gc", `session=${sessionDir}`);
@@ -951,6 +997,7 @@ function runJobDetached(jobPath, shimsPath) {
   });
 }
 
+// Why: Non-applet commands must reach the dispatcher through PATH.
 test("S1: classified non-applet tools get stub shims so PATH lookup reaches the dispatcher", async () => {
   const fixtureSource = await readFile(FIXTURE, "utf8");
   // Live fixture S1: npm/pip/... are classified by GC-PKG-001/GC-NET-002 but
@@ -989,6 +1036,7 @@ test("S1: classified non-applet tools get stub shims so PATH lookup reaches the 
   }
 });
 
+// Why: Package installs must stop the job through the real dispatcher.
 test("S1: job-shell npm install trips GC-PKG-001 through the real dispatch and the fifth command kills the job", async () => {
   const { sandbox, sessionDir, shimsPath } = await realDispatchSandbox(["npm"]);
   try {
@@ -1032,6 +1080,7 @@ test("S1: job-shell npm install trips GC-PKG-001 through the real dispatch and t
   }
 });
 
+// Why: Network fetches must prevent subsequent job commands.
 test("R4: job-shell wget trips GC-NET-002 through the real dispatch and the next command never runs", async () => {
   const { sandbox, sessionDir, shimsPath } = await realDispatchSandbox();
   try {
@@ -1059,6 +1108,7 @@ test("R4: job-shell wget trips GC-NET-002 through the real dispatch and the next
   }
 });
 
+// Why: Group termination must spare PID 1 and remain synchronous.
 test("R5: exec'd denial never signals PID 1; containment stays synchronous via the job process group", async () => {
   // Case A (explicit `exec wget`): the job shell execs the denied tool, so
   // the dispatcher is left parented by the outer job shell inside the
@@ -1146,6 +1196,7 @@ function sleeperJob(sandbox, followUp) {
   );
 }
 
+// Why: Shell wrappers must not bypass dispatch.
 test("B3: the shell -c wrapper form reaches the shim→dispatch path and trips", async () => {
   const { sandbox, sessionDir, shimsPath } = await realDispatchSandbox();
   try {
@@ -1178,6 +1229,7 @@ test("B3: the shell -c wrapper form reaches the shim→dispatch path and trips",
   }
 });
 
+// Why: Nested quoting must not shield dangerous inner commands.
 test("B4: nested quoting wrappers do not shield the inner command from classification", async () => {
   const { sandbox, sessionDir, shimsPath } = await realDispatchSandbox();
   try {
@@ -1203,6 +1255,7 @@ test("B4: nested quoting wrappers do not shield the inner command from classific
   }
 });
 
+// Why: Pipeline denials must prevent later commands.
 test("B6: a denied pipeline member stops the pipeline through the real dispatch", async () => {
   const { sandbox, sessionDir, shimsPath } = await realDispatchSandbox();
   try {
@@ -1225,6 +1278,7 @@ test("B6: a denied pipeline member stops the pipeline through the real dispatch"
   }
 });
 
+// Why: Backgrounded denials must terminate sibling jobs promptly.
 test("B8: a backgrounded denial kills the job shell synchronously; the group branch takes the siblings where reachable", async () => {
   const { sandbox, sessionDir, shimsPath } = await realDispatchSandbox();
   try {
@@ -1248,6 +1302,7 @@ test("B8: a backgrounded denial kills the job shell synchronously; the group bra
   }
 });
 
+// Why: Subshells must not isolate a killswitch trip.
 test("B9: a denial inside a subshell still trips the killswitch", async () => {
   const { sandbox, sessionDir, shimsPath } = await realDispatchSandbox();
   try {
@@ -1276,6 +1331,7 @@ test("B9: a denial inside a subshell still trips the killswitch", async () => {
   }
 });
 
+// Why: Group denial must clear reachable job members.
 test("D11: background/group denial suppresses follow-up commands and empties the job group where reachable", async () => {
   const { sandbox, sessionDir, shimsPath } = await realDispatchSandbox();
   try {
@@ -1295,6 +1351,7 @@ test("D11: background/group denial suppresses follow-up commands and empties the
   }
 });
 
+// Why: Kernel threads must not flood unknown-class events.
 test("C12: kernel threads produce no unknown-class flood through the real proc sweep and detect path", async () => {
   const dir = await tempState();
   try {
@@ -1327,6 +1384,7 @@ test("C12: kernel threads produce no unknown-class flood through the real proc s
     assert.equal(events.length, 1, "only the userspace process may be flagged (sh is a supervisor comm)");
     assert.match(events[0].event.subject.value, /evil-agent/);
     assert.ok(
+      // Why: Neither named kernel thread may enter the unknown-event stream.
       !events.some((e) => /kworker|kthreadd/.test(e.event.subject.value)),
       "kernel threads must never be logged as unknown-class anomalies",
     );
@@ -1348,6 +1406,7 @@ test("C12: kernel threads produce no unknown-class flood through the real proc s
   }
 });
 
+// Why: Expired pressure must decay before new events accrue.
 test("D4: pressure outside the 60 s window decays; fresh events still accumulate to the threshold", async () => {
   const dir = await tempState();
   try {
@@ -1380,6 +1439,7 @@ test("D4: pressure outside the 60 s window decays; fresh events still accumulate
   }
 });
 
+// Why: Critical events must override lower-severity pressure.
 test("D5: CRITICAL trips immediately amid untripped ELEVATED pressure", async () => {
   const dir = await tempState();
   const state = join(dir, "s");
@@ -1412,6 +1472,7 @@ test("D5: CRITICAL trips immediately amid untripped ELEVATED pressure", async ()
   }
 });
 
+// Why: Package credential and publishing forms must classify.
 test("A22: GC-PKG-002 argv entry — publish/token/.npmrc/pip-config forms deny and accumulate GC-PKG pressure", async () => {
   const dir = await tempState();
   try {
@@ -1446,6 +1507,7 @@ test("A22: GC-PKG-002 argv entry — publish/token/.npmrc/pip-config forms deny 
   }
 });
 
+// Why: Probe events must share their class pressure threshold.
 test("A23: mixed GC-PROBE argv events accumulate to the shared class threshold", async () => {
   const dir = await tempState();
   try {
@@ -1485,6 +1547,7 @@ test("A23: mixed GC-PROBE argv events accumulate to the shared class threshold",
   }
 });
 
+// Why: Conditional shell chains must not escape classification.
 test("B13: chained && and || forms reach classification and the suffix never runs", async () => {
   // Both chained forms take the real path: job shell -> PATH lookup ->
   // /shims/wget -> real dispatch -> real core -> GC-NET-002 trip ->
@@ -1511,6 +1574,7 @@ test("B13: chained && and || forms reach classification and the suffix never run
   }
 });
 
+// Why: IPv6 and UDP sockets must trigger the same network policy.
 test("C15: tcp6 and udp socket rows trip GC-NET-001 identically to tcp", async () => {
   const dir = await tempState();
   try {
@@ -1535,6 +1599,7 @@ test("C15: tcp6 and udp socket rows trip GC-NET-001 identically to tcp", async (
   }
 });
 
+// Why: Missing optional roots must not fabricate a decision.
 test("D15: GC-FSW-003 sampler tolerates absent cache roots (baseline only, no decision)", async () => {
   const dir = await tempState();
   try {
@@ -1553,6 +1618,7 @@ test("D15: GC-FSW-003 sampler tolerates absent cache roots (baseline only, no de
   }
 });
 
+// Why: Unknown-class pressure must decay on schedule.
 test("D16: unknown-class pressure decays across the 60 s window like ELEVATED classes", async () => {
   const dir = await tempState();
   try {
@@ -1589,6 +1655,7 @@ test("D16: unknown-class pressure decays across the 60 s window like ELEVATED cl
   }
 });
 
+// Why: Guest heredocs must survive strict unset-variable handling.
 test("R1/R3: the guest init heredoc renders under set -u (no host-side $ leaks)", async () => {
   const fixtureSource = await readFile(FIXTURE, "utf8");
   const opener = 'cat >"$root/init" <<EOF\n';
@@ -1630,6 +1697,7 @@ function runHarness(targetPath, receiptBuilder, confirmBodies, executed) {
 
 const JOB_PAYLOAD = "/bin/busybox sh -c 'echo session-work; sleep 1'";
 
+// Why: Configured payloads must activate containment mode.
 test("M6: jobPayload config activates containment mode with the payload as the 5th fixture argv", async () => {
   const dir = await tempState();
   try {
@@ -1654,6 +1722,7 @@ test("M6: jobPayload config activates containment mode with the payload as the 5
   }
 });
 
+// Why: Omitted payloads must retain plain proof mode.
 test("M6: absent jobPayload keeps plain proof mode (v1, no containment block required)", async () => {
   const dir = await tempState();
   try {
@@ -1673,6 +1742,7 @@ test("M6: absent jobPayload keeps plain proof mode (v1, no containment block req
   }
 });
 
+// Why: Invalid payloads must reject before guest execution.
 test("M6: placeholder and oversized payloads reject the config fail-closed", async () => {
   const dir = await tempState();
   try {
@@ -1691,6 +1761,7 @@ test("M6: placeholder and oversized payloads reject the config fail-closed", asy
   }
 });
 
+// Why: The tool surface must not allow payload injection.
 test("M6: the model cannot supply the payload (options ignored, tool surface closed)", async () => {
   const dir = await tempState();
   try {
@@ -1712,6 +1783,7 @@ test("M6: the model cannot supply the payload (options ignored, tool surface clo
 
 // --- Live-proof fix: streamed-stdin ($0 = "bash") must not break the core embed ---
 
+// Why: Streamed scripts must embed the complete guest core.
 test("streamed-stdin regression: bash -s embeds a non-empty core.sh without reading $0", async () => {
   const dir = await tempState();
   const dest = join(dir, "core.sh");
@@ -1743,6 +1815,7 @@ test("streamed-stdin regression: bash -s embeds a non-empty core.sh without read
   }
 });
 
+// Why: Rendered core code must exactly match the fixture.
 test("drift guard: heredoc-rendered core.sh is byte-equal to the fixture's own core region", async () => {
   const fixtureSource = await readFile(FIXTURE, "utf8");
   // The same range the (removed) awk extraction used locally, where the file exists.
@@ -1760,6 +1833,7 @@ test("drift guard: heredoc-rendered core.sh is byte-equal to the fixture's own c
   assert.doesNotMatch(fixtureSource, /awk '[^']*guest containment core[^']*' "\$0"/);
 });
 
+// Why: A trip must produce an attributable v2 receipt.
 test("M6: end-to-end containment flow through the fixture (trip → envelope → v2 receipt)", async () => {
   const dir = await tempState();
   try {
@@ -1810,6 +1884,7 @@ test("M6: end-to-end containment flow through the fixture (trip → envelope →
   }
 });
 
+// Why: Production trips must persist a kill report before teardown.
 test("D1: production trip sequence writes the kill report at the advertised path and finalizes teardown", async () => {
   const fixtureSource = await readFile(FIXTURE, "utf8");
   // Source guard: the production main flow (after phase=containment) must call
@@ -1906,6 +1981,7 @@ test("D1: production trip sequence writes the kill report at the advertised path
   }
 });
 
+// Why: Taxonomy rules must have live detectors, not names alone.
 test("SHR/LOG/FSW-003: the four taxonomy-only rules are real detectors", async () => {
   const dir = await tempState();
   try {
@@ -1994,6 +2070,7 @@ test("SHR/LOG/FSW-003: the four taxonomy-only rules are real detectors", async (
   }
 });
 
+// Why: An unwritable state directory must fail closed.
 test("GC-FSW-003 sampler fails closed when the state dir cannot be created", async () => {
   const dir = await tempState();
   try {
@@ -2011,6 +2088,7 @@ test("GC-FSW-003 sampler fails closed when the state dir cannot be created", asy
   }
 });
 
+// Why: The sampler must bracket actual job-time growth.
 test("FSW-003 live-wiring regression: pre-job baseline and final sample straddle job-time growth", async () => {
   // Reproduces the live failure signature (microvm-e2abe44348e29c9472f3b941):
   // first sample is the baseline, the job dd-writes into a watched cache root
@@ -2096,6 +2174,7 @@ test("FSW-003 live-wiring regression: pre-job baseline and final sample straddle
   }
 });
 
+// Why: Cache child writes must be denied through the live sweep.
 test("SHR-001 live-signature regression: cp into a /var/cache child denied through the real sweep path", async () => {
   // Reproduces the live failure signature (microvm-11d339266876dcfad3d3ac32,
   // LIVE-2-R2): the sweep's `find -newer baseline` ran, then `touch baseline`
@@ -2160,6 +2239,7 @@ test("SHR-001 live-signature regression: cp into a /var/cache child denied throu
     await rm(dir, { recursive: true, force: true });
   }
   // Wiring: the rendered guest init must retreat the baseline in the sweep
+  // Why: The live sweep must see the cache write, not just a synthetic touch.
   // loop, never plain-touch it (the traced silent-miss mode).
   const fixtureSource = await readFile(FIXTURE, "utf8");
   const opener = 'cat >"$root/init" <<EOF\n';
@@ -2176,6 +2256,7 @@ test("SHR-001 live-signature regression: cp into a /var/cache child denied throu
   );
 });
 
+// Why: Late liveness collateral must not conceal a trip.
 test("trip freeze: post-trip liveness collateral must not mask the aggregate trip", async () => {
   const dir = await tempState();
   const state = join(dir, "s");
@@ -2205,6 +2286,7 @@ test("trip freeze: post-trip liveness collateral must not mask the aggregate tri
   }
 });
 
+// Why: Diagnostic samples must not count as denials.
 test("FSW-003 diagnostics: sample lines log action observe and never count as denials", async () => {
   const dir = await tempState();
   const state = join(dir, "s");
@@ -2241,6 +2323,7 @@ test("FSW-003 diagnostics: sample lines log action observe and never count as de
 
 // --- M6 security repairs: shell-safe payload transport, argv-count guard ---
 
+// Why: Hostile payload bytes must remain shell-safe.
 test("M6/sec: a hostile multi-line payload travels shell-safe (base64, no whitespace or metacharacters)", async () => {
   const dir = await tempState();
   try {
@@ -2261,6 +2344,7 @@ test("M6/sec: a hostile multi-line payload travels shell-safe (base64, no whites
   }
 });
 
+// Why: Invalid argument counts must reject before side effects.
 test("M6/sec: the fixture accepts 2..5 argv and rejects fewer or more before any side effect", async () => {
   const id = "microvm-" + "b".repeat(24);
   const hash = "1".repeat(64);
@@ -2274,6 +2358,7 @@ test("M6/sec: the fixture accepts 2..5 argv and rejects fewer or more before any
   assert.ok(source.includes('if [ "$#" -lt 2 ] || [ "$#" -gt 5 ]'), "guard must accept the tool's real arities");
 });
 
+// Why: Malformed encoded payloads must not reach execution.
 test("M6/sec: the fixture decodes and validates the base64 payload (accept and reject cases)", async () => {
   const b64 = (text) => Buffer.from(text, "utf8").toString("base64");
   const good = "/bin/busybox sh -c 'echo session-work'\n# comment line\nsleep 1";
@@ -2295,6 +2380,7 @@ test("M6/sec: the fixture decodes and validates the base64 payload (accept and r
 
 // --- GC-PROBE concealment class (Task #132 item 1) ---
 
+// Why: Monitor introspection must classify as probing.
 test("GC-PROBE detectors fire on monitor introspection and enumeration", async () => {
   const dir = await tempState();
   try {
@@ -2309,6 +2395,7 @@ test("GC-PROBE detectors fire on monitor introspection and enumeration", async (
   }
 });
 
+// Why: Repeated probing must trip at the class threshold.
 test("GC-PROBE probes accumulate ELEVATED pressure and trip at the threshold", async () => {
   const dir = await tempState();
   const state = join(dir, "s");
@@ -2331,6 +2418,7 @@ test("GC-PROBE probes accumulate ELEVATED pressure and trip at the threshold", a
   }
 });
 
+// Why: Concealment evidence must survive receipt validation.
 test("concealmentIndex is surfaced in the receipt block and validated host-side", async () => {
   const fixtureId = "microvm-" + "e".repeat(24);
   const TAX = TAXONOMY_SHA256;
@@ -2363,6 +2451,7 @@ test("concealmentIndex is surfaced in the receipt block and validated host-side"
 
 // --- Live-proof defect fixes: kernel-thread false positives, trip freeze, kill report ---
 
+// Why: Kernel threads must not trigger false unknown pressure.
 test("Defect 1: the proc-watcher sweep skips kernel threads (empty cmdline, ppid 2)", async () => {
   const dir = await tempState();
   try {
@@ -2389,6 +2478,7 @@ test("Defect 1: the proc-watcher sweep skips kernel threads (empty cmdline, ppid
 
 // --- Config-save round-trip: the target save must not strip jobPayload ---
 
+// Why: A saved target must retain the containment payload.
 test("live-sequence regression: a confirmed target save preserves jobPayload and the run stays in containment mode", async () => {
   const dir = await tempState();
   try {
@@ -2420,6 +2510,7 @@ test("live-sequence regression: a confirmed target save preserves jobPayload and
   }
 });
 
+// Why: Trips must freeze pressure and decisions.
 test("Defect 1: the decision path is frozen after a trip — no re-trips, no pressure growth", async () => {
   const dir = await tempState();
   const state = join(dir, "s");
@@ -2440,6 +2531,7 @@ test("Defect 1: the decision path is frozen after a trip — no re-trips, no pre
   }
 });
 
+// Why: Local target changes must not drop the payload.
 test("a save that switches the decision to local keeps jobPayload and drops only sshTarget", async () => {
   const dir = await tempState();
   try {
@@ -2459,6 +2551,7 @@ test("a save that switches the decision to local keeps jobPayload and drops only
   }
 });
 
+// Why: Only tripped sessions should have a durable kill report.
 test("Defect 2: a tripped killswitch produces a durable kill report; clean sessions do not", async () => {
   const fixtureId = "microvm-" + "d".repeat(24);
   const dir = await tempState();
@@ -2489,6 +2582,7 @@ test("Defect 2: a tripped killswitch produces a durable kill report; clean sessi
     assert.equal(report.killswitch.tier, "CRITICAL");
     assert.equal(report.killswitch.mode, "immediate");
     // Immediate trips carry null pressure/threshold; aggregate trips carry counts.
+    // Why: Pressure in a durable report must be absent or numeric.
     assert.ok(report.killswitch.pressure === null || /^\d+$/.test(report.killswitch.pressure));
     assert.ok(Array.isArray(report.lastEvents) || typeof report.lastEvents === "string");
     assert.match(report.logSha256, new RegExp(`^${expectedLogSha.slice(0, 8)}`));
@@ -2514,6 +2608,7 @@ test("Defect 2: a tripped killswitch produces a durable kill report; clean sessi
   }
 });
 
+// Why: Saved payloads must activate containment on later loads.
 test("a fresh save writes the one decision; a later hand-added jobPayload loads and activates containment", async () => {
   const dir = await tempState();
   try {
@@ -2546,6 +2641,7 @@ test("a fresh save writes the one decision; a later hand-added jobPayload loads 
 
 // --- Live-proof regression: console window must stay open for the envelope ---
 
+// Why: Containment waits for the late evidence envelope.
 test("console wait: a containment run waits for the late envelope instead of tearing down at first marker", async () => {
   const dir = await tempState();
   try {
@@ -2576,6 +2672,7 @@ exit $rc`;
   }
 });
 
+// Why: Plain proof must keep its bounded marker exit.
 test("console wait: plain proof mode still breaks at the marker (recorder window unchanged)", async () => {
   const dir = await tempState();
   try {
@@ -2600,6 +2697,7 @@ exit $rc`;
   }
 });
 
+// Why: Missing envelopes must fail closed without hanging.
 test("console wait: bounded when the envelope never arrives (fail-closed, no hang)", async () => {
   const dir = await tempState();
   try {
@@ -2618,6 +2716,7 @@ test("console wait: bounded when the envelope never arrives (fail-closed, no han
   }
 });
 
+// Why: Empty sessions still require terminal log evidence.
 test("session end: a zero-event session still creates its terminal record and log", async () => {
   const dir = await tempState();
   try {
@@ -2647,6 +2746,7 @@ test("session end: a zero-event session still creates its terminal record and lo
 // then the 18:05 branch reset). Under set -u its absence aborts any
 // plain-proof (4-arg) run at the first unconditional reference.
 
+// Why: Strict unset handling must not break plain parsing.
 test("set -u guard: containment_payload is initialized at parse time before any unconditional reference", async () => {
   const fixtureSource = await readFile(FIXTURE, "utf8");
   const lines = fixtureSource.split("\n");

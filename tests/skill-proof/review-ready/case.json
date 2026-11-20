@@ -1,0 +1,4 @@
+{
+  "prompt": "A review fix changes a frozen test input and main has moved. Explain how to prepare a PAD review handoff without bypassing gates or claiming checks that were not run.",
+  "mustInclude": ["make preflight", "decision-gate", "statechart-pi", "negative cfg|mutant", "F1", "F23", "log|evidence", "draft"]
+}

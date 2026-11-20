@@ -1,0 +1,14 @@
+{
+  "origin":"proposed synthetic operation map, not inspected production source",
+  "assumptions":["Two monotonic generations, one broker connection and one resource.","The external effect service may finish cleared work after sender death or disconnect.","A surviving revoker has its own connection. Disconnect does not execute SQL.","Safe abstraction assumes generation comparison and effect are indivisible at the resource service; all reassignments use that same mechanism."],
+  "omissions":["Actual database isolation, network delivery, restart and reconnect, and resource-service implementation are not reproduced."],
+  "actions":[
+    {"actionId":"PublishCapability","actor":"broker","session":"broker-connection","operation":"Persist capability and clear one in-flight request for generation 1.","durableWrite":true},
+    {"actionId":"Disconnect","actor":"environment","session":"broker-connection","operation":"Lose transport only; stored capability survives.","durableWrite":false,"flawedVariant":"FictionalCleanup incorrectly deletes storage during disconnect."},
+    {"actionId":"DetectFault","actor":"surviving-revoker","session":"independent-connection","operation":"Observe connection loss after an unconstrained delay.","durableWrite":false},
+    {"actionId":"RevokeCapability","actor":"surviving-revoker","session":"independent-connection","operation":"Delete capability using a live independent writer.","durableWrite":true},
+    {"actionId":"ReplaceResource","actor":"resource-manager","session":"resource-service","operation":"Publish ownership generation 2.","durableWrite":true},
+    {"actionId":"ApplyEffect","actor":"effect-service","session":"resource-service","operation":"Apply cleared request. Safe mode conditionally checks token against current generation in the effect operation.","protectedInterval":"Safe mode covers comparison through effect; unsafe mode has no protection.","effectPoint":"completed becomes true","durableWrite":true},
+    {"actionId":"RejectEffect","actor":"effect-service","session":"resource-service","operation":"Refuse a stale token without changing the replacement.","durableWrite":false}
+  ]
+}

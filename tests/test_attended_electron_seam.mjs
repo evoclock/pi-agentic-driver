@@ -15,15 +15,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
   ATTENDED_ELECTRON_BOUNDARY,
   executeHerdrSpawnWorkerAttendedElectron,
+  executeHerdrSpawnWorker,
   preflightAttendedElectronSpawn,
   resolveTrustedSpawnRepository,
 } from "../scripts/enforcement/herdr_lifecycle_pi.js";
 import { pulseWorkerSpawnSeam } from "../scripts/enforcement/pulse_scheduler_pi.js";
+import { approvalPaths, recordApproval } from "../scripts/enforcement/approval_ledger_pi.js";
 import {
   ATTENDED_ELECTRON_CONTEXT_MODE,
   isAttendedElectronContext,
@@ -49,7 +52,7 @@ const fail = (code, message) => {
 };
 const command = argv[0];
 if (command === "workspace" && argv[1] === "list") {
-  emit({ workspaces: [{ label: "agents-work", workspace_id: "w7" }] }); process.exit(0);
+  emit({ workspaces: [{ label: "agents-work", workspace_id: "w7" }, { label: "selected", workspace_id: "w8" }] }); process.exit(0);
 }
 if (command === "pane" && argv[1] === "list") {
   emit({ panes: [{ workspace_id: "w7", cwd: process.cwd() }] }); process.exit(0);
@@ -62,7 +65,8 @@ if (command === "agent" && argv[1] === "list") {
 if (command === "tab" && argv[1] === "list") { emit({ tabs: [] }); process.exit(0); }
 if (command === "tab" && argv[1] === "create") {
   if (mode === "tab-fail") fail("layout_failed", "the layout could not be created");
-  emit({ id: 41, result: { root_pane: { pane_id: "w7:p10" }, tab: { tab_id: "w7:t3" } } });
+  const workspace = mode === "selected-workspace" ? "w8" : "w7";
+  emit({ id: 41, result: { root_pane: { pane_id: workspace + ":p10" }, tab: { tab_id: workspace + ":t3" } } });
   process.exit(0);
 }
 if (command === "agent" && argv[1] === "start") {
@@ -75,11 +79,11 @@ if (command === "agent" && argv[1] === "start") {
     process.exit(0);
   }
   emit({ result: { type: "agent_started", argv,
-    agent: { name: argv[2], agent: "pi", pane_id: "w7:p10", cwd: process.cwd(), launch_pending: false, interactive_ready: true } } });
+    agent: { name: argv[2], agent: "pi", pane_id: mode === "selected-workspace" ? "w8:p10" : "w7:p10", cwd: process.cwd(), launch_pending: false, interactive_ready: true } } });
   process.exit(0);
 }
 if (command === "agent" && argv[1] === "get") {
-  emit({ result: { type: "agent", agent: { name: argv[2], agent: "pi", pane_id: "w7:p10", cwd: process.cwd(), launch_pending: false, interactive_ready: true } } });
+  emit({ result: { type: "agent", agent: { name: argv[2], agent: "pi", pane_id: mode === "selected-workspace" ? "w8:p10" : "w7:p10", cwd: process.cwd(), launch_pending: false, interactive_ready: true } } });
   process.exit(0);
 }
 if (command === "pane" && argv[1] === "get") {
@@ -96,8 +100,16 @@ function gitRepo(dir) {
   return dir;
 }
 
+const worktreeFixtures = [];
+test.after(() => { for (const fixture of worktreeFixtures) fixture.cleanup(); });
+
 function fixture(options = {}) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "attended-electron-")));
+  let helper;
+  try { helper = createRequire(import.meta.url)("../scripts/pad_test_treehouse.js"); } catch {}
+  assert.ok(helper, "Treehouse fixture helper is required");
+  const treehouseFixture = helper.createTestTreehouse();
+  worktreeFixtures.push(treehouseFixture);
+  const root = treehouseFixture.root;
   const coordinator = gitRepo(join(root, "coordinator"));
   const workerRoot = gitRepo(join(root, WORKER_REPO));
   execFileSync("git", ["-C", workerRoot, "remote", "add", "origin", `git@github.com:evoclock/${WORKER_REPO}.git`]);
@@ -119,6 +131,7 @@ function fixture(options = {}) {
   mkdirSync(join(root, "profile", "config"), { recursive: true });
   writeFileSync(join(root, "profile", "config", "relay-authority.v1.json"), JSON.stringify({
     schema: "relay-authority.v1", githubOwner: "evoclock", denyRepositories: [],
+    relayers: [{ relayer: "fixture", channel: "chat", maxTier: 1 }], revokedIds: [],
   }));
   const log = join(root, "herdr-log.jsonl");
   const fake = join(root, "fake-herdr.mjs");
@@ -127,6 +140,7 @@ function fixture(options = {}) {
   process.env.FAKE_HERDR_LOG = log;
   process.env.FAKE_HERDR_MODE = options.mode ?? "";
   const herdrOptions = {
+    asgrep: options.asgrep ?? false,
     testExecutablePath: fake,
     listModels: MODEL_ROLL,
     modelsPath: join(root, "absent-models.json"),
@@ -153,16 +167,209 @@ function fixture(options = {}) {
     model: options.model ?? MODEL,
     repository: options.repository ?? WORKER_REPO,
   };
-  return { root, coordinator, workerRoot, log, herdrOptions, context, params };
+  return { root, coordinator, workerRoot, log, herdrOptions, context, params, addWorktree: treehouseFixture.addWorktree };
 }
 
-// Why: only a canonical standalone Git root with an eligible owner can be a worker repository.
+// Why: a headless caller needs an actionable way to discover a valid workspace id.
+test("headless spawn without a workspace points to communication list or get", async () => {
+  const f = fixture();
+  const oldPane = process.env.HERDR_PANE_ID;
+  delete process.env.HERDR_PANE_ID;
+  try {
+    const result = await executeHerdrSpawnWorker(f.params, f.context, f.herdrOptions);
+    assert.equal(result.code, "workspace_required");
+    assert.match(result.reason, /list.*get|list\/get/i);
+  } finally {
+    if (oldPane !== undefined) process.env.HERDR_PANE_ID = oldPane;
+    cleanup(f.root);
+  }
+});
+
+async function syntheticGrant(f, scope = {}, expiresAt) {
+  return recordApproval(join(f.root, "profile"), {
+    kind: "standing", relayer: "fixture", channel: "chat", sourceMessageId: "synthetic",
+    quote: "Synthetic spawn approval", quotedQuestion: "Synthetic spawn?",
+    givenAt: new Date(Date.now() - 1000).toISOString(), tier: 1,
+    ...(expiresAt ? { expiresAt } : {}),
+    scope: { repo: WORKER_REPO, actions: ["spawn"], models: [MODEL], roles: ["worker"], paths: [], ...scope },
+  });
+}
+
+function syntheticUses(f) {
+  const file = approvalPaths(join(f.root, "profile")).uses;
+  return existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").map(JSON.parse) : [];
+}
+
+// Why: preflight and commit must reject a supplied grant for a different model before layout or agent mutation.
+test("attended grant model scope refuses preflight and spawn without reserved or spawned uses", async () => {
+  const f = fixture();
+  try {
+    const grant = await syntheticGrant(f, { models: ["other/model"] });
+    const request = { ...f.params, authority: { ledgerId: grant.id } };
+    const preflight = await preflightAttendedElectronSpawn(request, f.context, f.herdrOptions);
+    const spawn = await executeHerdrSpawnWorkerAttendedElectron(request, f.context, f.herdrOptions);
+    assert.equal(preflight.ok, false, JSON.stringify(preflight));
+    assert.equal(spawn.ok, false, JSON.stringify(spawn));
+    assert.equal(readLog(f.log).some((argv) => argv[0] === "tab" && argv[1] === "create" || argv[0] === "agent" && argv[1] === "start"), false);
+    assert.deepEqual(syntheticUses(f), []);
+  } finally { cleanup(f.root); }
+});
+
+// Why: a matching supplied grant must be consumed at commit, not at read-only preflight.
+test("attended matching grant records reserved then spawned with one use id", async () => {
+  const f = fixture();
+  try {
+    const grant = await syntheticGrant(f);
+    const request = { ...f.params, authority: { ledgerId: grant.id } };
+    const preflight = await preflightAttendedElectronSpawn(request, f.context, f.herdrOptions);
+    assert.equal(preflight.ok, true, JSON.stringify(preflight));
+    assert.deepEqual(syntheticUses(f), []);
+    const spawn = await executeHerdrSpawnWorkerAttendedElectron(request, f.context, f.herdrOptions);
+    assert.equal(spawn.ok, true, JSON.stringify(spawn));
+    const uses = syntheticUses(f);
+    assert.deepEqual(uses.map((use) => use.result), ["reserved", "spawned"]);
+    assert.equal(uses[0].use, uses[1].use);
+  } finally { cleanup(f.root); }
+});
+
+// Why: an empty paths list covers only this repo’s verified leased worktree; a nonempty list still requires the exact path.
+test("attended root-scope grant covers its own leased worktree and explicit paths remain exact", async () => {
+  for (const paths of [[], null, ["/other/slot"]]) {
+    const f = fixture();
+    try {
+      const worktreePath = join(f.root, "slot", WORKER_REPO);
+      f.addWorktree(f.workerRoot, worktreePath, ["-q", "-b", "fix/fixture-slot"]);
+      f.herdrOptions.treehouseStatus = () => JSON.stringify([{
+        name: "1", path: worktreePath, status: "leased", branch: "fix/fixture-slot",
+        lease_id: "1234567890abcdef1234567890abcdef", lease_holder: "fixture", leased_at: new Date().toISOString(), processes: [],
+      }]);
+      const allowed = paths === null || paths.length === 0;
+      const grant = await syntheticGrant(f, { paths: paths === null ? [worktreePath] : paths });
+      const request = { ...f.params, worktreePath, authority: { ledgerId: grant.id } };
+      const preflight = await preflightAttendedElectronSpawn(request, f.context, f.herdrOptions);
+      const spawn = await executeHerdrSpawnWorkerAttendedElectron(request, f.context, f.herdrOptions);
+      assert.equal(preflight.ok, allowed, JSON.stringify(preflight));
+      assert.equal(spawn.ok, allowed, JSON.stringify(spawn));
+      assert.deepEqual(syntheticUses(f).map((use) => use.result), allowed ? ["reserved", "spawned"] : []);
+      if (!allowed) assert.equal(readLog(f.log).some((argv) => argv[0] === "tab" && argv[1] === "create"), false);
+    } finally { cleanup(f.root); }
+  }
+});
+
+// Why: repository-scoped slot coverage never weakens the model check or the physical worktree lease/owner boundary.
+test("attended root-scope grant rejects unlisted models and unrelated, escaped or unleased targets", async () => {
+  const f = fixture();
+  try {
+    const own = join(f.root, "slot", WORKER_REPO);
+    const other = gitRepo(join(f.root, "other-work"));
+    const foreign = join(f.root, "foreign-slot", "other-work");
+    f.addWorktree(f.workerRoot, own, ["-q", "-b", "fix/own-slot"]);
+    f.addWorktree(other, foreign, ["-q", "-b", "fix/foreign-slot"]);
+    const lease = (path) => ({ name: path, path, status: "leased", branch: "fix/own-slot",
+      lease_id: "1234567890abcdef1234567890abcdef", lease_holder: "fixture", processes: [] });
+    f.herdrOptions.treehouseStatus = () => JSON.stringify([lease(own), lease(foreign)]);
+    const grant = await syntheticGrant(f, { paths: [] });
+    const outside = join(f.root, "sibling");
+    mkdirSync(outside);
+    const alias = join(f.root, "alias-slot");
+    symlinkSync(own, alias);
+    for (const target of [foreign, outside, alias, join(own, ".."), join(f.root, "unleased")]) {
+      const request = { ...f.params, worktreePath: target, authority: { ledgerId: grant.id } };
+      assert.equal((await preflightAttendedElectronSpawn(request, f.context, f.herdrOptions)).ok, false, target);
+      assert.equal((await executeHerdrSpawnWorkerAttendedElectron(request, f.context, f.herdrOptions)).ok, false, target);
+    }
+    f.herdrOptions.listModels += "other model\n";
+    f.herdrOptions.routePolicy.routes.push({ provider: "other", model: "model", family: "fixture-family", subscription: false, gateway: true, aliases: [] });
+    f.herdrOptions.routePolicy.budgets.other = { model: 1 };
+    const wrongModel = { ...f.params, worktreePath: own, model: "other/model", authority: { ledgerId: grant.id } };
+    assert.equal((await preflightAttendedElectronSpawn(wrongModel, f.context, f.herdrOptions)).ok, false);
+    assert.equal((await executeHerdrSpawnWorkerAttendedElectron(wrongModel, f.context, f.herdrOptions)).ok, false);
+    assert.equal(readLog(f.log).some((argv) => argv[0] === "tab" && argv[1] === "create"), false);
+    assert.deepEqual(syntheticUses(f), []);
+  } finally { cleanup(f.root); }
+});
+
+// Why: failed layout and agent operations and bad read-backs must settle the reserved use without refund.
+test("attended partial failures record a terminal outcome for each reserved grant", async () => {
+  for (const mode of ["tab-fail", "start-fail", "wrong-model"]) {
+    const f = fixture({ mode });
+    try {
+      const grant = await syntheticGrant(f);
+      const result = await executeHerdrSpawnWorkerAttendedElectron({ ...f.params, authority: { ledgerId: grant.id } }, f.context, f.herdrOptions);
+      assert.equal(result.status, "partial", JSON.stringify(result));
+      const uses = syntheticUses(f);
+      assert.deepEqual(uses.map((use) => use.result), ["reserved", "partial"]);
+      assert.equal(uses[0].use, uses[1].use);
+      assert.equal(uses[1].partial, mode === "tab-fail" ? "tab_created" : mode === "start-fail" ? "tab_created" : "agent_started");
+    } finally { cleanup(f.root); }
+  }
+});
+
+// Why: the same ledger id cannot substitute a different role or repository on either boundary.
+test("attended grant refuses role and repository mismatch", async () => {
+  for (const scope of [{ roles: ["other-worker"] }, { repo: "other-work" }]) {
+    const f = fixture();
+    try {
+      const grant = await syntheticGrant(f, scope);
+      const request = { ...f.params, authority: { ledgerId: grant.id } };
+      assert.equal((await preflightAttendedElectronSpawn(request, f.context, f.herdrOptions)).ok, false);
+      assert.equal((await executeHerdrSpawnWorkerAttendedElectron(request, f.context, f.herdrOptions)).ok, false);
+      assert.equal(readLog(f.log).some((argv) => argv[0] === "tab" && argv[1] === "create" || argv[0] === "agent" && argv[1] === "start"), false);
+      assert.deepEqual(syntheticUses(f), []);
+    } finally { cleanup(f.root); }
+  }
+});
+
+// Why: revocation and expiry must each prevent a supplied grant from spawning without consuming it.
+test("attended grant refuses revoked and expired entries", async () => {
+  for (const revoked of [true, false]) {
+    const f = fixture();
+    try {
+      const grant = await syntheticGrant(f, {}, revoked ? undefined : new Date(Date.now() + 50).toISOString());
+      if (revoked) {
+        const path = join(f.root, "profile", "config", "relay-authority.v1.json");
+        const config = JSON.parse(readFileSync(path, "utf8"));
+        writeFileSync(path, JSON.stringify({ ...config, revokedIds: [grant.id] }));
+      } else await new Promise((resolve) => setTimeout(resolve, 70));
+      const request = { ...f.params, authority: { ledgerId: grant.id } };
+      assert.equal((await preflightAttendedElectronSpawn(request, f.context, f.herdrOptions)).ok, false);
+      assert.equal((await executeHerdrSpawnWorkerAttendedElectron(request, f.context, f.herdrOptions)).ok, false);
+      assert.equal(readLog(f.log).some((argv) => argv[0] === "tab" && argv[1] === "create" || argv[0] === "agent" && argv[1] === "start"), false);
+      assert.deepEqual(syntheticUses(f), []);
+    } finally { cleanup(f.root); }
+  }
+});
+
+// Why: successful receipts must identify the workspace verified from the created tab.
+test("attended spawn reports the workspace where the tab landed", async () => {
+  const f = fixture({ mode: "selected-workspace" });
+  try {
+    const result = await executeHerdrSpawnWorkerAttendedElectron({ ...f.params, workspace: "selected" }, f.context, f.herdrOptions);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.workspaceId, "w8");
+    assert.ok(readLog(f.log).find((argv) => argv[0] === "tab" && argv[1] === "create").includes("w8"));
+  } finally { cleanup(f.root); }
+});
+
+// Why: an explicit workspace must be used rather than the home workspace and mismatches must not start an agent.
+test("attended spawn targets the requested workspace and rejects a misplaced tab", async () => {
+  const f = fixture();
+  try {
+    const result = await executeHerdrSpawnWorkerAttendedElectron({ ...f.params, workspace: "selected" }, f.context, f.herdrOptions);
+    const create = readLog(f.log).find((argv) => argv[0] === "tab" && argv[1] === "create");
+    assert.ok(create.includes("w8"), JSON.stringify(create));
+    assert.equal(result.code, "workspace_mismatch");
+    assert.equal(readLog(f.log).some((argv) => argv[0] === "agent" && argv[1] === "start"), false);
+  } finally { cleanup(f.root); }
+});
+
+// Why: only a canonical standalone Git root with an eligible owner can be a worker repository; the linked worktree fixture must satisfy the host's Treehouse placement guard.
 test("spawn target requires an owned lowercase standalone Git root, not a worktree or symlink", () => {
-  const f = fixture({ registryNames: [WORKER_REPO, "other-work", "linked-work", "alias-work"] });
+  const f = fixture({ treehouse: true, registryNames: [WORKER_REPO, "other-work", "linked-work", "alias-work"] });
   try {
     assert.equal(resolveTrustedSpawnRepository(f.coordinator, WORKER_REPO), realpathSync(f.workerRoot));
     gitRepo(join(f.root, "other-work"));
-    execFileSync("git", ["-C", f.workerRoot, "worktree", "add", "-q", "--detach", join(f.root, "linked-work")]);
+    f.addWorktree(f.workerRoot, join(f.root, "linked-work"), ["-q", "--detach"]);
     assert.throws(() => resolveTrustedSpawnRepository(f.coordinator, "linked-work"), (error) => error.code === "repository_not_git_root");
     assert.throws(() => resolveTrustedSpawnRepository(f.coordinator, "Upper-work"), (error) => error.code === "repository_untrusted");
     assert.throws(() => resolveTrustedSpawnRepository(f.coordinator, "unlisted"), (error) => error.code === "repository_unavailable");
@@ -458,6 +665,12 @@ test("the pulse seam dispatches by explicit context class and fails closed when 
     });
     const envelope = { seatId: "seat-1", model: MODEL, provider: "glm53flash" };
     const seamInput = { role: "worker", repository: canonicalRepository, model: MODEL, placement: "host", context: f.context, envelope, provider: "glm53flash", seatId: "seat-1", endpointRef: "seat-1" };
+
+    // Why: Pulse must carry an explicit workspace across either guarded host boundary.
+    await seam({ ...seamInput, workspace: "w8" });
+    assert.equal(calls.attended.pop().params.workspace, "w8");
+    await seam({ ...seamInput, context: tuiContext, workspace: "w8" });
+    assert.equal(calls.tui.pop().params.workspace, "w8");
 
     const attended = await seam(seamInput);
     assert.equal(attended.ok, true);

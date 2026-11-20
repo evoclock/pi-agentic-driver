@@ -1,0 +1,24 @@
+{
+  "schema": "model-fidelity.design.v1",
+  "id": "g8b-local-implementation-v1",
+  "planId": "g8b-linux-guest-original",
+  "mode": "protocol",
+  "sourceRefs": [
+    "scripts/enforcement/linux_microvm_checks_pi.js",
+    "scripts/enforcement/linux_microvm_checks_runtime.js",
+    "scripts/enforcement/linux_microvm_checks_launcher.py",
+    "scripts/guest_checks_image.py",
+    "scripts/guest_checks_supervisor.py"
+  ],
+  "modelRefs": [
+    "docs/design/workflow-runner/Gap8SSHChecks.tla",
+    "docs/design/workflow-runner/Gap8LinuxUnattended.tla"
+  ],
+  "configRefs": [
+    "docs/design/workflow-runner/Gap8SSHChecks-safe.cfg",
+    "docs/design/workflow-runner/Gap8LinuxUnattended-safe.cfg"
+  ],
+  "dependencyRefs": [],
+  "actionIds": ["Preflight", "Boot", "SerialHeader", "Result", "Disconnect", "Timeout", "Teardown", "Accept", "Fail"],
+  "environmentId": "docs/design/workflow-runner/g8b-environment.json"
+}

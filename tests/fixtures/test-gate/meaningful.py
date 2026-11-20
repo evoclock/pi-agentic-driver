@@ -1,3 +1,5 @@
+FIXTURE_REPO_PARENT = ".scratch"
+
 import unittest
 
 from app import value

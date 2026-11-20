@@ -1,0 +1,6 @@
+TLC2 2.19, 2026-11-12. NudgeLedger.cfg / NudgeLedger.tla.
+Model checking completed. No error has been found.
+17 states generated, 17 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 3.
+Invariants: TypeOK, OneTerminal, ResultDelivery. Deadlock checking disabled for terminal states.
+Full local output: .local/nudge-tlc.txt (not committed).

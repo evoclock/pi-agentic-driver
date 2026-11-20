@@ -1,0 +1,119 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 32 and seed -2880868274435172290 with 1 worker on 10 cores with 14564MB heap and 64MB offheap memory [pid: <PROCESS_ID>] (Mac OS X 27.0.1 aarch64, Homebrew 27.0.1.0.3 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file <WORKTREE>/.scratch/workflow-runner/ownership-original-controls/Fix4Runner.tla
+Parsing file <TLC_TEMP>/Naturals.tla
+Parsing file <TLC_TEMP>/FiniteSets.tla
+Parsing file <TLC_TEMP>/Sequences.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module Fix4Runner
+Starting... (2026-11-15 13:47:49)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-11-15 13:47:49.
+Error: Invariant CancelledNeverActs is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+s = [ pc |-> <<"idle", "idle", "idle", "idle">>,
+  variant |-> <<1, 1, 1, 1>>,
+  tombs |-> {},
+  halt |-> FALSE,
+  lock |-> 0,
+  actedBy |-> {},
+  journaledBy |-> {},
+  afterCancel |-> FALSE,
+  afterHalt |-> FALSE,
+  fork |-> FALSE,
+  deltas |-> 0,
+  lockFiles |-> 0,
+  looks |-> 0,
+  facts |-> [tombs |-> {}, halt |-> FALSE, lock |-> 0],
+  snapshotValid |-> FALSE,
+  snapshotFacts |-> [tombs |-> {}, halt |-> FALSE, lock |-> 0],
+  compacted |-> FALSE,
+  compactFacts |-> [tombs |-> {}, halt |-> FALSE, lock |-> 0] ]
+
+State 2: <Cancel line 22, col 11 to line 25, col 42 of module Fix4Runner>
+s = [ pc |-> <<"idle", "idle", "idle", "idle">>,
+  variant |-> <<1, 1, 1, 1>>,
+  tombs |-> {1},
+  halt |-> TRUE,
+  lock |-> 0,
+  actedBy |-> {},
+  journaledBy |-> {},
+  afterCancel |-> FALSE,
+  afterHalt |-> FALSE,
+  fork |-> FALSE,
+  deltas |-> 1,
+  lockFiles |-> 0,
+  looks |-> 0,
+  facts |-> [tombs |-> {1}, halt |-> TRUE, lock |-> 0],
+  snapshotValid |-> FALSE,
+  snapshotFacts |-> [tombs |-> {}, halt |-> FALSE, lock |-> 0],
+  compacted |-> FALSE,
+  compactFacts |-> [tombs |-> {}, halt |-> FALSE, lock |-> 0] ]
+
+State 3: <Claim line 31, col 16 to line 42, col 77 of module Fix4Runner>
+s = [ pc |-> <<"claimed", "idle", "idle", "idle">>,
+  variant |-> <<2, 1, 1, 1>>,
+  tombs |-> {1},
+  halt |-> FALSE,
+  lock |-> 1,
+  actedBy |-> {},
+  journaledBy |-> {},
+  afterCancel |-> FALSE,
+  afterHalt |-> FALSE,
+  fork |-> FALSE,
+  deltas |-> 2,
+  lockFiles |-> 1,
+  looks |-> 0,
+  facts |-> [tombs |-> {1}, halt |-> FALSE, lock |-> 1],
+  snapshotValid |-> FALSE,
+  snapshotFacts |-> [tombs |-> {}, halt |-> FALSE, lock |-> 0],
+  compacted |-> FALSE,
+  compactFacts |-> [tombs |-> {}, halt |-> FALSE, lock |-> 0] ]
+
+State 4: <PrePublish line 43, col 18 to line 44, col 40 of module Fix4Runner>
+s = [ pc |-> <<"checked", "idle", "idle", "idle">>,
+  variant |-> <<2, 1, 1, 1>>,
+  tombs |-> {1},
+  halt |-> FALSE,
+  lock |-> 1,
+  actedBy |-> {},
+  journaledBy |-> {},
+  afterCancel |-> FALSE,
+  afterHalt |-> FALSE,
+  fork |-> FALSE,
+  deltas |-> 2,
+  lockFiles |-> 1,
+  looks |-> 0,
+  facts |-> [tombs |-> {1}, halt |-> FALSE, lock |-> 1],
+  snapshotValid |-> FALSE,
+  snapshotFacts |-> [tombs |-> {}, halt |-> FALSE, lock |-> 0],
+  compacted |-> FALSE,
+  compactFacts |-> [tombs |-> {}, halt |-> FALSE, lock |-> 0] ]
+
+State 5: <Act line 46, col 11 to line 49, col 68 of module Fix4Runner>
+s = [ pc |-> <<"acted", "idle", "idle", "idle">>,
+  variant |-> <<2, 1, 1, 1>>,
+  tombs |-> {1},
+  halt |-> FALSE,
+  lock |-> 1,
+  actedBy |-> {1},
+  journaledBy |-> {},
+  afterCancel |-> TRUE,
+  afterHalt |-> FALSE,
+  fork |-> FALSE,
+  deltas |-> 2,
+  lockFiles |-> 1,
+  looks |-> 0,
+  facts |-> [tombs |-> {1}, halt |-> FALSE, lock |-> 1],
+  snapshotValid |-> FALSE,
+  snapshotFacts |-> [tombs |-> {}, halt |-> FALSE, lock |-> 0],
+  compacted |-> FALSE,
+  compactFacts |-> [tombs |-> {}, halt |-> FALSE, lock |-> 0] ]
+
+951 states generated, 184 distinct states found, 119 states left on queue.
+The depth of the complete state graph search is 5.
+The average outdegree of the complete state graph is 3 (minimum is 0, the maximum 11 and the 95th percentile is 5).
+Finished in 00s at (2026-11-15 13:47:49)

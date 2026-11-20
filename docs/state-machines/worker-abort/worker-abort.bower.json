@@ -1,0 +1,25 @@
+{
+  "schema": "bowerbird/v1",
+  "meta": { "title": "Guarded worker abort", "subtitle": "Delivery is not settlement. Only the worker invokes cancellation.", "kind": "statechart", "view": "flat", "direction": "LR", "animation": "static", "grid": { "col": 450, "row": 165, "gap": [180, 60] } },
+  "categories": { "sage": { "label": "Coordinator" }, "slate": { "label": "Worker" }, "rust": { "label": "Refusal" } },
+  "zones": [{ "id": "abort", "title": "Per-turn abort", "category": "sage" }],
+  "nodes": [
+    { "id": "start", "zone": "abort", "at": [0, 0], "shape": "initial", "category": "sage", "details": "[Coordinator adapter](scripts/enforcement/herdr_communication_pi.js). Every attempt is audited." },
+    { "id": "guards", "zone": "abort", "at": [1, 0], "shape": "choice", "title": "Target guards", "category": "sage", "details": "Non-coordinator Pi role; trusted repository; observed session; fresh listener capability; exact running Pi turn/tool. [Implementation](scripts/enforcement/worker_abort_pi.js)." },
+    { "id": "delivered", "zone": "abort", "at": [2, 0], "shape": "state", "title": "Request delivered", "category": "sage", "details": "Atomic exclusive publication. Receipt means request written, not cancelled or idle. Same turn returns the same receipt. [Adapter](scripts/enforcement/worker_abort_pi.js)." },
+    { "id": "worker", "zone": "abort", "at": [3, 0], "shape": "choice", "title": "Worker guards", "category": "slate", "details": "Listener rechecks session, pane, repository, expiry, running turn and active tool. Pi queue pending is refused unless allowPiQueueRestore is true. Synchronous native work delays this listener until the event loop yields. [Listener](scripts/enforcement/worker_abort_pi.js)." },
+    { "id": "requested", "zone": "abort", "at": [4, 0], "shape": "state", "title": "Abort requested", "category": "slate", "details": "Persist idempotent acknowledgment, then invoke ctx.abort(). Same handler as Escape. Never close/restart the worker, alter the lease or clear PAD deliveries. [Listener](scripts/enforcement/worker_abort_pi.js)." },
+    { "id": "settled", "zone": "abort", "at": [5, 0], "shape": "final", "title": "Settlement observed", "category": "slate", "details": "Later get/read observes cancelled tool or idle state in the same session and lease. The receipt and acknowledgment never prove settlement. [Acceptance tests](tests/test_worker_abort.mjs)." },
+    { "id": "refused", "zone": "abort", "at": [1, 1], "shape": "final", "title": "Request refused", "category": "rust", "details": "Fail closed, including missing listener on installed workers. No request written. [Guard tests](tests/test_worker_abort.mjs)." },
+    { "id": "worker-refused", "zone": "abort", "at": [3, 1], "shape": "final", "title": "Worker refused", "category": "rust", "details": "Ack contains stale_turn, turn_finished, pi_queue_pending or abort_call_failed. No claim that the turn ended. [Tests](tests/test_worker_abort.mjs)." }
+  ],
+  "edges": [
+    { "from": "start", "to": "guards", "event": "abort" },
+    { "from": "guards", "to": "delivered", "event": "validate", "guard": "target_current", "action": "publish_or_original" },
+    { "from": "guards", "to": "refused", "event": "validate", "guard": "target_invalid", "action": "audit_refusal", "kind": "failure" },
+    { "from": "delivered", "to": "worker", "event": "event_loop_yields", "action": "watch_or_poll" },
+    { "from": "worker", "to": "requested", "event": "check", "guard": "current_and_queue_safe", "action": "ack_then_ctx_abort" },
+    { "from": "worker", "to": "worker-refused", "event": "check", "guard": "invalid_or_queue_pending", "action": "ack_refusal", "kind": "failure" },
+    { "from": "requested", "to": "settled", "event": "get_or_read", "guard": "cancelled_or_idle" }
+  ]
+}

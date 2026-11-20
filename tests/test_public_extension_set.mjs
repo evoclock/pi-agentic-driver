@@ -7,18 +7,83 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import registerLinuxMicroVMCutover from "../extensions/linux-microvm.ts";
 import { createTaskStore } from "../lib/task-store-adapter.ts";
 import { isNativeTuiContext } from "../scripts/enforcement/native_tui_context.js";
+import { packageInfo, packedFiles } from "./packed_extension_contract.mjs";
+import { EventEmitter } from "node:events";
+
+// Why: clean installs and existing exclusions must register once with either shared or per-extension Pi APIs.
+test("packaged, excluded, standalone and reversed extension loading register once across reload", async () => {
+  const files = packageInfo.pi.extensions.flatMap((entry) => entry === "./extensions"
+    ? [...packedFiles].filter((file) => file.startsWith("extensions/") && (file.endsWith(".ts") || file.endsWith(".js")))
+    : [entry.replace(/^\.\//, "")]).sort();
+  const shapes = [files, files.filter((file) => file !== "extensions/herdr-communication.ts"),
+    ["extensions/herdr-communication.ts"], [...files].reverse()];
+  for (const shape of shapes) {
+    for (const distinctApis of [false, true]) {
+      const bus = new EventEmitter();
+      const runtimes = [];
+      for (let generation = 0; generation < 2; generation++) {
+        const tools = new Map();
+        const makePi = () => ({
+          registerTool(tool) {
+            assert.equal(tools.has(tool.name), false, `Duplicate tool: ${tool.name}`);
+            tools.set(tool.name, tool);
+          },
+          events: {
+            emit: (channel, data) => bus.emit(channel, data),
+            on(channel, handler) { bus.on(channel, handler); return () => bus.off(channel, handler); },
+          },
+          registerCommand() {}, registerShortcut() {}, on() {}, appendEntry() {},
+          cwd: REPO_ROOT, getState: () => undefined,
+        });
+        const pi = makePi();
+        for (const file of shape) {
+          const module = await import(pathToFileURL(resolve(REPO_ROOT, file)).href);
+          await module.default(distinctApis ? makePi() : pi);
+        }
+        assert.ok(tools.has("agentic_herdr_communication"));
+        if (shape.length > 1) assert.ok(tools.has("agentic_herdr_spawn_worker"));
+        runtimes.push(tools);
+        // Pi invalidates runtime event-bus subscriptions before replacing APIs.
+        bus.removeAllListeners();
+      }
+      assert.deepEqual([...runtimes[1].keys()].sort(), [...runtimes[0].keys()].sort());
+      assert.notEqual(runtimes[1].get("agentic_herdr_communication"), runtimes[0].get("agentic_herdr_communication"));
+    }
+  }
+});
+
+// Why: separate mtime-busted ESM copies must share per-tool guards but never suppress a fresh API runtime.
+test("cache-busted Herdr modules share registrations only within the same Pi runtime", async () => {
+  for (let generation = 0; generation < 2; generation++) {
+    const tools = new Map();
+    const pi = { registerTool(tool) {
+      assert.equal(tools.has(tool.name), false, `Duplicate tool: ${tool.name}`);
+      tools.set(tool.name, tool);
+    } };
+    for (const revision of ["first", "second"]) {
+      const suffix = `?registration-test=${generation}-${revision}`;
+      const communication = await import(new URL(`../scripts/enforcement/herdr_communication_pi.js${suffix}`, import.meta.url));
+      const lifecycle = await import(new URL(`../scripts/enforcement/herdr_lifecycle_pi.js${suffix}`, import.meta.url));
+      communication.registerHerdrCommunicationInterface(pi);
+      lifecycle.registerHerdrLifecycleInterface(pi);
+    }
+    assert.equal(tools.size, 5);
+    assert.ok(tools.has("agentic_herdr_communication"));
+    assert.ok(tools.has("agentic_herdr_close_tab"));
+  }
+});
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 // The public extension set must not register the legacy agentic_work_mode
-// tool; only the activation-deferred, fail-closed cutover interface ships.
+// tool; the proof and separate closed, fail-closed workflow-check interface ship.
 // Why: the shipped cutover must not expose the legacy unsafe tool.
 test("public extension set registers cutover without agentic_work_mode", async () => {
   const registered = [];
   const pi = { registerTool: (tool) => registered.push(tool.name) };
   const result = registerLinuxMicroVMCutover(pi);
   assert.equal(result, undefined);
-  assert.deepEqual(registered, ["agentic_linux_microvm_cutover"]);
+  assert.deepEqual(registered, ["agentic_linux_microvm_cutover", "agentic_linux_microvm_checks"]);
   assert.equal(registered.includes("agentic_work_mode"), false);
 });
 
@@ -93,6 +158,7 @@ test("package file list matches the public extension set", () => {
     "extensions/aidr.ts",
     "extensions/attended-authority-guard.ts",
     "extensions/code-phage.js",
+    "extensions/daybreak-blue.ts",
     "extensions/harvest-lessons.ts",
     "extensions/herdr-communication.ts",
     "extensions/herdr-dispatch.ts",
@@ -106,6 +172,7 @@ test("package file list matches the public extension set", () => {
     "extensions/task-skill-observability.ts",
     "extensions/tasks.ts",
     "extensions/treehouse-recycle.ts",
+    "extensions/workflow-runner.js",
   ]);
   assert.ok(pkg.files.includes("scripts/enforcement/herdr_async_dispatch_pi.js"), "missing: dispatch module");
   assert.ok(pkg.files.includes("scripts/enforcement/herdr_async_seam_pi.js"), "missing: async seam module");
@@ -142,7 +209,7 @@ function relativeImportSpecifiers(source) {
 test("every shipped skill folder has valid frontmatter and package registration", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const skillsRoot = join(REPO_ROOT, "skills");
-  const internal = new Set(["code-review", "diagnosing-bugs", "verify-journey"]);
+  const internal = new Set(["code-review", "diagnosing-bugs", "verify-journey", "release-public"]);
   const expected = [];
   for (const entry of readdirSync(skillsRoot, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;

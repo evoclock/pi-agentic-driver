@@ -1,0 +1,5 @@
+{
+  "schema": "model-fidelity.red-lines.v1",
+  "rawDataPaths": ["inputs/original.csv"],
+  "keyAssetPaths": ["skills/core/SKILL.md"]
+}

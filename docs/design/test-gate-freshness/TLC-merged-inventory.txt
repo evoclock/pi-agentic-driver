@@ -1,0 +1,27 @@
+Observed condensed TLC results after integration with the main negative-control inventory.
+Command: node scripts/model_negative_controls.mjs --run
+Full inventory: 31 safe/negative checks passed, with required Java/TLC enabled.
+Machine paths and timestamps omitted. Each negative result named the expected invariant.
+
+BaseFreshness.cfg: exit 0; 337 generated, 72 distinct states; no error.
+BaseFreshness-unsafe-lock.cfg: exit 12; NoLockOnStaleBase violated.
+BaseFreshness-unsafe-override.cfg: exit 12; NoLockOnStaleBase violated.
+BaseFreshness-unsafe-review.cfg: exit 12; NoReviewOnStaleHead violated.
+BaseFreshness-unsafe-missing.cfg: exit 12; StaleNeverClassifiedAsMissingTest violated.
+BaseFreshness-unsafe-lease.cfg: exit 12; LeaseRecorded violated.
+ConfigurationTransition.cfg: exit 0; 15 generated, 6 distinct states; no error.
+ConfigurationTransition-unsafe.cfg: exit 12; LockCoversCheckedConfiguration violated.
+ConfigurationTransition-unsafe-evidence.cfg: exit 12; OriginalEvidencePreserved violated.
+ObservabilityBase.cfg: exit 0; 200 generated, 68 distinct states; no error.
+ObservabilityBase-unsafe-cached.cfg: exit 12; GateUsesVerifiedBase violated.
+ObservabilityBase-unsafe-image.cfg: exit 12; GateUsesVerifiedBase violated.
+ObservabilityBase-unsafe-stalehead.cfg: exit 12; NoLockOnStaleBase violated.
+
+Reachability controls, observed separately with the same required TLC runner:
+BaseFreshness-unsafe-reach-merge.cfg: exit 12; NeverMerged violated.
+BaseFreshness-unsafe-reach-stale.cfg: exit 12; NeverStale violated.
+ObservabilityBase-unsafe-reach-gate.cfg: exit 12; NeverGate violated.
+ObservabilityBase-unsafe-reach-reject.cfg: exit 12; NeverReject violated.
+
+These unsafe branches do not alter any safe-mode transition. The safe distinct-state counts
+remain 72, 6 and 68. No inventory checker assertion, exception or allowlist was weakened.

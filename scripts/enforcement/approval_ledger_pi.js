@@ -78,8 +78,8 @@ export async function recordApproval(profile, input) {
   if (!["relay", "direct", "standing"].includes(input.kind) || !input.quote?.trim() || !input.quotedQuestion?.trim() || !input.sourceMessageId?.trim() || !validDate(input.givenAt) || !input.scope?.repo || !Array.isArray(input.scope.actions)) throw new Error("incomplete approval");
   const scope = input.scope;
   if (typeof scope.repo !== "string" || (scope.repo !== "*" && !/^[a-z][a-z0-9-]{0,63}$/.test(scope.repo))
-      || Object.keys(scope).some((key) => !["repo", "repositories", "actions", "paths", "prs", "branches", "models", "roles"].includes(key))
-      || ["repositories", "actions", "paths", "prs", "branches", "models", "roles"].some((key) => scope[key] !== undefined && (!Array.isArray(scope[key]) || scope[key].some((value) => typeof value !== "string" || !value.trim())))) throw new Error("invalid approval scope");
+      || Object.keys(scope).some((key) => !["repo", "repositories", "actions", "paths", "prs", "branches", "models", "roles", "kinds", "accounts"].includes(key))
+      || ["repositories", "actions", "paths", "prs", "branches", "models", "roles", "kinds", "accounts"].some((key) => scope[key] !== undefined && (!Array.isArray(scope[key]) || scope[key].some((value) => typeof value !== "string" || !value.trim())))) throw new Error("invalid approval scope");
   // '*' is only a selector for an explicit, bounded repository snapshot.
   if (scope.repo === "*") {
     if (input.kind !== "standing" || input.tier !== 1 || !Array.isArray(scope.repositories)
@@ -109,15 +109,34 @@ export function scopeListCovers(list, value) {
   if (!Array.isArray(list)) return false;
   return list.length === 0 || list.includes(value);
 }
-export function authorizeApproval(profile, id, { tier, repository, action, model, role, path, pr, branch }, now = new Date()) {
+function readApprovalUses(file) {
+  try { return readFileSync(file, "utf8").split("\n").filter(Boolean).map(JSON.parse); }
+  catch (error) { if (error.code === "ENOENT") return []; throw error; }
+}
+import { verifiedWorktreeTargetCovers } from "./herdr_lifecycle_pi.js";
+
+// Precedence is deliberate: revocation wins over expiry, then exhaustion.
+// Each reservation consumes capacity even after its outcome is recorded.
+export function approvalGrantStatus(entry, revokedIds, uses, now = new Date()) {
+  if (revokedIds?.includes(entry.id)) return "revoked";
+  if (entry.expiresAt && Date.parse(entry.expiresAt) <= now.getTime()) return "expired";
+  if (entry.maxUses != null && uses.filter((use) => use.ledgerId === entry.id && use.result === "reserved").length >= entry.maxUses) return "used-up";
+  return "active";
+}
+export function authorizeApproval(profile, id, { tier, repository, action, model, role, path, worktreeTarget, repositoryRoot, pr, branch, kind, account }, now = new Date()) {
   const paths = approvalPaths(profile);
   const entries = verifyApprovals(paths.ledger);
   const entry = entries.find((item) => item.id === id);
   const config = JSON.parse(readFileSync(paths.relayers, "utf8"));
   const trusted = config.relayers?.some((r) => r.relayer === entry?.relayer && r.channel === entry?.channel && r.maxTier >= tier);
   const scope = entry?.scope;
-  const used = (() => { try { return readFileSync(paths.uses, "utf8").split("\n").filter(Boolean).map(JSON.parse).filter((use) => use.ledgerId === id && use.result === "reserved").length; } catch (error) { if (error.code === "ENOENT") return 0; throw error; } })();
-  if (!entry || config.revokedIds?.includes(id) || tier > 2 || entry.tier < tier || !trusted || !scope || !(scope.repo === repository || (tier === 1 && entry.kind === "standing" && scope.repo === "*" && Array.isArray(scope.repositories) && scope.repositories.includes(repository))) || (tier === 2 && !entry.quote.includes(repository)) || !scope.actions?.includes(action) || (model && !scopeListCovers(scope.models, model)) || (role && !scopeListCovers(scope.roles, role)) || (path && !scope.paths?.includes(path)) || (pr && !scope.prs?.includes(pr)) || (branch && !scope.branches?.includes(branch)) || (entry.expiresAt && Date.parse(entry.expiresAt) <= now.getTime()) || (entry.maxUses != null && used >= entry.maxUses)) throw new Error("approval does not cover action");
+  if ((kind === "codex" && (!scope?.kinds?.includes("codex") || !scope?.accounts?.includes(account)))
+      || ((kind === "pi" || kind === undefined) && scope?.kinds && !scope.kinds.includes("pi"))
+      || (kind && kind !== "codex" && kind !== "pi")) throw new Error("approval does not cover agent kind and account");
+  const status = entry && approvalGrantStatus(entry, config.revokedIds, readApprovalUses(paths.uses), now);
+  if (status !== "active" || tier > 2 || entry.tier < tier || !trusted || !scope || !(scope.repo === repository || (tier === 1 && entry.kind === "standing" && scope.repo === "*" && Array.isArray(scope.repositories) && scope.repositories.includes(repository))) || (tier === 2 && !entry.quote.includes(repository)) || !scope.actions?.includes(action) || (model && !scopeListCovers(scope.models, model)) || (role && !scopeListCovers(scope.roles, role)) || (path && !scope.paths?.includes(path)
+      && !(action === "spawn" && scope.repo === repository && scope.paths?.length === 0
+        && verifiedWorktreeTargetCovers(worktreeTarget, path, repositoryRoot))) || (pr && !scope.prs?.includes(pr)) || (branch && !scope.branches?.includes(branch))) throw new Error("approval does not cover action");
   return entry;
 }
 // The header names candidate records only. Each requested action is checked
@@ -139,13 +158,22 @@ export function checkRelayRequests(profile, header, requests) {
 export async function reserveApprovalUse(profile, ledgerId, request, operation) {
   return withApprovalLock(profile, async () => {
     const entry = authorizeApproval(profile, ledgerId, request);
-    appendFileSync(approvalPaths(profile).uses, JSON.stringify({ use: randomUUID(), ledgerId, action: request.action, target: request.repository, result: "reserved", at: new Date().toISOString() }) + "\n", { mode: 0o600 });
-    return operation ? operation(entry) : entry;
+    const useId = randomUUID();
+    appendFileSync(approvalPaths(profile).uses, JSON.stringify({ use: useId, ledgerId, action: request.action, target: request.repository, result: "reserved", ...(request.action === "spawn" ? { kind: request.kind ?? "pi", ...(request.kind === "codex" ? { account: request.account } : {}) } : {}), at: new Date().toISOString() }) + "\n", { mode: 0o600 });
+    return operation ? operation(entry, useId) : { ...entry, useId };
   });
 }
-export async function recordApprovalUse(profile, ledgerId, action, target, result) {
+export async function recordApprovalUse(profile, ledgerId, action, target, result, useId, partial) {
   return withApprovalLock(profile, () => {
     const path = approvalPaths(profile).uses;
-    appendFileSync(path, JSON.stringify({ use: randomUUID(), ledgerId, action, target, result, at: new Date().toISOString() }) + "\n", { mode: 0o600 });
+    if (!(["spawned", "partial"].includes(result) || result === "failed") || !useId
+        || (result === "partial" && !["tab_created", "pane_created", "agent_started"].includes(partial))
+        || (result !== "partial" && partial !== undefined)) throw new Error("terminal outcome requires a reserved use and valid result");
+    const uses = readApprovalUses(path);
+    const reserved = uses.find((row) => row.use === useId && row.ledgerId === ledgerId && row.action === action && row.target === target && row.result === "reserved");
+    if (!reserved || uses.some((row) => row.use === useId && row.result !== "reserved")) throw new Error("reserved use missing or already settled");
+    appendFileSync(path, JSON.stringify({ use: useId, ledgerId, action, target, result,
+      ...(partial ? { partial } : {}),
+      ...(action === "spawn" ? { kind: reserved.kind ?? "pi", ...(reserved.kind === "codex" ? { account: reserved.account } : {}) } : {}), at: new Date().toISOString() }) + "\n", { mode: 0o600 });
   });
 }

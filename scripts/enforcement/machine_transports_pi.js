@@ -3,6 +3,7 @@
 // Two local transports, one dispatch table. The host constructs the commands.
 import { createServer } from "node:http";
 import { createInterface } from "node:readline";
+import { modelFidelitySchemas } from "./model_fidelity_commands.mjs";
 
 export function invokeMachine(commands, name, input) {
   if (typeof name !== "string" || !Object.hasOwn(commands, name)) {
@@ -70,13 +71,13 @@ export async function machineMcpMessage(commands, message) {
     protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "agentic-driver-machines", version: "1" },
   } };
   if (message.method === "tools/list") return { jsonrpc: "2.0", id: message.id, result: { tools: Object.keys(commands).map((name) => ({ name,
-    description: `Host machine command ${name}`, inputSchema: { type: "object",
+    description: `Host machine command ${name}`, inputSchema: modelFidelitySchemas[name] ?? { type: "object",
       properties: Object.fromEntries(Object.entries(COMMAND_FIELDS[name] ?? {}).map(([key, type]) => [key, { type }])),
       required: Object.keys(COMMAND_FIELDS[name] ?? {}), additionalProperties: true } })) } };
   if (message.method === "tools/call") {
     const { name, arguments: input } = message.params ?? {};
     const result = await invokeMachine(commands, name, input);
-    return { jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: JSON.stringify(result) }], isError: result?.ok === false } };
+    return { jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: JSON.stringify(result) }], isError: result?.ok === false || result?.schema === 'model-fidelity.error.v1' } };
   }
   if (message.id === undefined) return null;
   return { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "method not found" } };

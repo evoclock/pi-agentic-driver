@@ -1,0 +1,436 @@
+{
+  "docs/design/ci-speed/MutationSelection.tla": [
+    {"config":"MutationSelection-unsafe-proof.cfg","expected":"ProofFull","kind":"invariant"},
+    {"config":"MutationSelection-unsafe-unknown.cfg","expected":"UnknownFull","kind":"invariant"},
+    {"config":"MutationSelection-unsafe-target.cfg","expected":"MappedExact","kind":"invariant"}
+  ],
+  "docs/design/ci-speed/MutationPool.tla": [
+    {"config":"MutationPool-unsafe-shared.cfg","expected":"OwnTree","kind":"invariant"},
+    {"config":"MutationPool-unsafe-misattribute.cfg","expected":"Attribution","kind":"invariant"},
+    {"config":"MutationPool-unsafe-skip.cfg","expected":"CompleteProof","kind":"invariant"}
+  ],
+  "docs/design/verify/BudgetTransition.tla": [
+    {"config":"BudgetTransition-unsafe-headroom.cfg","expected":"Headroom","kind":"invariant"},
+    {"config":"BudgetTransition-unsafe-red.cfg","expected":"NoRedPush","kind":"invariant"},
+    {"config":"BudgetTransition-unsafe-low-budget.cfg","expected":"SplitCanRun","kind":"invariant"}
+  ],
+  "docs/design/verify/RecurrenceGuards.tla": [
+    {"config":"RecurrenceGuards-unsafe-new-input-proof.cfg","expected":"NoConfigChangeAfterLock"},
+    {"config":"RecurrenceGuards-unsafe-remove-input.cfg","expected":"NoConfigChangeAfterLock"},
+    {"config":"RecurrenceGuards-unsafe-R1.cfg","expected":"NoRunWithoutCapHeadroom","kind":"invariant"},
+    {"config":"RecurrenceGuards-unsafe-R2.cfg","expected":"NoGateWithMissingTool","kind":"invariant"},
+    {"config":"RecurrenceGuards-unsafe-R3.cfg","expected":"NoAddedBannedTermAnywhere","kind":"invariant"},
+    {"config":"RecurrenceGuards-unsafe-R4.cfg","expected":"NoConfigChangeAfterLock","kind":"invariant"},
+    {"config":"RecurrenceGuards-unsafe-R5.cfg","expected":"StaleNeverReviewed","kind":"invariant"},
+    {"config":"RecurrenceGuards-unsafe-R6.cfg","expected":"VisibleBoundedLock","kind":"invariant"},
+    {"config":"RecurrenceGuards-unsafe-override.cfg","expected":"StaleNeverReviewed","kind":"invariant"},
+    {"config":"RecurrenceGuards-unsafe-runtime.cfg","expected":"VisibleBoundedLock","kind":"invariant"},
+    {"config":"RecurrenceGuards-unsafe-inventory.cfg","expected":"NoPushedUnregisteredModel","kind":"invariant"},
+    {"config":"RecurrenceGuards-unsafe-tests.cfg","expected":"NoPushWithoutCurrentImplementationTests","kind":"invariant"},
+    {"config":"RecurrenceGuards-unsafe-merge-inventory.cfg","expected":"NoPushedUnregisteredModel","kind":"invariant"},
+    {"config":"RecurrenceGuards-unsafe-new-model.cfg","expected":"NoPushedUnregisteredModel","kind":"invariant"},
+    {"config":"RecurrenceGuards-unsafe-merge-tests.cfg","expected":"NoPushWithoutCurrentImplementationTests","kind":"invariant"},
+    {"config":"RecurrenceGuards-unsafe-remove-contract.cfg","expected":"NoConfigChangeAfterLock","kind":"invariant"},
+    {"config":"RecurrenceGuards-unsafe-refresh-proof.cfg","expected":"NoConfigChangeAfterLock","kind":"invariant"},
+    {"config":"RecurrenceGuards-unsafe-cap-edit.cfg","expected":"NoConfigChangeAfterLock","kind":"invariant"}
+  ],
+  "docs/design/fleet-delivery/FleetDelivery.tla": [
+    {"config":"FleetDelivery-unsafe-ready.cfg","expected":"ReadinessBeforeHandoff","kind":"invariant"},
+    {"config":"FleetDelivery-unsafe-receipt.cfg","expected":"ReceiptBeforeSuccess","kind":"invariant"},
+    {"config":"FleetDelivery-unsafe-replay.cfg","expected":"NeverReplay","kind":"invariant"},
+    {"config":"FleetDelivery-unsafe-turn.cfg","expected":"ExactTurn","kind":"invariant"},
+    {"config":"FleetDelivery-unsafe-busy.cfg","expected":"ExplicitBusyChoice","kind":"invariant"},
+    {"config":"FleetDelivery-unsafe-snapshot.cfg","expected":"ConcurrentEntriesRetained","kind":"invariant"}
+  ],
+  "docs/design/workflow-runner/ProbeInventoryDecision.tla": [
+    {"config":"ProbeInventoryDecision-unsafe-drop.cfg","expected":"InventoryGreenOnlyIfAllChecked","kind":"invariant"},
+    {"config":"ProbeInventoryDecision-unsafe-green.cfg","expected":"InventoryGreenOnlyIfAllChecked","kind":"invariant"},
+    {"config":"ProbeInventoryDecision-unsafe-positives.cfg","expected":"NoUncheckedSentinel","kind":"invariant"},
+    {"config":"ProbeInventoryDecision-unsafe-safety.cfg","expected":"NoWeakenedSafetyControl","kind":"invariant"},
+    {"config":"ProbeInventoryDecision-unsafe-sentinel.cfg","expected":"NoUncheckedSentinel","kind":"invariant"}
+  ],
+  "docs/design/verify/ParallelScheduler.tla": [
+    {"config":"ParallelScheduler-unsafe-overlap.cfg","expected":"NoOverlapRunning","kind":"invariant"},
+    {"config":"ParallelScheduler-unsafe-deps.cfg","expected":"DepsMergedBeforeStart","kind":"invariant"},
+    {"config":"ParallelScheduler-unsafe-unique.cfg","expected":"LeaseUnique","kind":"invariant"},
+    {"config":"ParallelScheduler-unsafe-leak.cfg","expected":"NoLeakedLease","kind":"invariant"},
+    {"config":"ParallelScheduler-unsafe-abandon-leak.cfg","expected":"NoLeakedLease","kind":"invariant"},
+    {"config":"ParallelScheduler-unsafe-cap.cfg","expected":"SlotCap","kind":"invariant"},
+    {"config":"ParallelScheduler-unsafe-starve.cfg","expected":"NoStarvation","kind":"property"}
+  ],
+  "docs/design/workflow-runner/RebaselineChoice.tla": [
+    {"config":"RebaselineChoice-unsafe-count.cfg","expected":"FailFirstProven","kind":"invariant"},
+    {"config":"RebaselineChoice-unsafe-lock.cfg","expected":"NoLockRewrittenOrDeleted","kind":"invariant"},
+    {"config":"RebaselineChoice-unsafe-history.cfg","expected":"NoPushedHistoryRewritten","kind":"invariant"},
+    {"config":"RebaselineChoice-unsafe-config.cfg","expected":"ConfigBeforeLock","kind":"invariant"},
+    {"config":"RebaselineChoice-unsafe-wait.cfg","expected":"Progress","kind":"invariant"}
+  ],
+  "docs/design/workflow-runner/HarnessChoice.tla": [
+    {"config":"HarnessChoice-unsafe-bypass.cfg","expected":"ScopedSpawn","kind":"invariant"},
+    {"config":"HarnessChoice-unsafe-type.cfg","expected":"TypeOK","kind":"invariant"}
+  ],
+  "docs/design/test-gate-freshness/BaseFreshness.tla": [
+    {"config":"BaseFreshness-unsafe-lock.cfg","expected":"NoLockOnStaleBase","kind":"invariant"},
+    {"config":"BaseFreshness-unsafe-override.cfg","expected":"NoLockOnStaleBase","kind":"invariant"},
+    {"config":"BaseFreshness-unsafe-review.cfg","expected":"NoReviewOnStaleHead","kind":"invariant"},
+    {"config":"BaseFreshness-unsafe-missing.cfg","expected":"StaleNeverClassifiedAsMissingTest","kind":"invariant"},
+    {"config":"BaseFreshness-unsafe-lease.cfg","expected":"LeaseRecorded","kind":"invariant"}
+  ],
+  "docs/design/test-gate-freshness/ConfigurationTransition.tla": [
+    {"config":"ConfigurationTransition-unsafe.cfg","expected":"LockCoversCheckedConfiguration","kind":"invariant"},
+    {"config":"ConfigurationTransition-unsafe-evidence.cfg","expected":"OriginalEvidencePreserved","kind":"invariant"}
+  ],
+  "docs/design/test-gate-freshness/ObservabilityBase.tla": [
+    {"config":"ObservabilityBase-unsafe-cached.cfg","expected":"GateUsesVerifiedBase","kind":"invariant"},
+    {"config":"ObservabilityBase-unsafe-image.cfg","expected":"GateUsesVerifiedBase","kind":"invariant"},
+    {"config":"ObservabilityBase-unsafe-stalehead.cfg","expected":"NoLockOnStaleBase","kind":"invariant"}
+  ],
+  "docs/design/review-preflight/LeaseBaseline.tla": [
+    {"config":"LeaseBaseline-unsafe.cfg","expected":"LockCoversCheckedConfiguration","kind":"invariant"}
+  ],
+  "docs/design/review-preflight/ReviewPreflight.tla": [
+    {"config":"ReviewPreflight-unsafe-required.cfg","expected":"RequiredChecker","kind":"invariant"},
+    {"config":"ReviewPreflight-unsafe-native.cfg","expected":"NativeGateOnly","kind":"invariant"},
+    {"config":"ReviewPreflight-unsafe-tokens.cfg","expected":"FrozenTokensRemain","kind":"invariant"}
+  ],
+  "docs/design/workflow-runner/Gap7SpecGate.tla": [
+    {"config":"Gap7SpecGate-unsafe-gate.cfg","expected":"NoDispatchWithoutCheckedSpec","kind":"invariant"},
+    {"config":"Gap7SpecGate-unsafe-complete.cfg","expected":"NoDispatchOnUnprovenSpec","kind":"invariant"},
+    {"config":"Gap7SpecGate-unsafe-digest.cfg","expected":"NoStaleSpecDispatch","kind":"invariant"},
+    {"config":"Gap7SpecGate-unsafe-derive.cfg","expected":"DispatchUsesCheckedStack","kind":"invariant"},
+    {"config":"Gap7SpecGate-unsafe-confirm.cfg","expected":"NoDispatchWithoutConfirmedChart","kind":"invariant"},
+    {"config":"Gap7SpecGate-unsafe-chart.cfg","expected":"NoStaleChartDispatch","kind":"invariant"},
+    {"config":"Gap7SpecGate-unsafe-early.cfg","expected":"NoDispatchWithoutEarlyChecks","kind":"invariant"}
+  ],
+  "docs/design/ci-speed/WorkerReuse.tla": [
+    {"config":"WorkerReuse-unsafe-reset.cfg","expected":"FreshNamespace","kind":"invariant"},
+    {"config":"WorkerReuse-unsafe-attribution.cfg","expected":"Attribution","kind":"invariant"},
+    {"config":"WorkerReuse-unsafe-active.cfg","expected":"QuiescentPublication","kind":"invariant"},
+    {"config":"WorkerReuse-unsafe-partial.cfg","expected":"CompleteProof","kind":"invariant"}
+  ],
+  "docs/design/workflow-runner/Gap8BaselineDecision.tla": [
+    {
+      "config": "Gap8BaselineDecision-probe-green.cfg",
+      "expected": "NeverGreen",
+      "kind": "reachability"
+    },
+    {
+      "config": "Gap8BaselineDecision-probe-reject.cfg",
+      "expected": "NeverRejectedCrash",
+      "kind": "reachability"
+    },
+    {
+      "config": "Gap8BaselineDecision-unsafe-A.cfg",
+      "expected": "LockOnlyBehavioralRed",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8BaselineDecision-unsafe-AplusB.cfg",
+      "expected": "LockOnlyBehavioralRed",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8BaselineDecision-unsafe-classifier.cfg",
+      "expected": "LockOnlyBehavioralRed",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8BaselineDecision-unsafe-green.cfg",
+      "expected": "GreenRequiresBehavioralRed",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8BaselineDecision-unsafe-hold.cfg",
+      "expected": "HoldNeverLocks",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8BaselineDecision-unsafe-type.cfg",
+      "expected": "TypeOK",
+      "kind": "invariant"
+    }
+  ],
+  "docs/design/workflow-runner/Gap8ExitGate.tla": [
+    {
+      "config": "Gap8ExitGate-unsafe-bind.cfg",
+      "expected": "FreshEvidenceOnly",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8ExitGate-unsafe-coverage.cfg",
+      "expected": "EveryInvariantTested",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8ExitGate-unsafe-empty.cfg",
+      "expected": "NoVacuousDone",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8ExitGate-unsafe-exit.cfg",
+      "expected": "ChecksPassedBeforeDone",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8ExitGate-unsafe-gaps.cfg",
+      "expected": "NoDoneWithGaps",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8ExitGate-unsafe-termination.cfg",
+      "expected": "Termination",
+      "kind": "property"
+    },
+    {
+      "config": "Gap8ExitGate-unsafe-type.cfg",
+      "expected": "TypeOK",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8ExitGate-unsafe-zero.cfg",
+      "expected": "NoZeroTestDone",
+      "kind": "invariant"
+    }
+  ],
+  "docs/design/workflow-runner/Gap8LinuxAdapter.tla": [
+    {
+      "config": "Gap8LinuxAdapter-probe-pass.cfg",
+      "expected": "NeverGuestPass",
+      "kind": "reachability"
+    },
+    {
+      "config": "Gap8LinuxAdapter-probe-unavailable.cfg",
+      "expected": "NeverUnavailable",
+      "kind": "reachability"
+    },
+    {
+      "config": "Gap8LinuxAdapter-unsafe-argv.cfg",
+      "expected": "ArgvFromFrozenChecks",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxAdapter-unsafe-cancel.cfg",
+      "expected": "CancellationNeverPass",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxAdapter-unsafe-checkout.cfg",
+      "expected": "CheckoutIntegrity",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxAdapter-unsafe-native.cfg",
+      "expected": "NativeBoundary",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxAdapter-unsafe-result.cfg",
+      "expected": "ResultOnlyFromGuest",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxAdapter-unsafe-type.cfg",
+      "expected": "TypeOK",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxAdapter-unsafe-unavailable.cfg",
+      "expected": "UnavailableNeverPass",
+      "kind": "invariant"
+    }
+  ],
+  "docs/design/workflow-runner/Gap8LinuxDecision.tla": [
+    {
+      "config": "Gap8LinuxDecision-unsafe-execution.cfg",
+      "expected": "PassRequiresExecution",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxDecision-unsafe-hold.cfg",
+      "expected": "HoldNeverExecutes",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxDecision-unsafe-native.cfg",
+      "expected": "NativeBoundary",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxDecision-unsafe-settles.cfg",
+      "expected": "Settles",
+      "kind": "property"
+    },
+    {
+      "config": "Gap8LinuxDecision-unsafe-type.cfg",
+      "expected": "TypeOK",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxDecision-unsafe-unavailable.cfg",
+      "expected": "UnavailableNeverPass",
+      "kind": "invariant"
+    }
+  ],
+  "docs/design/workflow-runner/Gap8LinuxUnattended.tla": [
+    {"config":"Gap8LinuxUnattended-unsafe-attended-admission.cfg","expected":"ProbeNeedsValidGrant"},
+    {
+      "config": "Gap8LinuxUnattended-probe-autonomous.cfg",
+      "expected": "NeverAutonomousPass",
+      "kind": "reachability"
+    },
+    {
+      "config": "Gap8LinuxUnattended-probe-revoked.cfg",
+      "expected": "NeverRevokedPark",
+      "kind": "reachability"
+    },
+    {
+      "config": "Gap8LinuxUnattended-unsafe-argv.cfg",
+      "expected": "ArgvFromFrozenChecks",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxUnattended-unsafe-cancel.cfg",
+      "expected": "CancellationNeverPass",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxUnattended-unsafe-checkout.cfg",
+      "expected": "CheckoutIntegrity",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxUnattended-unsafe-killswitch.cfg",
+      "expected": "NoGuestWithoutArmedKillswitch",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxUnattended-unsafe-native-preauth.cfg",
+      "expected": "NativeBoundary",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxUnattended-unsafe-native.cfg",
+      "expected": "NativeBoundary",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxUnattended-unsafe-preauth.cfg",
+      "expected": "UnattendedNeedsValidPreauth",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxUnattended-unsafe-result.cfg",
+      "expected": "ResultOnlyFromGuest",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxUnattended-unsafe-retry.cfg",
+      "expected": "NoSilentTripRetry",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxUnattended-unsafe-revocation.cfg",
+      "expected": "RevokedPreauthBlocksNextRun",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxUnattended-unsafe-trip.cfg",
+      "expected": "KillswitchTripNeverPass",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxUnattended-unsafe-type.cfg",
+      "expected": "TypeOK",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8LinuxUnattended-unsafe-unavailable.cfg",
+      "expected": "UnavailableNeverPass",
+      "kind": "invariant"
+    }
+  ],
+  "docs/design/workflow-runner/Gap8OutputContract.tla": [
+    {
+      "config": "Gap8OutputContract-probe-repair.cfg",
+      "expected": "NeverRepairedWorker",
+      "kind": "reachability"
+    },
+    {
+      "config": "Gap8OutputContract-unsafe-check.cfg",
+      "expected": "ChecksOnRecordedBytes",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8OutputContract-unsafe-digest.cfg",
+      "expected": "RecordedActualBytes",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8OutputContract-unsafe-fresh.cfg",
+      "expected": "NoTOCTOU",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8OutputContract-unsafe-legacy.cfg",
+      "expected": "LegacyUnchanged",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8OutputContract-unsafe-scope.cfg",
+      "expected": "FrozenPathsOnly",
+      "kind": "invariant"
+    }
+  ],
+  "docs/design/workflow-runner/Gap8SSHChecks.tla": [
+    {
+      "config": "Gap8SSHChecks-probe-pass.cfg",
+      "expected": "NeverPass",
+      "kind": "reachability"
+    },
+    {
+      "config": "Gap8SSHChecks-unsafe-armed.cfg",
+      "expected": "NoGuestWithoutArmedKillswitch",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8SSHChecks-unsafe-destroy.cfg",
+      "expected": "DestroyedBeforePass",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8SSHChecks-unsafe-drop.cfg",
+      "expected": "DisconnectNeverPass",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8SSHChecks-unsafe-image.cfg",
+      "expected": "PinnedBeforeBoot",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8SSHChecks-unsafe-log.cfg",
+      "expected": "LogIntegrity",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8SSHChecks-unsafe-origin.cfg",
+      "expected": "OnlyGuestResults",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8SSHChecks-unsafe-trip.cfg",
+      "expected": "TripNeverPass",
+      "kind": "invariant"
+    },
+    {
+      "config": "Gap8SSHChecks-unsafe-watchdog.cfg",
+      "expected": "WatchdogNeverPass",
+      "kind": "invariant"
+    }
+  ],
+  "skills/decision-gate/DecisionGate.tla": [
+    {"config":"DecisionGate-unsafe-owner.cfg","expected":"OwnerBoundary","kind":"invariant"},
+    {"config":"DecisionGate-unsafe-record.cfg","expected":"RecordedBeforeProceed","kind":"invariant"},
+    {"config":"DecisionGate-unsafe-enforce.cfg","expected":"EnforcedBeforeProceed","kind":"invariant"}
+  ]
+}

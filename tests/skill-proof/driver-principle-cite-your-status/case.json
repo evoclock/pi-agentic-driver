@@ -1,0 +1,1 @@
+{"prompt":"Work log: tests/test_alpha.mjs:19 passed in this run. Someone also claims a deployment happened, but there is no deployment log. Return two short status lines.","mustInclude":["tests/test_alpha\\.mjs:19","(?i)verified:|unverified:","(?i)deploy"]}

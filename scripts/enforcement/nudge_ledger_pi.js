@@ -26,6 +26,17 @@ export const NUDGE_AUTHORITY_KINDS = Object.freeze([
 export const NUDGE_DELIVERY_STATES = Object.freeze([
   "delivered", "rejected-before-delivery", "unknown",
 ]);
+// Historical entries can omit deliveryState; validation keeps them readable.
+// New terminal writes require the state for the three transport outcomes.
+const NUDGE_RESULT_DELIVERY = Object.freeze({
+  requested: null,
+  delivered: "delivered",
+  rejected: "rejected-before-delivery",
+  unknown: "unknown",
+  failed: NUDGE_DELIVERY_STATES,
+  parked: NUDGE_DELIVERY_STATES,
+});
+const REPLACEMENT_RESULTS = Object.freeze(["requested", "spawned", "failed", "parked"]);
 
 // Ledger-local canonical JSON (NUDGE §6.2): sort object keys at every depth,
 // retain array order and exact string code points, and preserve explicit null.
@@ -137,6 +148,9 @@ export function validateLedgerEntry(entry) {
     errors.push(`entry.result: must be one of ${NUDGE_LEDGER_RESULTS.join(", ")}`);
   }
   if (entry.action === "replacement") {
+    if (!REPLACEMENT_RESULTS.includes(entry.result)) {
+      errors.push(`entry.result: replacement must be one of ${REPLACEMENT_RESULTS.join(", ")}`);
+    }
     if (typeof entry.replacementRole !== "string" || entry.replacementRole === "") {
       errors.push("entry.replacementRole: REQUIRED for a replacement entry");
     }
@@ -144,9 +158,15 @@ export function validateLedgerEntry(entry) {
       if (entry[key] !== undefined) errors.push(`entry.${key}: nudge-only field on a replacement entry`);
     }
   } else if (entry.action === "nudge") {
+    const expected = NUDGE_RESULT_DELIVERY[entry.result];
     if (entry.deliveryState !== undefined && !NUDGE_DELIVERY_STATES.includes(entry.deliveryState)) {
       errors.push(`entry.deliveryState: must be one of ${NUDGE_DELIVERY_STATES.join(", ")}`);
+    } else if (entry.result === "requested" && entry.deliveryState !== undefined) {
+      errors.push("entry.deliveryState: requested cannot have a delivery state");
+    } else if (entry.deliveryState !== undefined && typeof expected === "string" && entry.deliveryState !== expected) {
+      errors.push(`entry.deliveryState: ${entry.result} requires ${expected}`);
     }
+    if (entry.result === "spawned") errors.push("entry.result: spawned is replacement-only");
   }
   if (typeof entry.messageText !== "string" || entry.messageText === "") {
     errors.push("entry.messageText: REQUIRED for every ledger action (exact bounded sent text)");
@@ -393,6 +413,9 @@ export function appendTerminalResult(ledger, entryId, terminal) {
       { code: "pre-entry-required" },
     );
   }
+  if (requested.result !== "requested") {
+    throw Object.assign(new Error(`ledger entry ${entryId} is already terminal`), { code: "already-terminal" });
+  }
   const terminalKeys = [
     "result", "deliveryState", "herdrCode", "postGit", "spawnReceiptDigest", "reportMarkers",
   ];
@@ -411,6 +434,10 @@ export function appendTerminalResult(ledger, entryId, terminal) {
   }
   if (terminal.result === "requested") {
     throw Object.assign(new Error("terminal result cannot be requested"), { code: "invalid-input" });
+  }
+  if (requested.action === "nudge" && typeof NUDGE_RESULT_DELIVERY[terminal.result] === "string"
+    && terminal.deliveryState === undefined) {
+    throw Object.assign(new Error(`deliveryState required for ${terminal.result}`), { code: "invalid-ledger-entry" });
   }
   const allowedTerminal = Object.fromEntries(
     terminalKeys.filter((key) => terminal[key] !== undefined).map((key) => [key, terminal[key]]),
@@ -465,13 +492,11 @@ export function serializeLedgerSection(ledger, { maxBytes } = {}) {
 export function selectRevertAnchor(ledger, {
   repository = null, branch = null, head = null, statusDigest = null, diffDigest = null,
 } = {}) {
-  // "Accepted" entries: terminal, non-failed outcomes. requested-only
-  // entries (interrupted actions) and failed/parked outcomes are never
-  // anchors — the last accepted state is the recovery boundary.
+  // Only a confirmed delivery or a spawned replacement is an accepted
+  // recovery boundary; rejection and uncertainty are not evidence of one.
   const accepted = ledger.filter((entry) =>
-    entry.result !== "requested"
-    && entry.result !== "failed"
-    && entry.result !== "parked");
+    (entry.action === "nudge" && entry.result === "delivered")
+    || (entry.action === "replacement" && entry.result === "spawned"));
   if (accepted.length === 0) {
     return { ok: false, code: "no-accepted-entry", reason: "no accepted ledger entry exists to anchor a revert" };
   }

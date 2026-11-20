@@ -1,0 +1,19 @@
+{
+  "schema": "review-preflight.native-mutation-observation.v1",
+  "date": "2026-11-17",
+  "scope": "Sanitized summary of native host observations; original evidence remains unchanged in its verification checkout",
+  "base": "343bf68f8d5e5f3717984e0c3e986e843a2d40f8",
+  "nativeBaseline": "pass",
+  "nativeCheck": "pass",
+  "totalContracts": 105,
+  "newControls": [
+    {"id":"review-contracts-before-baseline","exit":1,"tests":1,"failures":1,"errors":0},
+    {"id":"review-terms-required","exit":1,"tests":2,"failures":1,"errors":0},
+    {"id":"review-model-coverage-required","exit":1,"tests":5,"failures":3,"errors":0},
+    {"id":"review-preflight-main-ancestry","exit":1,"tests":2,"failures":1,"errors":0},
+    {"id":"review-tlc-required-tools","exit":1,"tests":2,"failures":1,"errors":0},
+    {"id":"review-native-token-adapter","exit":1,"tests":1,"failures":1,"errors":0}
+  ],
+  "localFullGate": "Only janus-types and janus-tests failed because local Janus tools were unavailable; hash-allowances and no-hidden-installs passed",
+  "registrationRoute": "Reviewed append-only additions, skills/test-gate/SKILL.md workflow step 3; focused-contract readiness before baseline"
+}

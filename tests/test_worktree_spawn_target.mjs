@@ -18,7 +18,7 @@ import { statSync } from "node:fs";
 import os, { tmpdir } from "node:os";
 import { join } from "node:path";
 import childProcess, { execFileSync } from "node:child_process";
-import { syncBuiltinESMExports } from "node:module";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import {
   executeHerdrSpawnWorker,
   registerHerdrLifecycleInterface,
@@ -153,12 +153,22 @@ function gitRepo(dir) {
 }
 
 function makeWorktree(repo, path, branch = "lease-slot") {
-  git(repo, ["worktree", "add", "-q", "-b", branch, path]);
+  const fixture = worktreeFixtures.find((item) => repo.startsWith(item.root + "/"));
+  assert.ok(fixture, "worktree repository must belong to a fixture");
+  fixture.addWorktree(repo, path, ["-q", "-b", branch]);
   return path;
 }
 
+const worktreeFixtures = [];
+test.after(() => { for (const fixture of worktreeFixtures) fixture.cleanup(); });
+
 function fixture(options = {}) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "worktree-spawn-")));
+  let helper;
+  try { helper = createRequire(import.meta.url)("../scripts/pad_test_treehouse.js"); } catch {}
+  assert.ok(helper, "Treehouse fixture helper is required");
+  const treehouseFixture = helper.createTestTreehouse();
+  worktreeFixtures.push(treehouseFixture);
+  const root = treehouseFixture.root;
   const coordinator = gitRepo(join(root, "coordinator"));
   const workerRoot = gitRepo(join(root, options.workerDirectory ?? WORKER_REPO));
   git(workerRoot, ["remote", "add", "origin", `git@github.com:evoclock/${WORKER_REPO}.git`]);
@@ -208,6 +218,7 @@ function fixture(options = {}) {
   process.env.FAKE_HERDR_WORKER_ROOT = workerRoot;
 
   const herdrOptions = {
+    asgrep: options.asgrep ?? false,
     testExecutablePath: fake,
     listModels: MODEL_ROLL,
     modelsPath: join(root, "absent-models.json"),
@@ -954,7 +965,7 @@ test("ST-01/SPEC-03: the mandatory primary-clone common-dir probe is bounded", (
 import { spawnSync } from "node:child_process";
 const args = process.argv.slice(2);
 if (args.slice(-2).join(" ") === "rev-parse --git-common-dir") {
-  setTimeout(() => process.stdout.write(".git\\n"), 11000);
+  setTimeout(() => process.stdout.write(".git\\n"), 60000);
 } else {
   const result = spawnSync(${JSON.stringify(realGit)}, args, { encoding: "utf8", env: process.env });
   process.stdout.write(result.stdout ?? "");
@@ -964,17 +975,29 @@ if (args.slice(-2).join(" ") === "rev-parse --git-common-dir") {
 `);
   chmodSync(fakeGit, 0o755);
   const before = process.env.PATH;
+  const original = childProcess.spawnSync;
+  let commonDirProbe;
   process.env.PATH = `${f.root}:${before}`;
   try {
-    const started = Date.now();
+    childProcess.spawnSync = (command, args, options) => {
+      const result = original(command, args, options);
+      if (command === "git" && args.includes("--git-common-dir")) {
+        commonDirProbe = { timeout: options.timeout, error: result.error?.code };
+      }
+      return result;
+    };
+    syncBuiltinESMExports();
     let failure;
     try { resolveTrustedSpawnRepository(f.coordinator, WORKER_REPO); }
     catch (error) { failure = error; }
-    assert.ok(Date.now() - started < 10_750, "the primary-clone probe respects its ten-second bound");
+    assert.equal(commonDirProbe?.timeout, 10_000, "the common-dir probe uses the ten-second timeout");
+    assert.equal(commonDirProbe?.error, "ETIMEDOUT", "the stalled common-dir probe times out");
     assert.equal(failure?.code, "repository_not_git_root", "a timed-out Git observation must refuse");
     assert.equal(failure?.status, "denied");
     assert.deepEqual(readLog(f.log), [], "the resolver never invokes Herdr");
   } finally {
+    childProcess.spawnSync = original;
+    syncBuiltinESMExports();
     process.env.PATH = before;
     cleanup(f.root);
   }

@@ -12,6 +12,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/session_handover.py'
 
 class HandoverTest(unittest.TestCase):
     def test_write_validate_and_consume_once(self):
+        """Why: a synthetic Git identity must bind offline handover checks without owner fixtures."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / 'source.txt').write_text('evidence\n')
@@ -60,7 +61,7 @@ class HandoverTest(unittest.TestCase):
                 self.assertEqual(run('validate', str(handover)).returncode == 0, valid)
             handover.write_text(json.dumps(original))
             subprocess.run(['git', '-C', str(root), 'init', '-q'], check=True)
-            subprocess.run(['git', '-C', str(root), '-c', 'user.name=Julen', '-c', 'user.email=julen@example.invalid',
+            subprocess.run(['git', '-C', str(root), '-c', 'user.name=Example Owner', '-c', 'user.email=owner@example.invalid',
                             'commit', '-q', '--allow-empty', '-m', 'Fixture'], check=True)
             commit = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
             checked = root / 'CHECKED.json'
@@ -89,6 +90,13 @@ class HandoverTest(unittest.TestCase):
             data['sections']['next_step'][0]['pointer'] = 'source.txt:2'
             handover.write_text(json.dumps(data))
             self.assertNotEqual(run('validate', str(handover)).returncode, 0)
+
+    def test_tracked_generic_owner_scan_passes(self):
+        """Why: synthetic handover Git identity must not leave owner identifiers in tracked sources."""
+        scanner = SCRIPT.parent / 'generic_owner_scan.mjs'
+        self.assertTrue(scanner.is_file(), 'tracked generic-owner scan is required')
+        result = subprocess.run(['node', str(scanner)], cwd=SCRIPT.parent.parent, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == '__main__':

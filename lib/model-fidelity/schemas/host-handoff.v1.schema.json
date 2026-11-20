@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "model-fidelity.host-handoff.v1",
+  "description": "Transport-neutral records for caller-owned steps. References bind to v1 PAD requests/results and caller-step records; a host must verify artifacts and provenance itself.",
+  "oneOf": [
+    { "$ref": "#/$defs/toHost" },
+    { "$ref": "#/$defs/fromHost" }
+  ],
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$" },
+    "toHost": {
+      "type": "object",
+      "required": ["schema", "unitId", "attemptId", "stepId", "kind", "requestId", "bundleId", "authorityCreated", "resultId", "action", "artifactIds"],
+      "properties": {
+        "schema": { "const": "model-fidelity.to-host.v1" },
+        "unitId": { "$ref": "#/$defs/id" },
+        "attemptId": { "$ref": "#/$defs/id" },
+        "stepId": { "$ref": "#/$defs/id" },
+        "kind": { "enum": ["review", "runtime", "rollback", "red-line-stop"] },
+        "requestId": { "$ref": "#/$defs/id" },
+        "bundleId": { "$ref": "#/$defs/id" },
+        "resultId": { "$ref": "#/$defs/id" },
+        "action": { "type": "string", "minLength": 1 },
+        "artifactIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "findingIds": { "type": "array", "items": { "$ref": "#/$defs/id" }, "uniqueItems": true },
+        "authorityCreated": { "const": false }
+      },
+      "additionalProperties": false
+    },
+    "fromHost": {
+      "type": "object",
+      "required": ["schema", "unitId", "attemptId", "stepId", "kind", "requestId", "bundleId", "status", "callerStep", "authorityCreated"],
+      "properties": {
+        "schema": { "const": "model-fidelity.from-host.v1" },
+        "unitId": { "$ref": "#/$defs/id" },
+        "attemptId": { "$ref": "#/$defs/id" },
+        "stepId": { "$ref": "#/$defs/id" },
+        "kind": { "enum": ["review", "runtime", "rollback", "red-line-stop"] },
+        "requestId": { "$ref": "#/$defs/id" },
+        "bundleId": { "$ref": "#/$defs/id" },
+        "status": { "enum": ["recorded", "not-run", "unknown", "interrupted"] },
+        "callerStep": { "type": ["object", "null"], "description": "Recorded: model-fidelity.caller-step.v1, validated with T01 validateRecord('caller-step', value). Otherwise null; preserve the reason." },
+        "artifactIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "reason": { "type": "string", "minLength": 1 },
+        "authorityCreated": { "const": false }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        { "if": { "properties": { "status": { "const": "recorded" } } }, "then": { "properties": { "callerStep": { "type": "object" } } } },
+        { "if": { "properties": { "status": { "enum": ["not-run", "unknown", "interrupted"] } } }, "then": { "required": ["reason"], "properties": { "callerStep": { "type": "null" } } } }
+      ]
+    }
+  }
+}

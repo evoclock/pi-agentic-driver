@@ -33,7 +33,7 @@
     },
     {
       "reason": "local path leaks a user or machine",
-      "pattern": "(?:/[U]sers/|/[h]ome/)[\\w.-]+"
+      "pattern": "(?:/\\u0055sers/|/[h]ome/)[\\w.-]+"
     },
     {
       "reason": "em or en dash (unslop rule 13)",

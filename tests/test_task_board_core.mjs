@@ -18,7 +18,7 @@ import {
   canonicalJsonString, computeCardHash, computeSpecHash,
   parseBoard, validateCard, validateBoard, substituteImportedId,
   serializeObsidianCard, serializeTasksCard, serializeBoard,
-  allocateCardId, recordAuthoritySource, writeCard, isValidAuthoritySource,
+  allocateCardId, recordAuthoritySource, writeCard, updateCard, readClaimsState, isValidAuthoritySource,
   encodeFieldText, decodeFieldText, sanitizeFreeText, declaredBoardPrefix, withWriterLock,
   writerStatePath, writerLockPath, authorityRecordHmac, verifyAuthorityProvenance,
   isDispatchable, selectDispatchableCard, observeBoardProvider, registerKanbanBoardTools,
@@ -76,6 +76,54 @@ test("ready selection excludes unranked and flagged cards and preserves board or
     assert.equal(selectDispatchableCard({ cards: [...cards].reverse(), boardPath, activeClaims: [] }).card.title, "second");
     assert.equal(selectDispatchableCard({ cards, boardPath, activeClaims: [{ cardId: cards.find((c) => c.title === "first").cardId }] }).card.title, "second");
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// Why: A lane drag must not complete a card or unblock a dependent without a completion event.
+test("dragging a prerequisite to done requires completion", () => {
+  const dir = mkdtempSync(join(tmpdir(), "card-status-"));
+  const boardPath = join(dir, "TASKS.md");
+  const authority = { source: "instruction", sessionOrReportId: "test", quotedInstruction: "manage cards" };
+  const input = { title: "A", priority: "P1", spec: "spec", definitionOfDone: "done", stoppingPoint: "review", scope: ["src/"] };
+  try {
+    const a = writeCard({ boardPath, input, authority, registries });
+    const b = writeCard({ boardPath, input: { ...input, title: "B", dependencies: [a.cardId] }, authority, registries });
+    assert.equal(a.ok && b.ok, true);
+    const drag = updateCard({ boardPath, cardId: a.cardId, changes: { lane: "done" }, authority, registries });
+    assert.equal(drag.ok, false, "a lane-only drag must not complete A");
+    const cards = parseBoard(readFileSync(boardPath, "utf8")).cards;
+    assert.equal(isDispatchable(cards[1], boardIndex(cards)).dispatchable, false);
+    assert.equal(readClaimsState(boardPath).state.events.some((event) => event.action === "complete"), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// Why: Completion, reopening, and cancellation must have one status across the writer, disk, and projection.
+test("card status drives completion, reopening, and cancellation views", () => {
+  const dir = mkdtempSync(join(tmpdir(), "card-status-"));
+  const boardPath = join(dir, "TASKS.md");
+  const authority = { source: "instruction", sessionOrReportId: "test", quotedInstruction: "manage cards" };
+  try {
+    const created = writeCard({ boardPath, input: { title: "A", priority: "P1", spec: "spec", definitionOfDone: "done", stoppingPoint: "review", scope: ["src/"] }, authority, registries });
+    assert.equal(created.card.status, "backlog");
+    const complete = updateCard({ boardPath, cardId: created.cardId, changes: { done: true }, authority, registries });
+    assert.equal(complete.card.status, "done");
+    assert.equal(parseBoard(readFileSync(boardPath, "utf8")).cards[0].status, "done");
+    const reopened = updateCard({ boardPath, cardId: created.cardId, changes: { done: false }, authority, registries });
+    assert.equal(reopened.card.status, "backlog");
+    assert.equal(parseBoard(readFileSync(boardPath, "utf8")).cards[0].lane, "backlog");
+    const cancelled = updateCard({ boardPath, cardId: created.cardId, changes: { flags: { add: ["cancelled"] } }, authority, registries });
+    assert.equal(cancelled.card.status, "cancelled");
+    assert.equal(cancelled.card.done, false);
+    assert.equal(parseBoard(readFileSync(boardPath, "utf8")).cards[0].status, "cancelled");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// Why: Legacy mismatched headings and ticks must load without granting completion from a lane alone.
+test("legacy lane-only done remains incomplete on read", () => {
+  const card = baseCard({ lane: "done", done: false });
+  const parsed = parseBoard(serializeBoard([card], { surface: "tasks" }));
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.cards[0].status, "review");
+  assert.equal(parsed.cards[0].done, false);
 });
 
 // --- §1: closed vocabularies and identity ----------------------------------

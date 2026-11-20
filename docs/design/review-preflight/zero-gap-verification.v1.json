@@ -1,0 +1,21 @@
+{
+  "schema": "review-preflight.zero-gap-observation.v1",
+  "date": "2026-11-17",
+  "base": "98009d04a40d91413392d38f9b64d413cffad218",
+  "nativeBaseline": "pass",
+  "nativeCheck": "pass",
+  "totalContracts": 108,
+  "localFullGate": "pass",
+  "janusTypes": "pass",
+  "janusTests": "pass",
+  "hashAllowances": "pass",
+  "noHiddenInstalls": "pass",
+  "missingToolExceptions": [],
+  "dependencyInstall": "Socket Firewall npm ci with ignore-scripts, no-audit and no-fund; root and Janus; no manifest or lockfile changes in this delta",
+  "newControls": [
+    {"id":"review-local-gate-tools-required","exit":1,"tests":2,"failures":2,"errors":0},
+    {"id":"review-property-control-identity","exit":1,"tests":2,"failures":1,"errors":0},
+    {"id":"review-primary-tlc-error-preserved","exit":1,"tests":2,"failures":1,"errors":0}
+  ],
+  "scope": "Sanitized observations; native evidence retained unchanged in its verification checkout"
+}

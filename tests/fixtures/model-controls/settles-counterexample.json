@@ -1,0 +1,4 @@
+{
+  "status": 13,
+  "stdout": "Error: Temporal properties were violated.\n\nError: The following behavior constitutes a counter-example:\n\nState 1: <Initial predicate>\n/\\ reviewed = FALSE\n/\\ passed = FALSE\n/\\ executed = FALSE\n/\\ phase = \"requested\"\n/\\ confirmed = FALSE\n/\\ unavailable = FALSE\n\nState 2: <OwnerReview line 19, col 16 to line 21, col 72 of module Gap8LinuxDecision>\n/\\ reviewed = TRUE\n/\\ passed = FALSE\n/\\ executed = FALSE\n/\\ phase = \"adapter-reviewed\"\n/\\ confirmed = FALSE\n/\\ unavailable = FALSE\n\nState 3: <Confirm line 22, col 12 to line 24, col 67 of module Gap8LinuxDecision>\n/\\ reviewed = TRUE\n/\\ passed = FALSE\n/\\ executed = FALSE\n/\\ phase = \"confirmed\"\n/\\ confirmed = TRUE\n/\\ unavailable = FALSE\n\nState 4: Stuttering\n"
+}

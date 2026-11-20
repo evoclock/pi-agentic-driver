@@ -1,0 +1,14 @@
+{
+  "schema": "model-fidelity.synthetic-fixture.v1",
+  "reviewStatus": "expected-unreviewed",
+  "scoringEligible": false,
+  "origin": "Synthetic reconstruction, not an incident transcript or database runtime reproduction.",
+  "safetyRule": "Cleared same-generation work may finish after disconnect or death. Old clearance must not affect a replacement generation.",
+  "cases": [
+    {"config":"unsafe.cfg","actionId":"ApplyEffect","mechanism":"An in-flight effect retains clearance despite disconnected capability storage; no generation check protects the effect.","schedule":["PublishCapability","Disconnect","ReplaceResource","ApplyEffect"],"expectedOutcome":"counterexample: NoStaleEffect"},
+    {"config":"safe.cfg","actionId":"RejectEffect","mechanism":"The effect service compares authoritative generation at the effect point, before delayed row revocation.","schedule":["PublishCapability","Disconnect","ReplaceResource","RejectEffect"],"expectedOutcome":"NoStaleEffect passes, stale effect rejected even while capability remains durable"},
+    {"config":"fictional-cleanup.cfg","actionId":"Disconnect","mechanism":"The flawed abstraction assigns deletion of durable rows to an actor whose connection is lost.","schedule":["PublishCapability","Disconnect"],"expectedOutcome":"counterexample: NoDisconnectedWrite; unsupported disconnected-actor write finding"},
+    {"config":"same-generation-witness.cfg","actionId":"ApplyEffect","mechanism":"Same-generation completion remains permitted after disconnect; this negated reachability query is not a safety failure.","schedule":["PublishCapability","Disconnect","ApplyEffect"],"expectedOutcome":"counterexample: NoPostDisconnectCompletion witnesses allowed completion"},
+    {"config":"revoker-witness.cfg","actionId":"RevokeCapability","mechanism":"A surviving writer detects the lost connection, then independently revokes durable rows. It cannot retract already-cleared in-flight work.","schedule":["PublishCapability","Disconnect","DetectFault","RevokeCapability"],"expectedOutcome":"counterexample: NoRevocation witnesses delayed revocation"}
+  ]
+}

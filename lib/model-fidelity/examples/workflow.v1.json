@@ -1,0 +1,16 @@
+{
+  "schema": "model-fidelity.workflow.v1",
+  "mode": "protocol",
+  "steps": [
+    { "id": "prepare", "owner": "model-fidelity", "operation": "prepare", "input": "model-fidelity.request.v1", "output": "model-fidelity.result.v1", "branches": ["complete", "partial", "error", "interrupted"] },
+    { "id": "build", "owner": "caller", "record": "source revision and dirty overlay", "after": ["prepare"] },
+    { "id": "check", "owner": "model-fidelity", "operation": "check", "after": ["build"], "branches": ["complete", "partial", "error", "interrupted"] },
+    { "id": "review", "owner": "caller", "record": "model-fidelity.caller-step.v1", "kind": "review", "after": ["check"] },
+    { "id": "observe-runtime", "owner": "caller", "record": "model-fidelity.caller-step.v1", "kind": "runtime", "after": ["review"] },
+    { "id": "assess", "owner": "model-fidelity", "operation": "assess", "after": ["review"] },
+    { "id": "evaluate", "owner": "model-fidelity", "operation": "evaluate", "after": ["assess", "observe-runtime"], "branches": ["continue", "stop-red-line", "error", "interrupted"] },
+    { "id": "stop-offending-action", "owner": "caller", "record": "model-fidelity.caller-step.v1", "kind": "red-line-stop", "after": ["evaluate"], "when": "stop-red-line" },
+    { "id": "rollback", "owner": "caller", "record": "model-fidelity.caller-step.v1", "kind": "rollback", "after": ["evaluate"], "when": "wrong change and scoped rollback permitted" },
+    { "id": "deliver", "owner": "caller", "after": ["evaluate", "stop-offending-action", "rollback"], "note": "Report gaps and continue unrelated scoped delivery without interactive steps." }
+  ]
+}

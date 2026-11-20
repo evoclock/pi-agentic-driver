@@ -1,0 +1,40 @@
+{
+  "schema": "model-fidelity.plan.v1",
+  "id": "g8b-linux-guest-original",
+  "goals": [
+    "Deliver receipt-bound Linux guest exit checks using a source-pinned Testudo image and the fixed pad-guest-check-v1 SSH subsystem.",
+    "Preserve native attended consent or scoped standing preauthorization, mandatory containment, and no host fallback for an explicit Linux request.",
+    "Re-evaluate the removed launcher and transport against merged core rather than replaying their historical implementation blindly."
+  ],
+  "currentGenerationRule": "The authenticated workflow claim binds task, step, epoch, writer, dispatch, receipt commit and output/check digests. Native request and backend job IDs are exclusive durable intents. Before launching, re-authenticate the current claim and authorization; the pinned supervisor checks the same bundle/check identity. A prior job ID or unknown effect is not reusable and cannot authorize a replacement generation. Cancellation fences acceptance even if a child finishes late.",
+  "allowedPostDeathCompletion": false,
+  "initialConditions": [
+    "Actors: workflow authority and reducer, native admission adapter, SSH BatchMode transport, unprivileged Linux launcher, Firecracker process, pinned Testudo PID1 and containment monitor, unprivileged check child, and owner installer.",
+    "Each execution session has one authenticated claim, one native request ID and one exclusive backend job directory; resource reassignment requires a new identity, not a cleared prior intent.",
+    "The backend is the owner-selected Linux target from private runtime configuration only. No real guest runs on the development host.",
+    "Required prior to live execution: independently reviewed source-pinned image recipe, artifact manifest with actual kernel/image/initramfs/taxonomy/Firecracker digests, fixed check-ID map, and owner-installed subsystem/runtime.",
+    "Image and initramfs pins are checked before the boot effect. The protected guest channel must report the exact bundle/check identity and armed taxonomy before a result is eligible. Verified teardown precedes pass.",
+    "Testudo main was observed at 92796bc7d487b6c0a8b9128be87653f17898742b during initial discovery. Its current guest protocol is not evidence of an existing PAD check-image builder or compatible release."
+  ],
+  "exclusions": [
+    "No changes to package.json or lockfiles, no secrets or personal target values in tracked files, no owner payload replacement, no raw remote-shell execution lane.",
+    "No edits to a separate Testudo checkout are inferred from this PAD assignment; the image recipe must identify its source dependencies and any required separately reviewed upstream work.",
+    "No live acceptance claim from local fake-VMM, serial-fixture, unit-test, diagram or abstract-model results."
+  ],
+  "failureCases": [
+    "Wrong or missing image/initramfs/taxonomy pins, absent or late armed marker, containment trip with exit126, forged result origin, command substitution, bundle substitution, log digest mismatch.",
+    "Disconnect or watchdog after launch, cancellation before launch or during execution, revoked standing preauthorization between runs or before acceptance, incomplete teardown, duplicate job, unknown prior effect, and a late result for an obsolete claim."
+  ],
+  "progressRequirements": [
+    "Test first; preserve the merged core's authenticated loader, standing authorization and terminal-state fences.",
+    "Run named positive and negative model controls, actual CLI/Pi/reducer conformance, full Node/Python suites and audited native/shared gates without environment skips presented as passes.",
+    "When the reviewed installable runtime is ready, record exact backend installation commands in the private checkpoint and POST for the owner relay; do not perform the owner installation.",
+    "Keep raw evidence and uncertainty visible; deliver a draft PR only."
+  ],
+  "scope": [
+    "PAD guest adapter/transport and fixed backend launcher with test and model correspondence.",
+    "Reproducible source-pinned Testudo image recipe, protected guest serial protocol and immutable artifact-manifest contract.",
+    "Backend-independent verification can proceed while reviewed image/backend prerequisites are unavailable."
+  ],
+  "intendedRollback": "Before live installation, preserve core's unavailable behavior. After an uncertain launch or containment trip, retain job evidence and refuse reuse; owner-held recovery or a normal reviewed revert is required. Do not delete relied-on artifacts or kill unrelated processes."
+}

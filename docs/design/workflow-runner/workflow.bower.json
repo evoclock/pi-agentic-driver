@@ -1,0 +1,28 @@
+{
+  "schema": "bowerbird/v1",
+  "meta": {"title": "Verified skill workflow to DONE", "kind": "architecture", "view": "iso", "statusTracking": false},
+  "nodes": [], "edges": [],
+  "composition": {
+    "groups": [
+      {"id": "design", "title": "Compile and verify", "status": "planned"},
+      {"id": "execute", "title": "Durable execution", "status": "planned"}
+    ],
+    "components": [
+      {"id": "task", "group": "design", "type": "workflow", "title": "Task to DONE", "status": "planned", "purpose": "Compile approved work into a bounded graph"},
+      {"id": "plan", "group": "design", "type": "playbook", "title": "Design workflow", "status": "planned", "purpose": "Pin steps and acceptance with poteto-mode"},
+      {"id": "statechart", "group": "design", "type": "skill", "title": "Check statechart", "status": "built", "purpose": "Check the graph with TLC and preserve output"},
+      {"id": "poteto", "group": "design", "type": "skill", "title": "Plan delivery", "status": "built", "purpose": "Specify each skill step and verification seam"},
+      {"id": "run", "group": "execute", "type": "playbook", "title": "Run workflow", "status": "planned", "purpose": "Advance exactly one move per tick"},
+      {"id": "receipt", "group": "execute", "type": "skill", "title": "Verify receipt", "status": "planned", "purpose": "Match step epoch and commit evidence"},
+      {"id": "recover", "group": "execute", "type": "skill", "title": "Park and resume", "status": "planned", "purpose": "Wake only on verified transition"}
+    ],
+    "edges": [
+      {"from": "task", "to": "plan", "step": 1},
+      {"from": "task", "to": "run", "step": 2},
+      {"from": "plan", "to": "statechart", "step": 1},
+      {"from": "plan", "to": "poteto", "step": 2},
+      {"from": "run", "to": "receipt", "step": 1},
+      {"from": "run", "to": "recover", "step": 2}
+    ]
+  }
+}

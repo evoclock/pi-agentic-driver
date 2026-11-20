@@ -1,0 +1,1 @@
+{"prompt":"Someone proposes cool-lib@* with a postinstall shell script no one has reviewed. Give a short response to that proposal.","mustInclude":["(?i)exact (?:package (?:and )?|package )?(?:version|pin)|lockfile pin|pin the exact package version|version.{0,30}pin(?:ned)?[^\n]*lockfile","(?i)socket firewall|project.s (?:trusted )?install guard|trusted (?:install )?guard"]}

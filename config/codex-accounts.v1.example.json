@@ -1,0 +1,6 @@
+{
+  "schema": "pad.codex-accounts.v1",
+  "accounts": {
+    "acct-a": { "home": "<ACCOUNT_HOME>", "model": "<MODEL_ID>", "daybreak": false }
+  }
+}

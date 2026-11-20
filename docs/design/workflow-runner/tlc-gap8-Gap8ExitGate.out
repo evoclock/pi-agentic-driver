@@ -1,0 +1,30 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 7 and seed 9139687972908645960 with 1 worker on 10 cores with 14564MB heap and 64MB offheap memory [pid: <PROCESS_ID>] (Mac OS X 27.0.1 aarch64, Homebrew 27.0.1.0.3 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file <WORKTREE>/Gap8ExitGate.tla
+Parsing file <WORKTREE>/.tlc-meta-68588/Naturals.tla
+Parsing file <WORKTREE>/.tlc-meta-68588/FiniteSets.tla
+Parsing file <WORKTREE>/.tlc-meta-68588/Sequences.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module Gap8ExitGate
+Starting... (2026-11-16 14:46:08)
+Implied-temporal checking--satisfiability problem has 1 branches.
+Computing initial states...
+Computed 2 initial states...
+Computed 4 initial states...
+Computed 8 initial states...
+Computed 16 initial states...
+Finished computing initial states: 32 distinct states generated at 2026-11-16 14:46:08.
+Progress(21) at 2026-11-16 14:46:09: 5,949 states generated, 2,199 distinct states found, 0 states left on queue.
+Checking temporal properties for the complete state space with 2199 total distinct states at (2026-11-16 14:46:09)
+Finished checking temporal properties in 00s at 2026-11-16 14:46:09
+Model checking completed. No error has been found.
+  Estimates of the probability that TLC did not check all reachable states
+  because two distinct states had the same fingerprint:
+  calculated (optimistic):  val = 4.5E-13
+5949 states generated, 2199 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 21.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 7 and the 95th percentile is 4).
+Finished in 00s at (2026-11-16 14:46:09)
+exit=0

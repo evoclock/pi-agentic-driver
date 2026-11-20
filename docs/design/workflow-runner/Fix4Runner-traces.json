@@ -1,0 +1,59 @@
+{
+  "schema": "pad-workflow-fix4-traces.v1",
+  "model": "Fix4Runner.tla",
+  "source": "TLC unsafe controls under .scratch/workflow-runner/fix4-model/controls-v3; action labels lifted from shortest witness states, not production runtime traces",
+  "witnesses": [
+    {
+      "id": "identity-alias",
+      "unsafe": "IdentityGuard=FALSE",
+      "invariant": "CancelledNeverActs",
+      "actions": ["Cancel", "Claim(v2)", "PrePublish", "Act"],
+      "codeReplay": "cancel then a new task ID with changed artifact digest; refuse before store creation"
+    },
+    {
+      "id": "halt-race",
+      "unsafe": "HaltGuard=FALSE",
+      "invariant": "NoActAfterHalt",
+      "actions": ["Claim", "Cancel", "PrePublish", "Act"],
+      "codeReplay": "pause live tick before publication, cancel it, suppress outward act and journal"
+    },
+    {
+      "id": "old-restore-fork",
+      "unsafe": "WriterGuard=FALSE",
+      "invariant": "NoJournalFork",
+      "actions": ["Claim(1)", "Claim(2)", "PrePublish(1)", "Act(1)", "PrePublish(2)", "Snapshot", "Journal(1)", "Act(2)", "Journal(2)"],
+      "codeReplay": "second claimant cannot pass an in-flight writer; four-contender runtime test checks no fork"
+    },
+    {
+      "id": "lossy-compaction",
+      "unsafe": "FactGuard=FALSE",
+      "invariant": "CompactionExact",
+      "actions": ["Cancel", "Look", "Snapshot", "Compact"],
+      "codeReplay": "after retired-lock compaction preserve signed facts and cancelled state"
+    },
+    {
+      "id": "unbounded-polls",
+      "unsafe": "BoundGuard=FALSE",
+      "invariant": "StoreBound",
+      "actions": ["Cancel", "Look", "Snapshot", "Look", "Look"],
+      "codeReplay": "256 isolated polls keep file names and bytes below checked bounds"
+    }
+  ],
+  "rr5Model": "Fix4RunnerRR5.tla (bounded refinement of generation-name reuse and owner stop at the history cap)",
+  "rr5Witnesses": [
+    {
+      "id": "retired-generation-reuse",
+      "unsafe": "FreshGenerationGuard=FALSE",
+      "invariant": "OneWriterNoFork",
+      "actions": ["Observe", "AdvanceAndCompact", "Link", "Validate", "FreshAct", "StaleAct"],
+      "codeReplay": "a stalled contender re-links retired generation 3 after compaction and competes with a newer generation; post-link scan must withdraw it"
+    },
+    {
+      "id": "owner-stop-at-cap",
+      "unsafe": "OwnerCapGuard=FALSE",
+      "invariant": "OwnerStopAvailable",
+      "actions": ["Poll", "Poll", "OwnerStop"],
+      "codeReplay": "at the abstract history cap, cancel and hold still settle while ordinary polls remain refused"
+    }
+  ]
+}

@@ -1,3 +1,24 @@
+## 3.2.0
+
+- Add a guarded workflow runner with durable claims, bounded dispatch, owner-held recovery, handovers, release transfer, completion limits, and a spec-first gate with pinned design and skill inputs. Reject unavailable worker harnesses and park uncertain effects instead of replaying them.
+- Add receipt-bound exit checks, frozen output paths and observed digests; connect guest checks to a guarded launcher and pinned image. Bound checks and timeouts, and keep unavailable guest verification explicit.
+- Add parallel workflow scheduling and recurrence verification, with evidence checks, conservative review budgets and explicit negative controls. Strengthen model-fidelity records, attempt tracking, crash fixtures, changed-rule detection, classification and review views.
+- Add a decision-gate skill with statechart evidence, enforcing checks and explicit exclusions. Add skill-usage evaluation and prefer secret-store credentials, with validated local configuration and warned fallback.
+- Improve worker lifecycle: guarded tab creation, pane readiness, trusted local integration, queued communication, bounded delivery attribution, stalled-worker detection, scoped abort and close, and one-status reporting. Keep unsupported worker transports and prompting explicitly refused.
+- Export local skills as dry-run-first wrappers with safe apply backups. Make worker code search cancellable with bounded deadlines, optional index prewarming and a resolved CLI.
+- Harden confirmation and approval scope, prompt delivery and finish handling, fleet claims, message attribution, workspace selection, and registration-free spawning. Prevent duplicate tool registration and retain the verified process boundary.
+- Improve test-gate contrast and mutation coverage, multiple contracts, loader and fixture handling, snapshot cleanup, and explicit configuration-only warnings. Add reproducible skill proofs, containment tests and stricter host cleanup checks.
+- Increase CI headroom for container runs, launcher fixtures, cleanup, exit checks and timeout tests; tune concurrency and macOS acceptance. Keep gate integrity and reviewed pipeline pins current.
+- Generalize repository-owner configuration, correct release preparation and tag-from-main checks, and keep public synchronization tests and documentation aligned.
+
+## 3.1.9
+
+- Add the `agent-pr-merge` policy: agents may arm auto-merge for a reviewed head, pinned with `--match-head-commit`.
+- Make every shipped skill complete, with a proof test for each one.
+- Rewrite the README around hosts, tools and skills, with deep dives in `docs/`.
+- Fix broken links and stale wording in shipped skills and docs.
+- Add an on/off toggle and an optional TUI shortcut for generic command confirmations.
+
 ## 3.1.8
 
 - Keep worker delivery attribution and add local task and skill observations.
@@ -13,10 +34,6 @@
 ## 3.1.5
 
 - Let trusted hosts start and contact workers without a caller pane.
-
-## Unreleased
-
-- Add an agent-accessible on/off toggle and optional non-blocking TUI shortcut for generic command confirmations, backed by the same user-profile setting. Disabling clears per-command selections; mandatory safeguards remain separate.
 
 ## 3.1.1
 

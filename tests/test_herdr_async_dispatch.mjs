@@ -25,7 +25,7 @@ function markerPairFor(role) {
 const root = process.cwd();
 const tuiContext = () => ({ mode: "tui", hasUI: true, cwd: root, ui: { confirm: async () => true } });
 
-function herdrFixture({ statuses = {}, reportFor = () => "step report" } = {}) {
+function herdrFixture({ statuses = {}, reportFor = () => "step report", kind = "pi" } = {}) {
   const calls = [];
   let reads = 0;
   let terminalHistory = "history";
@@ -33,10 +33,10 @@ function herdrFixture({ statuses = {}, reportFor = () => "step report" } = {}) {
     const [action, role] = [argv[1], argv[2]];
     calls.push({ action, role, argv: [...argv] });
     if (action === "get") {
-      return { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: role, agent: "pi", status: statuses[role] ?? "idle", repository: root } }) };
+      return { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: role, agent: kind, status: statuses[role] ?? "idle", repository: root } }) };
     }
     if (action === "prompt") {
-      return { code: 0, stdout: JSON.stringify({ type: "agent_prompted", agent: { name: role, agent: "pi", status: "done", repository: root } }) };
+      return { code: 0, stdout: JSON.stringify({ type: "agent_prompted", agent: { name: role, agent: kind, status: "done", repository: root } }) };
     }
     if (action === "read") {
       reads += 1;
@@ -411,6 +411,43 @@ test("unresponsive-session replacement handoff records the handoff and reuses ta
   assert.equal(stalled.stepCount, 0, "the stuck exchange is never retried on the same worker");
 });
 
+// Why: a Codex role must not be silently replaced by a Pi worker when its exchange refuses.
+test("Codex dispatch refusal never starts a Pi replacement", async () => {
+  let spawns = 0;
+  const calls = [];
+  const journey = await runWorkerJourney(
+    { action: "dispatch", role: "worker", stepPrompt: "synthetic", maxSteps: 1 },
+    tuiContext(),
+    { taskStore: taskStore([{ id: "1", status: "pending" }]),
+      runProcess: async ({ argv }) => {
+        calls.push([...argv]);
+        if (argv[1] !== "get") throw new Error("no fake prompt or read allowed");
+        return { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: {
+          name: "worker", agent: "codex", status: "idle", repository: root,
+        } }) };
+      },
+      spawnReplacement: async () => { spawns += 1; return { ok: true }; },
+    },
+  );
+  assert.equal(journey.status, "role-blocked", JSON.stringify(journey));
+  assert.equal(journey.code, "non-pi-dispatch-denied");
+  assert.equal(journey.handoff?.attempted, false);
+  assert.match(journey.handoff?.reason ?? "", /non-Pi/);
+  assert.equal(spawns, 0);
+  assert.equal(calls.some((argv) => argv[1] === "prompt"), false);
+});
+
+// Why: a healthy Claude role remains eligible for a bounded session dispatch, not a Codex policy refusal.
+test("Claude dispatch uses the bounded exchange", async () => {
+  const fixture = herdrFixture({ kind: "claude" });
+  const journey = await runWorkerJourney(
+    { action: "dispatch", role: "worker", stepPrompt: "synthetic", maxSteps: 1 },
+    tuiContext(), { taskStore: taskStore([{ id: "1", status: "pending" }]), runProcess: fixture.runProcess },
+  );
+  assert.equal(journey.status, "completed", JSON.stringify(journey));
+  assert.equal(fixture.calls.filter((call) => call.action === "prompt").length, 1);
+});
+
 // Why: a frozen cast can authorize an in-scope replacement without a new dialog.
 test("autonomous in-cast replacement skips interactive confirmation", async () => {
   let confirmations = 0;
@@ -425,6 +462,7 @@ test("autonomous in-cast replacement skips interactive confirmation", async () =
     },
     {
       model: "test-model",
+      enableAutonomy: true,
       taskStore: taskStore([{ id: "1", status: "pending" }]),
       runProcess: async ({ argv }) => argv[1] === "get"
         ? { code: 0, stdout: JSON.stringify({ type: "agent_info", agent: { name: "worker", agent: "pi", status: "working", repository: root } }) }
@@ -460,6 +498,7 @@ test("autonomous out-of-cast replacement is recorded and refused without spawnin
     tuiContext(),
     {
       taskStore: taskStore([{ id: "1", status: "pending" }]),
+      enableAutonomy: true,
       replacementRole: "reviewer",
       replacementModel: "other-model",
       runProcess: async ({ argv }) => argv[1] === "get"
@@ -592,7 +631,7 @@ test("AJ-4: autonomous replacement spawn with gap analysis", async () => {
   const journey = await runWorkerJourney(
     { action: "dispatch", role: "worker", stepPrompt: "x", autonomy: "autonomous", model: "test-model", cast: { roles: ["worker"], models: { worker: "test-model" } } },
     tuiContext(),
-    { runProcess, taskStore: taskStore([{ id: "1", status: "pending" }]), spawnReplacement: async ({ role }) => { spawned.push(role); return { ok: true, role, repository: root }; } },
+    { enableAutonomy: true, runProcess, taskStore: taskStore([{ id: "1", status: "pending" }]), spawnReplacement: async ({ role }) => { spawned.push(role); return { ok: true, role, repository: root }; } },
   );
   assert.ok(journey.steps.some(s => s.status === "replaced"), "the replacement exchange completed with a gap analysis");
 });
@@ -612,7 +651,7 @@ test("AJ-4: forward-progress judgment exhausts after no progress", async () => {
   const journey = await runWorkerJourney(
     { action: "dispatch", role: "worker", stepPrompt: "x", autonomy: "autonomous", maxSteps: 3, model: "test-model", cast: { roles: ["worker"], models: { worker: "test-model" } } },
     tuiContext(),
-    { runProcess, taskStore: taskStore([{ id: "1", status: "pending" }]), spawnReplacement: async ({ role }) => ({ ok: true, role, repository: root }) },
+    { enableAutonomy: true, runProcess, taskStore: taskStore([{ id: "1", status: "pending" }]), spawnReplacement: async ({ role }) => ({ ok: true, role, repository: root }) },
   );
   assert.ok(journey.steps.some(s => s.progressCredited === false), "a replacement without progress is not credited");
   assert.equal(journey.status, "worker-unresponsive-exhausted");
@@ -641,7 +680,7 @@ test("AJ-cast: cast parameter validates and materializes the frozen cast", async
     { action: "dispatch", role: "worker", stepPrompt: "x", autonomy: "autonomous", model: "test-model",
       cast: { roles: ["worker", "reviewer"], models: { worker: "test-model", reviewer: "review-model" } } },
     tuiContext(),
-    { runProcess: fixture.runProcess, taskStore: taskStore([{ id: "1", status: "pending" }]), spawnReplacement: async ({ role }) => ({ ok: true, role, repository: root }) },
+    { enableAutonomy: true, runProcess: fixture.runProcess, taskStore: taskStore([{ id: "1", status: "pending" }]), spawnReplacement: async ({ role }) => ({ ok: true, role, repository: root }) },
   );
   assert.ok(journey.cast, "the cast is materialized");
   assert.deepEqual(journey.cast.roles, ["worker", "reviewer"]);
@@ -654,7 +693,7 @@ test("AJ-cast: invalid role names in the cast are rejected", async () => {
     { action: "dispatch", role: "worker", stepPrompt: "x", autonomy: "autonomous",
       cast: { roles: ["Invalid Role!"], models: {} } },
     tuiContext(),
-    { runProcess: herdrFixture().runProcess, taskStore: taskStore([{ id: "1", status: "pending" }]) },
+    { enableAutonomy: true, runProcess: herdrFixture().runProcess, taskStore: taskStore([{ id: "1", status: "pending" }]) },
   );
   assert.equal(journey.ok, false); assert.equal(journey.code, "cast-invalid");
 });
@@ -665,7 +704,7 @@ test("AJ-cast: cast-less dispatch defaults to the dispatched role", async () => 
   const journey = await runWorkerJourney(
     { action: "dispatch", role: "worker", stepPrompt: "x", autonomy: "autonomous", model: "test-model" },
     tuiContext(),
-    { runProcess: fixture.runProcess, taskStore: taskStore([{ id: "1", status: "pending" }]) },
+    { enableAutonomy: true, runProcess: fixture.runProcess, taskStore: taskStore([{ id: "1", status: "pending" }]) },
   );
   assert.ok(journey.cast, "the default cast is materialized");
   assert.deepEqual(journey.cast.roles, ["worker"]);
@@ -700,6 +739,19 @@ test("journeys lists repository records across roles and filters by journey ID",
   assert.deepEqual(all.details.journeys.map((entry) => entry.journeyId), ["first", "second"]);
   const filtered = await tool.execute("fixture", { action: "journeys", journeyId: "second" }, undefined, undefined, tuiContext());
   assert.deepEqual(filtered.details.journeys.map((entry) => entry.journeyId), ["second"]);
+});
+
+// Why: legacy journey tests may explicitly opt into internal autonomy, but public calls cannot.
+test("autonomous dispatch remains unavailable without the internal opt-in", async () => {
+  let spawned = 0;
+  const result = await runWorkerJourney(
+    { action: "dispatch", role: "worker", stepPrompt: "x", autonomy: "autonomous" },
+    tuiContext(),
+    { spawnReplacement: async () => { spawned++; } },
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "autonomy-unavailable");
+  assert.equal(spawned, 0);
 });
 
 // Why: progress evidence must stay compact and non-authorizing.

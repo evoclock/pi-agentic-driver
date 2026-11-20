@@ -1,0 +1,8 @@
+{
+  "schema": "pad-exit-checks.v1",
+  "fromGateRules": [
+    { "id": "policy-unit-tests", "kind": "test", "counter": "node-tap", "timeoutSeconds": 120 },
+    { "id": "python-tests", "kind": "test", "counter": "python-unittest", "timeoutSeconds": 450 }
+  ],
+  "defaults": []
+}

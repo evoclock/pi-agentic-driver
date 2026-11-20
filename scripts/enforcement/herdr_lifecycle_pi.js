@@ -9,19 +9,27 @@
 // uses tab create. Both capture the returned pane identity; only a busy shell
 // may cause a bounded retry of start on that same pane.
 import { createHash } from "node:crypto";
-import { accessSync, constants as fsConstants, readFileSync, realpathSync, statSync, lstatSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { accessSync, constants as fsConstants, readFileSync, realpathSync, statSync, lstatSync, mkdirSync, openSync, fstatSync, writeSync, closeSync } from "node:fs";
+import { homedir, hostname, userInfo } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
+import { execFile, spawn, spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import {
   HERDR_ROLE_PATTERN,
   HERDR_ROLE_POLICY,
+  HERDR_VERSION,
   resolveTrustedHerdrExecutable,
+  trustedHerdrExecutableRealPath,
+  runSpawnedProcess,
+  awaitBounded,
   registerHerdrCommunicationInterface,
+  registerHerdrToolOnce,
 } from "./herdr_communication_pi.js";
 import { isAttendedElectronContext } from "./native_tui_context.js";
 import { reserveApprovalUse, recordApprovalUse, authorizeApproval, checkRelayRequests } from "./approval_ledger_pi.js";
 import { needsOwner } from "./attended_authority_guard.js";
+import { codexLaunch, verifyCodexProcess, isCodexAccountModel, hasCodexProcessReader } from "./codex_spawn_pi.js";
 
 export const HERDR_SPAWN_WORKER_TOOL = "agentic_herdr_spawn_worker";
 export const HERDR_LIFECYCLE_SCHEMA = "agentic-driver.herdr-lifecycle.v1";
@@ -65,7 +73,6 @@ const START_RESULT_FIELDS = new Set(["type", "agent", "argv"]);
 // pane get live evidence); colons and dots are part of identity.
 const PANE_ID_REGEXP = /^[A-Za-z0-9_.:-]{1,128}$/;
 const PANE_RESULT_FIELDS = new Set(["type", "pane", "pane_id", "cwd", "foreground_cwd"]);
-const REGISTRATIONS = new WeakSet();
 
 export const HERDR_SPAWN_WORKER_PARAMETERS = Object.freeze({
   type: "object",
@@ -74,6 +81,8 @@ export const HERDR_SPAWN_WORKER_PARAMETERS = Object.freeze({
     placement: { type: "string", enum: SPAWN_PLACEMENTS },
     role: { type: "string", pattern: HERDR_ROLE_PATTERN, maxLength: 64 },
     model: { type: "string", pattern: MODEL_ID_REGEXP.source, maxLength: 192 },
+    kind: { type: "string", enum: ["pi", "codex"] },
+    account: { type: "string", pattern: "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$", maxLength: 128 },
     repository: { type: "string", pattern: SAFE_NAME_REGEXP.source, maxLength: 64 },
     // Optional bounded worktree target. It is a request, never authority: it
     // must resolve to the canonical Git worktree root of the registered
@@ -109,7 +118,7 @@ function errorResult(error, extra = {}) {
   };
 }
 
-function layoutCleanupGuidance(partial, paneId, tabId) {
+function layoutCleanupGuidance(partial, paneId, tabId, kind) {
   if (partial === "pane_created") {
     return paneId
       ? `Run \`herdr pane close ${paneId}\` manually to remove the empty pane; no automatic close was performed.`
@@ -120,15 +129,16 @@ function layoutCleanupGuidance(partial, paneId, tabId) {
       ? `Run \`herdr tab close ${tabId}\` manually to remove the empty tab; no automatic close was performed.`
       : "Run `herdr tab list` to identify the created tab and `herdr tab close <tab_id>` manually; no automatic close was performed.";
   }
+  if (kind === "codex") return "The Codex agent is uncertified; do not use it. Close it manually. No automatic retry or cleanup was performed.";
   return `The worker agent is live and usable${paneId ? ` in pane ${paneId}` : ""}; use it as-is or close it manually. No automatic retry or cleanup was performed.`;
 }
 
-function partialResult(error, { partial = "tab_created", paneId, tabId, role, modelArgv, rawResponse } = {}) {
+function partialResult(error, { partial = "tab_created", paneId, tabId, role, kind, modelArgv, rawResponse, warnings = [] } = {}) {
   const code = typeof error?.code === "string" ? error.code : "unexpected_adapter_failure";
   const message = typeof error?.message === "string" && error.message
     ? error.message
     : "the Herdr lifecycle adapter failed";
-  const cleanup = layoutCleanupGuidance(partial, paneId, tabId);
+  const cleanup = layoutCleanupGuidance(partial, paneId, tabId, kind);
   const boundedRaw = typeof rawResponse === "string" && rawResponse
     && Buffer.byteLength(rawResponse, "utf8") <= MAX_PROCESS_OUTPUT_BYTES
     ? rawResponse
@@ -139,6 +149,7 @@ function partialResult(error, { partial = "tab_created", paneId, tabId, role, mo
     paneId: paneId ?? null,
     tabId: tabId ?? null,
     role,
+    warnings,
     ...(Array.isArray(modelArgv) ? { modelArgv: [...modelArgv] } : {}),
     cleanup,
     ...(boundedRaw !== undefined ? { rawResponse: boundedRaw } : {}),
@@ -170,20 +181,26 @@ export function reportMarkersForRole(role) {
   });
 }
 
-export function validateSpawnParams(params) {
+export function validateSpawnParams(params, options = {}) {
   if (!isPlainObject(params)) {
     throw lifecycleError("invalid_parameters", "spawn parameters must be an object", "denied");
   }
   const requiredKeys = ["placement", "role", "model", "repository"];
-  const optionalKeys = ["worktreePath", "workspace", "authority"];
+  const optionalKeys = ["worktreePath", "workspace", "authority", "kind", "account"];
   const keys = Object.keys(params);
   if (keys.length < requiredKeys.length || keys.length > requiredKeys.length + optionalKeys.length
       || requiredKeys.some((k) => !keys.includes(k))
       || keys.some((k) => !requiredKeys.includes(k) && !optionalKeys.includes(k))
       || (params.authority !== undefined && (!isPlainObject(params.authority) || Object.keys(params.authority).length !== 1 || typeof params.authority.ledgerId !== "string"))) {
-    throw lifecycleError("closed_parameters", "spawn_worker accepts placement, role, model, repository, and optional worktreePath, workspace, or authority ledgerId", "denied");
+    throw lifecycleError("closed_parameters", "spawn_worker accepts placement, role, model, repository, and optional worktreePath, workspace, authority ledgerId, kind, or account", "denied");
   }
-  const { placement, role, model, repository, worktreePath, workspace } = params;
+  const { placement, role, model, repository, worktreePath, workspace, kind = "pi", account } = params;
+  if (kind === "pi" && isCodexAccountModel(model, options.codexAccountsPath)) {
+    throw lifecycleError("codex_model_denied", "Codex account models require explicit Codex kind and account", "denied");
+  }
+  if (!["pi", "codex"].includes(kind) || (kind === "codex" ? !account || !params.authority : account !== undefined)) {
+    throw lifecycleError("codex_scope_denied", "Codex requires a scoped approval and account; Pi cannot select an account", "denied");
+  }
   if (workspace !== undefined && (typeof workspace !== "string" || workspace.length > 128
       || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(workspace))) {
     throw lifecycleError("workspace_invalid", "workspace must be a bounded workspace id or label", "denied");
@@ -214,6 +231,8 @@ export function validateSpawnParams(params) {
   }
   return {
     placement, role, model, repository,
+    ...(params.kind ? { kind } : {}),
+    ...(account ? { account } : {}),
     ...(worktreePath === undefined ? {} : { worktreePath }),
     ...(workspace === undefined ? {} : { workspace }),
     ...(params.authority ? { authority: params.authority } : {}),
@@ -332,7 +351,7 @@ function observedAgent(value, operation) {
   return value;
 }
 
-function readBackAgent(raw, expectedRole, canonicalRoot, modelArgvTail) {
+function readBackAgent(raw, expectedRole, canonicalRoot, modelArgvTail, expectedKind = "pi") {
   const result = closedShape(parseJsonEnvelope(raw, "agent get"), new Set(["type", "agent"]), "malformed_json", "agent get returned fields outside the closed result shape");
   // Herdr adds observational metadata over time (for example
   // state_change_seq and terminal_title). Keep the envelope closed, but
@@ -347,7 +366,7 @@ function readBackAgent(raw, expectedRole, canonicalRoot, modelArgvTail) {
   }
   if (role !== expectedRole) throw lifecycleError("stale_role_mapping", "the spawned role is no longer mapped to the expected live agent");
   const kind = collectString([agent.agent, agent.agent_kind, agent.kind], "agent kind");
-  if (kind !== "pi") throw lifecycleError("agent_mismatch", "the spawned agent is not the expected Pi kind");
+  if (kind !== expectedKind) throw lifecycleError("agent_mismatch", "the spawned agent kind does not match the request");
   const paneId = collectString([agent.pane_id], "agent pane id");
   const cwd = collectString([agent.cwd, agent.foreground_cwd], "agent cwd");
   if (!sameRealPath(cwd, canonicalRoot)) {
@@ -356,10 +375,10 @@ function readBackAgent(raw, expectedRole, canonicalRoot, modelArgvTail) {
   if (agent.launch_pending === true || agent.interactive_ready === false) {
     throw lifecycleError("role_not_ready", "the spawned agent is not observed ready");
   }
-  return { paneId };
+  return { paneId, pid: agent.pid };
 }
 
-function readBackStart(raw, expectedRole, canonicalRoot, modelArgvTail) {
+function readBackStart(raw, expectedRole, canonicalRoot, modelArgvTail, expectedKind = "pi") {
   const result = closedShape(parseJsonEnvelope(raw, "agent start"), START_RESULT_FIELDS, "malformed_json", "agent start returned fields outside the closed result shape");
   if (result.type !== "agent_started") {
     throw lifecycleError("unexpected_result", "agent start did not return agent_started");
@@ -380,7 +399,7 @@ function readBackStart(raw, expectedRole, canonicalRoot, modelArgvTail) {
   }
   if (role !== expectedRole) throw lifecycleError("stale_role_mapping", "agent start returned a different role");
   const kind = collectString([agent.agent, agent.agent_kind, agent.kind], "agent kind");
-  if (kind !== "pi") throw lifecycleError("agent_mismatch", "the started agent is not the expected Pi kind");
+  if (kind !== expectedKind) throw lifecycleError("agent_mismatch", "the started agent kind does not match the request");
   if (agent.launch_pending === true || agent.interactive_ready === false) {
     throw lifecycleError("role_not_ready", "the started agent is not observed ready");
   }
@@ -828,8 +847,17 @@ function resolveWorktreeIdentity(canonicalRoot, worktreePath, options) {
   });
 }
 
+const verifiedWorktreeTargets = new WeakSet();
+
 export function resolveWorktreeSpawnTarget(canonicalRoot, worktreePath, options = {}) {
-  return resolveWorktreeIdentity(canonicalRoot, worktreePath, options);
+  const target = resolveWorktreeIdentity(canonicalRoot, worktreePath, options);
+  verifiedWorktreeTargets.add(target);
+  return target;
+}
+
+export function verifiedWorktreeTargetCovers(target, path, repositoryRoot) {
+  return !!target && verifiedWorktreeTargets.has(target)
+    && target.worktreePath === path && target.repositoryPath === repositoryRoot;
 }
 
 export function worktreeTargetUnchanged(left, right) {
@@ -1081,9 +1109,10 @@ export function currentPaneArgv() {
   return Object.freeze(["pane", "current", "--current"]);
 }
 
-export function tabCreateArgv(canonicalRoot, role, workspaceId) {
+export function tabCreateArgv(canonicalRoot, role, workspaceId, workerEnv = {}) {
   return Object.freeze([
     "tab", "create", "--workspace", workspaceId, "--cwd", canonicalRoot, "--no-focus", "--label", role,
+    ...Object.entries(workerEnv).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
   ]);
 }
 
@@ -1121,9 +1150,10 @@ export function splitArgv(coordinatorPaneId, canonicalRoot, placement) {
   ]);
 }
 
-export function startArgv(role, paneId, modelArgv) {
+export function startArgv(role, paneId, modelArgv, kind = "pi") {
+  if (!["pi", "codex"].includes(kind)) throw lifecycleError("agent_mismatch", "unsupported agent kind", "denied");
   return Object.freeze([
-    "agent", "start", role, "--kind", "pi", "--pane", paneId,
+    "agent", "start", role, "--kind", kind, "--pane", paneId,
     "--timeout", String(AGENT_READY_TIMEOUT_MS), "--", ...modelArgv,
   ]);
 }
@@ -1212,17 +1242,41 @@ async function invokeHerdr(argv, canonicalRoot, options, signal) {
   return normalized.stdout;
 }
 
-// Layout creation can return before the pane's shell is ready. Only the
-// explicit busy response is safe to retry; every attempt uses the same pane.
-async function startOnReadyPane(startCall, spawnCwd, options, signal, revalidate) {
-  for (let attempt = 0; attempt < 4; attempt++) {
-    if (attempt) revalidate();
+// Only Herdr's explicit busy response permits another start on the same pane.
+function paneReadiness(options) {
+  const read = (key, env, fallback) => {
+    const value = options[key] ?? process.env[env] ?? fallback;
+    const number = Number(value);
+    if (!Number.isSafeInteger(number) || number < 1 || number > 120_000) {
+      throw lifecycleError("invalid_readiness", `${env} must be an integer from 1 to 120000`, "denied");
+    }
+    return number;
+  };
+  return {
+    timeoutMs: read("paneReadyTimeoutMs", "PAD_HERDR_PANE_READY_TIMEOUT_MS", 15_000),
+    pollMs: read("paneReadyPollMs", "PAD_HERDR_PANE_READY_POLL_MS", 250),
+  };
+}
+
+async function startOnReadyPane(startCall, spawnCwd, options, signal, revalidate, readiness) {
+  const now = options.paneReadyNow ?? (() => performance.now());
+  const sleep = options.paneReadySleep ?? ((ms) => new Promise((resolveWait) => setTimeout(resolveWait, ms)));
+  const deadline = now() + readiness.timeoutMs;
+  let attempt = 0;
+  let lastBusyMessage;
+  while (true) {
+    if (attempt && now() >= deadline) throw lifecycleError("start_failed", lastBusyMessage);
+    if (attempt++) revalidate();
     try { return await invokeHerdr(startCall, spawnCwd, options, signal); }
     catch (error) {
-      if (attempt === 3 || !/\(agent_pane_busy(?:\b|:)/.test(error?.message ?? "")) {
+      if (!/\(agent_pane_busy(?:\b|:)/.test(error?.message ?? "")) {
         throw lifecycleError("start_failed", error?.message || "Herdr agent start failed");
       }
-      await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+      lastBusyMessage = error.message;
+      const remaining = deadline - now();
+      if (remaining <= 0) throw lifecycleError("start_failed", lastBusyMessage);
+      await sleep(Math.min(readiness.pollMs, remaining));
+      if (signal?.aborted) throw lifecycleError("start_failed", "the spawn operation was aborted");
     }
   }
 }
@@ -1243,20 +1297,121 @@ function duplicateRoleExists(raw, role) {
   });
 }
 
+// Reuse the installed ast-sgrep launcher's platform/checksum resolution. No
+// dependency is added to PAD: an absent optional installation only warns.
+async function installedAsgrepBinary() {
+  const anchors = [
+    join(resolveProfileConfigPath(".").base, "npm", "node_modules", "pi-ast-sgrep", "package.json"),
+    import.meta.url,
+  ];
+  for (const anchor of anchors) {
+    try {
+      const launcher = createRequire(anchor).resolve("ast-sgrep");
+      const { resolveBinary } = await import(pathToFileURL(launcher).href);
+      return resolveBinary({ env: {} });
+    } catch { /* try the package-local installation next */ }
+  }
+  throw new Error("optional asgrep installation unavailable");
+}
+
+function boundedAsgrepTimeout(value, fallback) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 && number <= 300_000 ? number : fallback;
+}
+
+async function workerAsgrepSettings(options, warnings) {
+  const config = options.asgrep ?? {};
+  const off = /^(?:off|false|0)$/i.test(process.env.PAD_WORKER_ASGREP ?? "");
+  if (config === false || (config.enabled ?? !off) === false) return { env: {} };
+  try {
+    const requestedBinary = config.binary ?? process.env.PAD_WORKER_ASGREP_BIN ?? process.env.ASGREP_BIN;
+    const binary = realpathSync(requestedBinary || await installedAsgrepBinary());
+    if (!statSync(binary).isFile()) throw new Error("not a file");
+    accessSync(binary, fsConstants.X_OK);
+    const backend = config.backend ?? process.env.PAD_WORKER_ASGREP_BACKEND ?? "cli";
+    const timeout = boundedAsgrepTimeout(config.timeoutMs ?? process.env.PAD_WORKER_ASGREP_TIMEOUT_MS ?? process.env.ASGREP_TIMEOUT_MS, 30_000);
+    return {
+      binary,
+      env: {
+        ASGREP_CODEMODE_BACKEND: backend === "napi" ? "napi" : "cli",
+        ASGREP_BIN: binary,
+        ASGREP_TIMEOUT_MS: String(timeout),
+      },
+      prewarm: config.prewarm ?? !/^(?:off|false|0)$/i.test(process.env.PAD_WORKER_ASGREP_PREWARM ?? ""),
+      indexTimeoutMs: boundedAsgrepTimeout(config.indexTimeoutMs ?? process.env.PAD_WORKER_ASGREP_INDEX_TIMEOUT_MS, 120_000),
+    };
+  } catch {
+    warnings.push({ code: "asgrep_binary_unavailable", message: "Worker asgrep CLI could not be resolved; existing backend behavior is unchanged." });
+    return { env: {} };
+  }
+}
+
+function prewarmWorkerAsgrep(settings, root, warnings, signal) {
+  if (!settings.prewarm || !settings.binary) return Promise.resolve();
+  // Asynchronous child overlaps agent readiness, never synchronous index work
+  // on the coordinator event loop. Only the final spawn receipt waits for it.
+  return new Promise((done) => {
+    execFile(settings.binary, ["index", root], {
+      cwd: root,
+      env: { ...controlledEnv(), ...settings.env },
+      shell: false,
+      timeout: settings.indexTimeoutMs,
+      killSignal: "SIGKILL",
+      maxBuffer: MAX_PROCESS_OUTPUT_BYTES,
+      signal,
+    }, (error) => {
+      if (error) {
+        const timedOut = error.killed && error.signal === "SIGKILL" && error.code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
+        warnings.push({
+          code: timedOut ? "asgrep_index_timeout" : "asgrep_index_failed",
+          message: timedOut ? `Worker asgrep index exceeded ${settings.indexTimeoutMs}ms; spawn continues without prewarming.`
+            : "Worker asgrep index failed; spawn continues without prewarming.",
+        });
+      }
+      done();
+    });
+  }).catch(() => {
+    warnings.push({ code: "asgrep_index_failed", message: "Worker asgrep index could not start; spawn continues without prewarming." });
+  });
+}
+
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
 export async function executeHerdrSpawnWorker(params, context, options = {}, signal) {
   let request;
+  const warnings = [];
+  let indexReady = Promise.resolve();
   try {
-    request = validateSpawnParams(params);
+    request = validateSpawnParams(params, options);
+    const readiness = paneReadiness(options);
     const { placement, role, model, repository } = request;
+    const kind = request.kind ?? "pi";
+    // Production has no key-only process environment reader. Deny before any
+    // tab or agent can be created rather than leave an uncertified live worker.
+    if (kind === "codex" && !hasCodexProcessReader(options)) {
+      throw lifecycleError("codex_readback_unavailable", "Codex process verification is unavailable", "denied");
+    }
+    const checkedCodex = () => {
+      try { return codexLaunch(request.account, model, options.codexAccountsPath); }
+      catch { throw lifecycleError("codex_account_denied", "Codex account home or model is unavailable", "denied"); }
+    };
+    const codex = kind === "codex" ? checkedCodex() : null;
+    const recheckCodex = () => {
+      if (!codex) return;
+      const current = checkedCodex();
+      if (current.home !== codex.home || current.binaryRealPath !== codex.binaryRealPath
+          || current.binaryRealRoot !== codex.binaryRealRoot || current.binaryLaunchPath !== codex.binaryLaunchPath
+          || current.argv.join("\0") !== codex.argv.join("\0")) {
+        throw lifecycleError("codex_account_denied", "Codex account configuration changed", "denied");
+      }
+    };
     if (placement !== "tab") throw lifecycleError("worker_tab_required", "workers require a new tab, not a coordinator pane split", "denied");
 
     // Resolve BEFORE any mutation: registry + realpath + Git root.
     let canonicalRoot = resolveTrustedSpawnRepository(context?.cwd, repository);
-    const modelArgv = resolveInstalledModel(model, options);
+    const modelArgv = codex ? codex.argv : resolveInstalledModel(model, options);
     // An optional worktree target is validated read-only here (canonical path,
     // real Git repository identity, active Treehouse lease) and its observed
     // lease identity is bound for the rest of the operation.
@@ -1267,7 +1422,7 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
 
     const currentPane = process.env.HERDR_PANE_ID;
     if (!currentPane?.trim() && !request.workspace) {
-      throw lifecycleError("workspace_required", "select a workspace id or label when there is no caller pane", "denied");
+      throw lifecycleError("workspace_required", "select a workspace id or label when there is no caller pane; use agentic_herdr_communication list or get to discover a worker workspace id", "denied");
     }
 
     // Duplicate live names are denied at spawn (read-only observation).
@@ -1283,25 +1438,32 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
         || (coordinator && !coordinator.tabId.startsWith(`${workspaceId}:`))) {
       throw lifecycleError("current_pane_unavailable", "the coordinator workspace could not be identified", "denied");
     }
+    let reservedUseId;
     if (request.authority !== undefined) {
       try {
         // A ledger grant is bound to the exact target when a worktree is
         // requested: a repository-only grant never covers an unrecorded path.
-        await reserveApprovalUse(resolveProfileConfigPath(".").base, request.authority.ledgerId, {
+        const reservation = await reserveApprovalUse(resolveProfileConfigPath(".").base, request.authority.ledgerId, {
           tier: 1, repository, action: "spawn", model, role,
+          ...(codex ? { kind: "codex", account: request.account } : {}),
           ...(worktreeTarget ? { path: worktreeTarget.worktreePath } : {}),
         });
+        reservedUseId = reservation.useId;
       } catch (error) {
         return errorResult(lifecycleError("approval_missing", error.message, "needs-owner"), needsOwner(1, ["spawn approval covering repository, model and role"], repository));
       }
     }
 
+    const asgrep = await workerAsgrepSettings(options, warnings);
     // Revalidation point after the asynchronous preflight, before the first mutation.
     canonicalRoot = revalidateSpawnAuthority(
       context?.cwd, repository, canonicalRoot, request, worktreeTarget, options, "after preflight",
     );
     if (request.worktreePath) spawnCwd = worktreeTarget.worktreePath;
+    recheckCodex();
 
+    // Start index work only after the target's final preflight identity check.
+    indexReady = prewarmWorkerAsgrep(asgrep, spawnCwd, warnings, signal);
     // Use the selected or caller workspace. The authority fence covers the observation.
 
     const layoutPartial = placement === "tab" ? "tab_created" : "pane_created";
@@ -1310,7 +1472,7 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
     let tabId;
     try {
       if (placement === "tab") {
-        layoutRaw = await invokeHerdr(tabCreateArgv(spawnCwd, role, workspaceId), spawnCwd, options, signal);
+        layoutRaw = await invokeHerdr(tabCreateArgv(spawnCwd, role, workspaceId, { ...asgrep.env, ...(codex ? { CODEX_HOME: codex.home } : {}) }), spawnCwd, options, signal);
         ({ rootPaneId, tabId } = parseTabCreate(layoutRaw));
         if (!rootPaneId.startsWith(`${workspaceId}:`) || !tabId.startsWith(`${workspaceId}:`)) {
           throw lifecycleError("workspace_mismatch", "the new tab was placed outside the repository workspace", "denied");
@@ -1326,7 +1488,7 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
       }
     } catch (error) {
       return partialResult(error, {
-        partial: layoutPartial, paneId: rootPaneId, tabId, role, modelArgv,
+        partial: layoutPartial, paneId: rootPaneId, tabId, role, modelArgv, warnings,
         ...(typeof layoutRaw === "string" ? { rawResponse: layoutRaw } : {}),
       });
     }
@@ -1339,12 +1501,14 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
       );
 
       // Retry only a busy shell, never layout creation or a different pane.
-      const startCall = startArgv(role, rootPaneId, modelArgv);
+      recheckCodex();
+      const startCall = startArgv(role, rootPaneId, modelArgv, kind);
       const startRaw = await startOnReadyPane(startCall, spawnCwd, options, signal, () => {
         canonicalRoot = revalidateSpawnAuthority(
           context?.cwd, repository, canonicalRoot, request, worktreeTarget, options, "before agent start retry",
         );
-      });
+        recheckCodex();
+      }, readiness);
       agentStartSucceeded = true;
 
       // Agent start is a mutation, so authorization must be resolved again
@@ -1353,17 +1517,24 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
         context?.cwd, repository, canonicalRoot, request, worktreeTarget, options, "after agent start",
       );
 
-      const startedPaneId = readBackStart(startRaw, role, spawnCwd, [...modelArgv]);
+      const startedPaneId = readBackStart(startRaw, role, spawnCwd, [...modelArgv], kind);
       if (startedPaneId !== rootPaneId) {
         throw lifecycleError("pane_mismatch", "agent start returned a different pane identity");
       }
       const agentRaw = await invokeHerdr(["agent", "get", role], spawnCwd, options, signal);
-      const agentReadBack = readBackAgent(agentRaw, role, spawnCwd, [...modelArgv]);
+      const agentReadBack = readBackAgent(agentRaw, role, spawnCwd, [...modelArgv], kind);
+      if (codex) {
+        recheckCodex();
+        try { verifyCodexProcess(agentReadBack, codex, options); }
+        catch { throw lifecycleError("codex_readback_mismatch", "Codex process could not be verified", "denied"); }
+      }
       if (agentReadBack.paneId !== rootPaneId) {
         throw lifecycleError("pane_mismatch", "agent get returned a different pane identity");
       }
       const paneRaw = await invokeHerdr(["pane", "get", rootPaneId], spawnCwd, options, signal);
       readBackPane(paneRaw, rootPaneId, spawnCwd);
+      // Finish best-effort prewarming before this receipt can trigger a brief.
+      await indexReady;
       // The read-backs are asynchronous too. A registry, lease, or
       // association change during them must not be reported as a successful
       // spawn.
@@ -1372,7 +1543,7 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
         "during the final read-backs",
       );
       if (request.authority) {
-        await recordApprovalUse(resolveProfileConfigPath(".").base, request.authority.ledgerId, "spawn", repository, "spawned");
+        await recordApprovalUse(resolveProfileConfigPath(".").base, request.authority.ledgerId, "spawn", repository, "spawned", reservedUseId);
         // The audit write can await its writer lock. Recheck authority after
         // that wait, before reporting success for the already-started agent.
         revalidateSpawnAuthority(
@@ -1386,9 +1557,11 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
         ok: true,
         status: "spawned",
         role,
+        warnings,
         reportMarkers: reportMarkersForRole(role),
         placement,
         direction: placement === "tab" ? null : HERDR_DIRECTIONS[placement],
+        workspaceId,
         paneId: rootPaneId,
         rootPaneId,
         tabId,
@@ -1411,11 +1584,13 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
       // never told to treat it as merely an empty orphan tab.
       return partialResult(error, {
         partial: agentStartSucceeded ? "agent_started" : layoutPartial,
-        paneId: rootPaneId, tabId, role, modelArgv,
+        paneId: rootPaneId, tabId, role, kind, modelArgv, warnings,
       });
     }
   } catch (error) {
-    return errorResult(error);
+    return errorResult(error, { warnings });
+  } finally {
+    await indexReady;
   }
 }
 
@@ -1461,8 +1636,11 @@ function attendedElectronContextError(context) {
   }
 }
 
-function attendedElectronParams(params) {
-  const request = validateSpawnParams(params);
+function attendedElectronParams(params, options = {}) {
+  const request = validateSpawnParams(params, options);
+  if ((request.kind ?? "pi") !== "pi") {
+    throw lifecycleError("codex_attended_unavailable", "Codex requires the guarded tab environment and process readback", "denied");
+  }
   if (request.placement !== "tab") {
     throw lifecycleError(
       "pane_identity_unavailable",
@@ -1519,12 +1697,28 @@ async function observeDuplicateRole(canonicalRoot, role, options, signal) {
   }
 }
 
+// A worktree path is a distinct approval scope; repository-only grants cover
+// the canonical repository root, not an arbitrary linked worktree.
+function attendedSpawnApprovalRequest(request, worktreeTarget) {
+  return { tier: 1, repository: request.repository, action: "spawn",
+    model: request.model, role: request.role,
+    ...(worktreeTarget ? { path: worktreeTarget.worktreePath, worktreeTarget, repositoryRoot: worktreeTarget.repositoryPath } : {}),
+  };
+}
+
 export async function preflightAttendedElectronSpawn(params, context, options = {}) {
   try {
     attendedElectronContextError(context);
-    const request = attendedElectronParams(params);
+    const request = attendedElectronParams(params, options);
     assertHerdrExecutableAvailable(options);
     const { canonicalRoot, modelArgv, worktreeTarget } = resolveAttendedElectronPrerequisites(request, context, options);
+    if (request.authority) {
+      try {
+        authorizeApproval(resolveProfileConfigPath(".").base, request.authority.ledgerId, attendedSpawnApprovalRequest(request, worktreeTarget));
+      } catch (error) {
+        return errorResult(lifecycleError("approval_missing", error.message, "needs-owner"), needsOwner(1, ["spawn approval covering repository, model and role"], request.repository));
+      }
+    }
     await observeDuplicateRole(worktreeTarget ? worktreeTarget.worktreePath : canonicalRoot, request.role, options, null);
     await availableWorkspace(canonicalRoot, options, null);
     revalidateSpawnAuthority(
@@ -1551,11 +1745,28 @@ export async function preflightAttendedElectronSpawn(params, context, options = 
   }
 }
 
+async function auditedAttendedPartial(error, details, request, useId) {
+  if (useId) {
+    try {
+      await recordApprovalUse(resolveProfileConfigPath(".").base, request.authority.ledgerId,
+        "spawn", request.repository, "partial", useId, details.partial);
+    } catch (auditError) {
+      return partialResult(lifecycleError("approval_audit_failed",
+        `${error?.message || "spawn failed"}; approval outcome could not be recorded: ${auditError.message}`, "partial"), details);
+    }
+  }
+  return partialResult(error, details);
+}
+
 export async function executeHerdrSpawnWorkerAttendedElectron(params, context, options = {}, signal) {
   let request;
+  let reservedUseId;
+  const warnings = [];
+  let indexReady = Promise.resolve();
   try {
     attendedElectronContextError(context);
-    request = attendedElectronParams(params);
+    request = attendedElectronParams(params, options);
+    const readiness = paneReadiness(options);
     const { role, model, repository } = request;
 
     // Resolve BEFORE any mutation: registry + realpath + Git root, plus the
@@ -1567,7 +1778,16 @@ export async function executeHerdrSpawnWorkerAttendedElectron(params, context, o
       : null;
     let spawnCwd = worktreeTarget ? worktreeTarget.worktreePath : canonicalRoot;
     await observeDuplicateRole(spawnCwd, role, options, signal);
-    const workspaceId = await availableWorkspace(canonicalRoot, options, signal);
+    const workspaceId = request.workspace ? await selectedWorkspace(request.workspace, spawnCwd, options, signal) : await availableWorkspace(canonicalRoot, options, signal);
+    if (request.authority) {
+      try {
+        const reservation = await reserveApprovalUse(resolveProfileConfigPath(".").base, request.authority.ledgerId, attendedSpawnApprovalRequest(request, worktreeTarget));
+        reservedUseId = reservation.useId;
+      } catch (error) {
+        return errorResult(lifecycleError("approval_missing", error.message, "needs-owner"), needsOwner(1, ["spawn approval covering repository, model and role"], repository));
+      }
+    }
+    const asgrep = await workerAsgrepSettings(options, warnings);
 
     // Revalidate after asynchronous preflight and before the first mutation.
     // An identity or lease change here is refused without creating a tab.
@@ -1576,22 +1796,23 @@ export async function executeHerdrSpawnWorkerAttendedElectron(params, context, o
     );
     if (request.worktreePath) spawnCwd = worktreeTarget.worktreePath;
 
+    indexReady = prewarmWorkerAsgrep(asgrep, spawnCwd, warnings, signal);
     // Tab topology only: no coordinator pane identity is resolved, used, or
     // manufactured anywhere on this path.
     let tabId;
     let rootPaneId;
     let layoutRaw;
     try {
-      layoutRaw = await invokeHerdr(tabCreateArgv(spawnCwd, role, workspaceId), spawnCwd, options, signal);
+      layoutRaw = await invokeHerdr(tabCreateArgv(spawnCwd, role, workspaceId, asgrep.env), spawnCwd, options, signal);
       ({ rootPaneId, tabId } = parseTabCreate(layoutRaw));
       if (!rootPaneId.startsWith(`${workspaceId}:`) || !tabId.startsWith(`${workspaceId}:`)) {
         throw lifecycleError("workspace_mismatch", "the new tab was placed outside the repository workspace", "denied");
       }
     } catch (error) {
-      return partialResult(error, {
-        partial: "tab_created", paneId: rootPaneId, tabId, role, modelArgv,
+      return auditedAttendedPartial(error, {
+        partial: "tab_created", paneId: rootPaneId, tabId, role, modelArgv, warnings,
         ...(typeof layoutRaw === "string" ? { rawResponse: layoutRaw } : {}),
-      });
+      }, request, reservedUseId);
     }
 
     let agentStartSucceeded = false;
@@ -1607,7 +1828,7 @@ export async function executeHerdrSpawnWorkerAttendedElectron(params, context, o
         canonicalRoot = revalidateSpawnAuthority(
           context.cwd, repository, canonicalRoot, request, worktreeTarget, options, "before agent start retry",
         );
-      });
+      }, readiness);
       agentStartSucceeded = true;
 
       canonicalRoot = revalidateSpawnAuthority(
@@ -1625,10 +1846,18 @@ export async function executeHerdrSpawnWorkerAttendedElectron(params, context, o
       }
       const paneRaw = await invokeHerdr(["pane", "get", rootPaneId], spawnCwd, options, signal);
       readBackPane(paneRaw, rootPaneId, spawnCwd);
+      await indexReady;
       revalidateSpawnAuthority(
         context.cwd, repository, canonicalRoot, request, worktreeTarget, options,
         "during the final read-backs",
       );
+      if (request.authority) {
+        await recordApprovalUse(resolveProfileConfigPath(".").base, request.authority.ledgerId, "spawn", repository, "spawned", reservedUseId);
+        revalidateSpawnAuthority(
+          context.cwd, repository, canonicalRoot, request, worktreeTarget, options,
+          "during the final approval-use audit write",
+        );
+      }
 
       return {
         schema: HERDR_LIFECYCLE_SCHEMA,
@@ -1636,9 +1865,11 @@ export async function executeHerdrSpawnWorkerAttendedElectron(params, context, o
         status: "spawned",
         boundary: ATTENDED_ELECTRON_BOUNDARY,
         role,
+        warnings,
         reportMarkers: reportMarkersForRole(role),
         placement: "tab",
         direction: null,
+        workspaceId,
         paneId: rootPaneId,
         rootPaneId,
         tabId,
@@ -1658,13 +1889,24 @@ export async function executeHerdrSpawnWorkerAttendedElectron(params, context, o
     } catch (error) {
       // Once agent start exits successfully, parsing or read-back failures
       // cannot erase that mutation: report a live-agent partial.
-      return partialResult(error, {
+      return auditedAttendedPartial(error, {
         partial: agentStartSucceeded ? "agent_started" : "tab_created",
-        paneId: rootPaneId, tabId, role, modelArgv,
-      });
+        paneId: rootPaneId, tabId, role, modelArgv, warnings,
+      }, request, reservedUseId);
     }
   } catch (error) {
-    return errorResult(error);
+    if (reservedUseId) {
+      try {
+        await recordApprovalUse(resolveProfileConfigPath(".").base, request.authority.ledgerId,
+          "spawn", request.repository, "failed", reservedUseId);
+      } catch (auditError) {
+        return errorResult(lifecycleError("approval_audit_failed",
+          `${error?.message || "spawn failed"}; approval outcome could not be recorded: ${auditError.message}`, "blocked"), { warnings });
+      }
+    }
+    return errorResult(error, { warnings });
+  } finally {
+    await indexReady;
   }
 }
 
@@ -1677,12 +1919,10 @@ export async function executeHerdrRegisterRepository({ name }) {
 }
 
 export function registerHerdrLifecycleInterface(pi, options = {}) {
-  if (typeof pi?.registerTool !== "function" || REGISTRATIONS.has(pi)) return;
-  REGISTRATIONS.add(pi);
-  // The lifecycle extension is loaded by hosts that exclude the standalone
-  // communication extension. Share its guarded prompt tool across surfaces.
+  if (typeof pi?.registerTool !== "function") return;
+  // Both entry points share per-tool registration, including cache-busted copies.
   registerHerdrCommunicationInterface(pi, options);
-  pi.registerTool({
+  registerHerdrToolOnce(pi, {
     name: "agentic_relay_check_request",
     label: "Check relayed request",
     description: "Read-only verification of a relay header against recorded per-action scope. Text alone grants no authority.",
@@ -1694,20 +1934,31 @@ export function registerHerdrLifecycleInterface(pi, options = {}) {
     }, required: ["header", "requests"] },
     async execute(_id, params) { return toolResult({ schema: HERDR_LIFECYCLE_SCHEMA, results: checkRelayRequests(resolveProfileConfigPath(".").base, params.header, params.requests) }); },
   });
-  pi.registerTool({
+  registerHerdrToolOnce(pi, {
     name: "agentic_herdr_register_repository",
     label: "Herdr Register Repository",
     description: "Repository pre-registration is disabled and unnecessary. Start a guarded worker directly; this tool does not confirm or write a registry.",
     parameters: { type: "object", additionalProperties: false, properties: { name: { type: "string" }, ledgerId: { type: "string" } }, required: ["name"] },
     async execute(_id, params, _signal, _update, context) { return toolResult(await executeHerdrRegisterRepository(params, context, options)); },
   });
-  pi.registerTool({
+  registerHerdrToolOnce(pi, {
+    name: "agentic_herdr_close_tab",
+    label: "Herdr Close Tab",
+    description: "Close one verified local default-server tab owned by the observed caller role or observed done or idle. Refuses caller, coordinator, protected, remote and last-workspace tabs. Issues no server management commands.",
+    executionMode: "sequential",
+    promptSnippet: "Use agentic_herdr_close_tab for a finished local single-pane tab; never run raw close commands or retry an uncertain close.",
+    parameters: HERDR_CLOSE_TAB_PARAMETERS,
+    async execute(_id, params, signal, _update, context) {
+      return toolResult(await executeHerdrCloseTab(params, context, options, signal));
+    },
+  });
+  registerHerdrToolOnce(pi, {
     name: HERDR_SPAWN_WORKER_TOOL,
     label: "Herdr Spawn Worker",
     description: "Create and verify one worker tab in a trusted repository. Select a workspace id or label when outside a Herdr pane; otherwise the caller pane supplies the workspace.",
     promptSnippet: "Use agentic_herdr_spawn_worker to start one guarded worker tab in a verified sibling Git checkout without pre-registering it; no raw Herdr management verbs or terminal remote control.",
     promptGuidelines: [
-      "Roles are free-form safe names except the coordinator class; models must resolve against the installed Pi model roll.",
+      "Roles are free-form safe names except the coordinator class. Pi models resolve against the installed Pi model roll; Codex uses the closed account/model map and requires an explicit kind, account and scoped approval.",
       "A failed start leaves the created tab for human cleanup; no automatic close is performed.",
       "The receipt is observed state only: names, argv, and self-reports are never authority.",
     ],
@@ -1716,6 +1967,293 @@ export function registerHerdrLifecycleInterface(pi, options = {}) {
       return toolResult(await executeHerdrSpawnWorker(params, context, options, signal));
     },
   });
+}
+
+// --- Host-local tab close ---------------------------------------------------
+// Tagged Herdr 0.9.1 source evidence and limits: docs/herdr-workers.md.
+// This path deliberately does not inherit invokeHerdr's process environment.
+export const HERDR_CLOSE_TAB_PARAMETERS = Object.freeze({
+  type: "object", additionalProperties: false,
+  properties: {
+    tabId: { type: "string", pattern: "^w[A-Za-z0-9]+:t[A-Za-z0-9]+$", maxLength: 128 },
+    reason: { type: "string", minLength: 1, maxLength: 512 },
+  }, required: ["tabId", "reason"],
+});
+const CLOSE_TAB_ID = /^w[A-Za-z0-9]+:t[A-Za-z0-9]+$/;
+const CLOSE_PANE_ID = /^w[A-Za-z0-9]+:p[A-Za-z0-9]+$/;
+const CLOSE_TIMEOUT_MS = 15_000;
+
+export function assertTabCloseArgv(argv) {
+  if (!Array.isArray(argv) || argv.length !== 3 || argv[0] !== "tab" || argv[1] !== "close"
+      || typeof argv[2] !== "string" || argv[2].length > 128 || !CLOSE_TAB_ID.test(argv[2])) {
+    throw lifecycleError("unsafe_close_argv", "only an exact tab close and scoped tab identifier are allowed");
+  }
+  return argv;
+}
+
+function closeEnvironment(home, socket, callerPaneId) {
+  // Construct, do not filter: no HERDR_SESSION, --machine, remote bridge,
+  // XDG override, preload variable or inherited executable selection survives.
+  return Object.freeze({ HOME: home, XDG_CONFIG_HOME: join(home, ".config"),
+    PATH: "/usr/bin:/bin:/usr/sbin:/sbin", HERDR_SOCKET_PATH: socket,
+    ...(callerPaneId ? { HERDR_PANE_ID: callerPaneId } : {}) });
+}
+
+function closeProbe(executable, argv) {
+  const result = spawnSync(executable, argv, { encoding: "utf8", shell: false,
+    env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LC_ALL: "C" },
+    timeout: 5000, maxBuffer: 16 * 1024 });
+  if (result.error || result.status !== 0 || !result.stdout?.trim()) {
+    throw lifecycleError("local_server_unverified", "the local socket listener could not be verified");
+  }
+  return result.stdout.trim();
+}
+
+export function observeLocalCloseHost(expected, options = {}) {
+  const probe = options.testCloseProbe ?? closeProbe;
+  const socket = lstatSync(expected.socket);
+  const parent = dirname(expected.socket);
+  const parentStat = statSync(parent);
+  if (realpathSync(parent) !== parent || parentStat.uid !== expected.uid || (parentStat.mode & 0o022) !== 0) {
+    throw lifecycleError("local_server_unverified", "the local socket directory is not canonical and owned");
+  }
+  if (realpathSync(expected.socket) !== expected.socket || !socket.isSocket()
+      || socket.uid !== expected.uid || (socket.mode & 0o077) !== 0) {
+    throw lifecycleError("local_server_unverified", "an owned canonical private local socket is required");
+  }
+  // Require the bound Unix socket's sole owning process to be the trusted
+  // binary running exactly `server`, not ssh, a proxy, or an attached client.
+  const listing = probe("/usr/sbin/lsof", ["-nP", "-a", "-U", "-Fpn", expected.socket]);
+  let pid;
+  const owners = new Set();
+  for (const line of listing.split("\n")) {
+    if (/^p[1-9][0-9]*$/.test(line)) pid = Number(line.slice(1));
+    if (line === `n${expected.socket}` && pid) owners.add(pid);
+  }
+  if (owners.size !== 1) throw lifecycleError("local_server_unverified", "a unique local server listener is required");
+  pid = [...owners][0];
+  const process = probe("/bin/ps", ["-ww", "-p", String(pid), "-o", "uid=", "-o", "lstart=", "-o", "command="]);
+  const match = /^\s*([0-9]+)\s+([A-Za-z]{3}\s+[A-Za-z]{3}\s+[0-9]+\s+[0-9:]+\s+[0-9]{4})\s+(.+)$/.exec(process);
+  if (!match || Number(match[1]) !== expected.uid || match[3] !== `${expected.binary} server`) {
+    throw lifecycleError("local_server_unverified", "the socket is not owned by the trusted local server process");
+  }
+  const image = probe("/usr/sbin/lsof", ["-nP", "-a", "-p", String(pid), "-d", "txt", "-Fni"]);
+  let inode;
+  let imageMatches = false;
+  for (const line of image.split("\n")) {
+    if (/^i[0-9]+$/.test(line)) inode = line.slice(1);
+    if (line === `n${expected.binary}` && inode === String(statSync(expected.binary).ino)) imageMatches = true;
+  }
+  if (!imageMatches) throw lifecycleError("local_server_unverified", "the listener has no matching trusted executable image");
+  return { ...expected, local: true, pid, startedAt: match[2], socketIdentity: `${socket.dev}:${socket.ino}` };
+}
+
+function closeHostIsLocal(observed, expected) {
+  return observed?.local === true && observed.host === expected.host && observed.socket === expected.socket
+    && observed.uid === expected.uid && observed.binary === expected.binary
+    && Number.isSafeInteger(observed.pid) && observed.pid > 0
+    && typeof observed.startedAt === "string" && observed.startedAt.length > 0 && observed.startedAt.length < 64
+    && typeof observed.socketIdentity === "string" && /^[0-9]+:[0-9]+$/.test(observed.socketIdentity);
+}
+
+function verifiedCloseHost(expected, options) {
+  let observed;
+  try { observed = options.testObserveCloseHost ? options.testObserveCloseHost(expected) : observeLocalCloseHost(expected, options); }
+  catch { throw lifecycleError("local_server_unverified", "the local socket listener could not be verified"); }
+  if (!closeHostIsLocal(observed, expected)) {
+    throw lifecycleError("cross_host", "remote, attached, forwarded or foreign-host targets cannot be closed here");
+  }
+  return Object.freeze({ ...observed });
+}
+
+function openCloseAudit(home) {
+  const directory = join(home, ".pi/agentic-driver-herdr");
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const directoryStat = statSync(directory);
+  if (realpathSync(directory) !== directory || directoryStat.uid !== process.getuid()
+      || (directoryStat.mode & 0o077) !== 0) throw new Error("untrusted audit directory");
+  const path = join(directory, "close-attempts.jsonl");
+  const fd = openSync(path, fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT
+    | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK, 0o600);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0) throw new Error("untrusted audit file");
+    return { fd, path };
+  } catch (error) { closeSync(fd); throw error; }
+}
+
+async function invokeCloseHerdr(argv, execution, options, signal) {
+  if (signal?.aborted) throw lifecycleError("aborted", "tab close was aborted");
+  // The only mutating shape has its own final assertion. The observation set
+  // is closed too; arbitrary callers cannot turn this into a management API.
+  const read = ["status server --json", "workspace list", "tab list", "pane list", "pane current --current"].includes(argv.join(" "))
+    || (argv.length === 3 && argv[0] === "pane" && argv[1] === "get" && CLOSE_PANE_ID.test(argv[2]));
+  if (!read) assertTabCloseArgv(argv);
+  const spec = { executable: execution.executable, argv: Object.freeze([...argv]),
+    spawnOptions: Object.freeze({ cwd: execution.cwd, env: execution.env, shell: false }), shell: false,
+    timeoutMs: CLOSE_TIMEOUT_MS, maxOutputBytes: MAX_PROCESS_OUTPUT_BYTES };
+  const raw = options.runProcess
+    ? await awaitBounded(Promise.resolve().then(() => options.runProcess(spec)), CLOSE_TIMEOUT_MS, signal)
+    : await runSpawnedProcess(spec.executable, spec.argv, spec.spawnOptions, CLOSE_TIMEOUT_MS, signal);
+  if (raw?.internalFailure) throw lifecycleError("close_transport_failed", "Herdr did not return a bounded response; no retry was performed");
+  const result = normalizeProcessResult(raw);
+  if (result.code !== 0) throw lifecycleError("close_process_failed", "Herdr rejected the operation; no retry was performed");
+  return parseJsonEnvelope(result.stdout, "local tab close observation");
+}
+
+function closeList(value, key) {
+  const items = value?.[key];
+  if (!Array.isArray(items) || items.length > 256 || items.some(item => !isPlainObject(item))) {
+    throw lifecycleError("target_identity_unverified", "Herdr returned an invalid bounded topology list");
+  }
+  return items;
+}
+
+function uniqueCloseItem(items, key, id, code = "target_identity_unverified") {
+  const matches = items.filter(item => item[key] === id);
+  if (matches.length !== 1) throw lifecycleError(code, "a unique local topology identity is required");
+  return matches[0];
+}
+
+async function observeCloseTarget(request, execution, options, signal) {
+  const call = argv => invokeCloseHerdr(argv, execution, options, signal);
+  const status = await call(["status", "server", "--json"]);
+  if (status.running !== true || status.status !== "running" || status.socket !== execution.expected.socket
+      || status.session !== null || status.compatible !== true || status.restart_needed !== false
+      || status.version !== HERDR_VERSION || !Number.isSafeInteger(status.protocol)) {
+    throw lifecycleError("server_identity_unverified", "the local default server identity or compatibility is unverified");
+  }
+  const workspaces = closeList(await call(["workspace", "list"]), "workspaces");
+  const tabs = closeList(await call(["tab", "list"]), "tabs");
+  const targetMatches = tabs.filter(tab => tab.tab_id === request.tabId);
+  if (!targetMatches.length) throw lifecycleError("target_not_local", "the target is not on this verified local server");
+  const tab = uniqueCloseItem(tabs, "tab_id", request.tabId);
+  const workspaceId = request.tabId.split(":")[0];
+  const workspace = uniqueCloseItem(workspaces, "workspace_id", workspaceId);
+  if (tab.workspace_id !== workspaceId) throw lifecycleError("target_identity_unverified", "tab workspace identity conflicts");
+  if (workspace.tab_count === 1 || tabs.filter(t => t.workspace_id === workspaceId).length === 1) {
+    throw lifecycleError("last_workspace_tab", "closing the last workspace tab can close its workspace");
+  }
+  if (!Number.isSafeInteger(workspace.tab_count) || workspace.tab_count < 2
+      || workspace.tab_count !== tabs.filter(t => t.workspace_id === workspaceId).length) {
+    throw lifecycleError("target_identity_unverified", "workspace tab count is inconsistent");
+  }
+  if (typeof workspace.label !== "string" || /^(?:protected|coordinator)(?:-|$)/i.test(workspace.label)) {
+    throw lifecycleError("protected_workspace", "the target workspace is protected or unverified");
+  }
+  const current = await call(currentPaneArgv());
+  const caller = current.pane ?? current;
+  if (!execution.callerPaneId || caller.pane_id !== execution.callerPaneId || !CLOSE_PANE_ID.test(caller.pane_id)) {
+    throw lifecycleError("caller_identity_unverified", "the caller requires a verified local Herdr pane");
+  }
+  if (caller.tab_id === request.tabId) throw lifecycleError("caller_tab", "the caller tab cannot be closed");
+  const callerTab = uniqueCloseItem(tabs, "tab_id", caller.tab_id);
+  if (typeof callerTab.label !== "string" || !ROLE_REGEXP.test(callerTab.label) || callerTab.label.length > 64) {
+    throw lifecycleError("caller_identity_unverified", "the caller role label is unverified");
+  }
+  execution.audit.callerRole = callerTab.label;
+  if (typeof tab.label !== "string" || !ROLE_REGEXP.test(tab.label) || tab.label.length > 64) {
+    throw lifecycleError("target_identity_unverified", "the target role label is unverified");
+  }
+  if (isCoordinatorRole(tab.label)) throw lifecycleError("coordinator_tab", "coordinator tabs cannot be closed");
+  if (tab.pane_count !== 1) throw lifecycleError("single_pane_required", "only single-pane tabs can be closed");
+  const panes = closeList(await call(["pane", "list"]), "panes").filter(p => p.tab_id === request.tabId);
+  if (panes.length !== 1 || !CLOSE_PANE_ID.test(panes[0].pane_id)) {
+    throw lifecycleError("single_pane_required", "one verified target pane is required");
+  }
+  const detail = await call(["pane", "get", panes[0].pane_id]);
+  const pane = detail.pane ?? detail;
+  execution.audit.paneId = panes[0].pane_id;
+  if (pane.pane_id !== panes[0].pane_id || pane.tab_id !== tab.tab_id
+      || pane.workspace_id !== workspaceId || !pane.pane_id.startsWith(`${workspaceId}:`)
+      || (pane.name !== undefined && pane.name !== tab.label) || (pane.role !== undefined && pane.role !== tab.label)
+      || pane.agent !== "pi" || pane.launch_pending === true || pane.interactive_ready === false) {
+    throw lifecycleError("target_identity_unverified", "the target pane and role observations conflict");
+  }
+  if (tab.label !== callerTab.label && !["done", "idle"].includes(pane.agent_status)) {
+    throw lifecycleError("not_owned_and_busy", "the target is neither owned by the caller role nor observed done or idle");
+  }
+  // Compare only safety/identity facts, not focus, token counts or UI metadata.
+  return JSON.stringify({ serverStatus: status, tabId: tab.tab_id, label: tab.label, workspaceId,
+    tabCount: workspace.tab_count, workspaceLabel: workspace.label, caller: caller.pane_id,
+    callerTab: caller.tab_id, callerRole: callerTab.label, paneId: pane.pane_id, status: pane.agent_status });
+}
+
+export async function executeHerdrCloseTab(params, context, options = {}, signal) {
+  // Use the account database, not an inherited HOME, for production routing.
+  const home = options.testHomeDir ?? userInfo().homedir;
+  const auditRecord = { callerRole: null, tabId: null, paneId: null, host: hostname(), server: null,
+    reason: null, time: new Date().toISOString(), result: "refused:invalid_close_parameters" };
+  let audit;
+  let dispatched = false;
+  let result;
+  try {
+    try { audit = openCloseAudit(home); }
+    catch { throw lifecycleError("audit_unavailable", "the append-only close audit is unavailable"); }
+    if (!isPlainObject(params) || Object.keys(params).length !== 2
+        || Object.keys(params).some(key => !["tabId", "reason"].includes(key))
+        || typeof params.tabId !== "string" || params.tabId.length > 128 || !CLOSE_TAB_ID.test(params.tabId)
+        || typeof params.reason !== "string" || !params.reason.trim() || Buffer.byteLength(params.reason) > 512
+        || /[\x00-\x1f\x7f]/.test(params.reason)) {
+      throw lifecycleError("invalid_close_parameters", "tabId and a bounded single-line reason are required");
+    }
+    auditRecord.tabId = params.tabId;
+    auditRecord.reason = params.reason;
+    // Do not pass runProcess to the resolver: fixtures must exercise actual
+    // pinned-file trust too, rather than implicitly trusting any fake adapter.
+    const { runProcess: _ignored, ...resolverOptions } = options;
+    const trustOptions = { ...resolverOptions, testHomeDir: home };
+    const executable = resolveTrustedHerdrExecutable(trustOptions);
+    const binary = trustedHerdrExecutableRealPath(executable, trustOptions);
+    const expected = { host: hostname(), socket: join(home, ".config/herdr/herdr.sock"), uid: process.getuid(), binary };
+    const host = verifiedCloseHost(expected, options);
+    auditRecord.server = { socket: host.socket, pid: host.pid, startedAt: host.startedAt,
+      socketIdentity: host.socketIdentity };
+    const callerPaneId = options.testCloseCallerPaneId ?? process.env.HERDR_PANE_ID;
+    if (typeof callerPaneId !== "string" || !CLOSE_PANE_ID.test(callerPaneId) || callerPaneId.length > 128) {
+      throw lifecycleError("caller_identity_unverified", "a local caller pane is required");
+    }
+    const execution = { executable, expected, callerPaneId, cwd: context?.cwd,
+      env: closeEnvironment(home, expected.socket, callerPaneId), audit: auditRecord };
+    const before = await observeCloseTarget(params, execution, options, signal);
+    const after = await observeCloseTarget(params, execution, options, signal);
+    if (before !== after || JSON.stringify(verifiedCloseHost(expected, options)) !== JSON.stringify(host)) {
+      throw lifecycleError("close_identity_changed", "host or target identity changed before close");
+    }
+    const argv = Object.freeze(["tab", "close", params.tabId]);
+    assertTabCloseArgv(argv);
+    if (signal?.aborted) throw lifecycleError("aborted", "tab close was aborted");
+    // No asynchronous boundary between the last local listener check and dispatch.
+    dispatched = true;
+    const closed = await invokeCloseHerdr(argv, execution, options, signal);
+    if (closed.type !== "ok") throw lifecycleError("close_unconfirmed", "close acknowledgment is unverified; do not retry automatically");
+    const remaining = closeList(await invokeCloseHerdr(["tab", "list"], execution, options, signal), "tabs");
+    const server = await invokeCloseHerdr(["status", "server", "--json"], execution, options, signal);
+    if (remaining.some(tab => tab.tab_id === params.tabId) || server.running !== true
+        || server.socket !== expected.socket || JSON.stringify(verifiedCloseHost(expected, options)) !== JSON.stringify(host)) {
+      throw lifecycleError("close_unconfirmed", "the tab disappearance and unchanged local server were not verified");
+    }
+    auditRecord.result = "closed";
+    result = { schema: HERDR_LIFECYCLE_SCHEMA, ok: true, status: "closed", tabId: params.tabId,
+      paneId: auditRecord.paneId, nonAuthorizing: true, authorityCreated: false };
+  } catch (error) {
+    const code = error?.name === "HerdrLifecycleError" || error?.code === "trusted_executable_unavailable"
+      ? error.code : "close_unverified";
+    auditRecord.result = `${dispatched ? "failed" : "refused"}:${code}`;
+    result = { schema: HERDR_LIFECYCLE_SCHEMA, ok: false, status: dispatched ? "failed" : "refused", code,
+      reason: error?.name === "HerdrLifecycleError" ? error.message : "tab close refused; local safety evidence is required",
+      nonAuthorizing: true, authorityCreated: false };
+  } finally {
+    if (audit) {
+      try {
+        const line = `${JSON.stringify(auditRecord)}\n`;
+        if (Buffer.byteLength(line) > 4096 || writeSync(audit.fd, line) !== Buffer.byteLength(line)) throw new Error("audit write failed");
+      } catch {
+        result = { ...result, ok: false, status: "failed", code: "audit_write_failed", closeDispatched: dispatched };
+      } finally { closeSync(audit.fd); }
+    }
+  }
+  return result;
 }
 
 export default registerHerdrLifecycleInterface;

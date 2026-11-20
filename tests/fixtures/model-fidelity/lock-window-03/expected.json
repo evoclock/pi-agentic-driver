@@ -1,0 +1,15 @@
+{
+  "schema":"model-fidelity.synthetic-fixture.v1",
+  "reviewStatus":"expected-unreviewed",
+  "scoringEligible":false,
+  "origin":"Synthetic model, not an incident log or database runtime reproduction.",
+  "safetyRule":"Same-generation work cleared before death may finish. Clearance for generation 1 must not affect generation 2 at a reused address.",
+  "cases":[
+    {"config":"unsafe.cfg","actionId":"ApplyEffect","mechanism":"A lock snapshot and earlier external identity observation do not protect ReadIdentity through ApplyEffect. Backend death releases the lock; external replacement need not obey the SQL session lock.","schedule":["ClientDies","ObserveLock","BackendDies","ReadMetadata","ReadIdentity","ReplaceResource","ApplyEffect"],"expectedOutcome":"counterexample: NoStaleEffect; identify unprotected observation-to-effect interval, including replacement before generation publication"},
+    {"config":"token-only.cfg","actionId":"ApplyEffect","mechanism":"Recording matching old tokens is not a current-generation comparison at effect time.","schedule":["ClientDies","ObserveLock","BackendDies","ReadMetadata","ReadIdentity","ReplaceResource","ApplyEffect"],"expectedOutcome":"counterexample: NoStaleEffect"},
+    {"config":"immutable-pin.cfg","actionId":"ApplyEffect","mechanism":"The pinned immutable object remains generation 1, but the effect resolves a reusable address now owned by generation 2. No operation binds the pin to current ownership.","schedule":["ClientDies","ObserveLock","BackendDies","ReadMetadata","ReadIdentity","ReplaceResource","ApplyEffect"],"expectedOutcome":"counterexample: NoStaleEffect; pin alone does not establish current-address ownership"},
+    {"config":"safe.cfg","actionId":"RejectEffect","mechanism":"A same-store conditional update compares authoritative generation and applies the write in one indivisible operation. Every reassignment updates the same authoritative row in that store.","schedule":["ClientDies","ObserveLock","BackendDies","ReadMetadata","ReadIdentity","ReplaceResource","RejectEffect"],"expectedOutcome":"NoStaleEffect passes; supported-under-assumptions, not production proof"},
+    {"config":"service-check.cfg","actionId":"RejectEffect","mechanism":"The resource service rejects old generations at the actual effect point, independent of delayed SQL generation publication.","schedule":["ClientDies","ObserveLock","BackendDies","ReadMetadata","ReadIdentity","ReplaceResource","RejectEffect"],"expectedOutcome":"NoStaleEffect passes under the stated service enforcement assumption"},
+    {"config":"completion-witness.cfg","actionId":"ApplyEffect","mechanism":"No replacement occurs, so the conditional write remains allowed despite both deaths. Negated reachability is not a safety property.","schedule":["ClientDies","ObserveLock","BackendDies","ReadMetadata","ReadIdentity","ApplyEffect"],"expectedOutcome":"counterexample: NoCompletion witnesses permitted completion on generation 1"}
+  ]
+}

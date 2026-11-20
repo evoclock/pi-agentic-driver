@@ -10,11 +10,11 @@ node "$STATECHART_RUNNER" --spec .scratch/efdw/EFDW.tla --config .scratch/efdw/s
 node "$STATECHART_RUNNER" --spec .scratch/efdw/EFDW.tla --config .scratch/efdw/unsafe.cfg --out .scratch/efdw/unsafe-final --timeout-seconds 60
 ```
 
-Detected installed checker `tlc`, TLC2 **2.19**, adapter SHA-256 `ec715c4b58e04346f5f4ddfe39ad03faf43df7f18534d9de76bd764929e3049a`, Node **v26.12.1**. `--check` returned `available-not-run` before the checks. Spec SHA-256 `a1e84a7e64524dd726bd44e43c77315c9c0673f8d31846d81c6cc2ee2bdf9c69`; safe config `e045360a4f20fe2a5b74c84f7730e97bba5cfff2a95d87869a7bcbedba496165`; unsafe config `948f914eb4b4313bd8b4e17222de1a7d4941706136c9028775513f23fc9ee728`. Compare hashes before rerunning.
+If the checker is absent, skip both runs and report them unrun. A successful safe check and an unsafe counterexample are expected, but neither proves a runtime guard.
 
 | Config | Local result.json / tlc.out | Result and bounded output |
 | --- | --- | --- |
 | safe | `.scratch/efdw/safe-final/{result.json,tlc.out}` | `checked-no-errors`, exit 0; 35 generated, 23 distinct states, depth 9, 0 left on queue; "Model checking completed. No error has been found." |
 | deliberately unsafe | `.scratch/efdw/unsafe-final/{result.json,tlc.out}` | `failed`, checker exit 12; `NoThirdReview` violated. Counterexample: initial `reviews=2`, `phase="recovery"`, then `UnsafeReviewAfterRecovery` moves to `reviews=3`, `phase="review"`. Two-state trace, 6 distinct states. |
 
-The deliberately unsafe variant toggles the `Unsafe` constant; it is not a production escape hatch. The counterexample is an abstract spec defect by construction, not a discovered PAD runtime bug. An initial parse/evaluation error from an unparenthesized conditional was corrected before these final runs; the final hashes above identify the checked version. No live guard or autonomous delivery is proved.
+The deliberately unsafe variant toggles the `Unsafe` constant; it is not a production escape hatch. The counterexample is an abstract spec defect by construction, not a discovered PAD runtime bug. No live guard or automatic delivery is proved.

@@ -577,7 +577,7 @@ export function pulseWorkerSpawnSeam({ executeHerdrSpawnWorker, executeHerdrSpaw
   if (typeof executeHerdrSpawnWorker !== "function") {
     throw new Error("pulseWorkerSpawnSeam requires the guarded herdr-lifecycle executeHerdrSpawnWorker");
   }
-  return async ({ role, repository, model, placement, context, signal, envelope = null, provider = null, seatId = null, endpointRef = null }) => {
+  return async ({ role, repository, model, placement, context, signal, workspace, worktreePath, authority, envelope = null, provider = null, seatId = null, endpointRef = null }) => {
     if (placement !== "host") {
       return { ok: false, code: "containment-seam-unavailable", reason: CONTAINMENT_SEAM_UNAVAILABLE };
     }
@@ -603,13 +603,17 @@ export function pulseWorkerSpawnSeam({ executeHerdrSpawnWorker, executeHerdrSpaw
     // attended Electron boundary when the trusted host bound it; without a
     // bound boundary the spawn fails closed here. No other context class is
     // dispatched: the TUI predicate itself is not weakened for any caller.
+    const request = { placement: "tab", role, model, repository: repositoryName,
+      ...(workspace !== undefined ? { workspace } : {}),
+      ...(worktreePath !== undefined ? { worktreePath } : {}),
+      ...(authority !== undefined ? { authority } : {}) };
     if (isAttendedElectronContext(context)) {
       if (typeof executeHerdrSpawnWorkerAttendedElectron !== "function") {
         return { ok: false, code: "attended-electron-seam-required", reason: "an attended Electron context was supplied but the attended Electron spawn boundary was not bound (fails closed)" };
       }
-      return executeHerdrSpawnWorkerAttendedElectron({ placement: "tab", role, model, repository: repositoryName }, context, spawnOptions, signal);
+      return executeHerdrSpawnWorkerAttendedElectron(request, context, spawnOptions, signal);
     }
-    return executeHerdrSpawnWorker({ placement: "tab", role, model, repository: repositoryName }, context, spawnOptions, signal);
+    return executeHerdrSpawnWorker(request, context, spawnOptions, signal);
   };
 }
 
