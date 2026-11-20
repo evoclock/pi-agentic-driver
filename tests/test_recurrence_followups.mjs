@@ -40,6 +40,16 @@ test('changed model inventory reports exact unregistered obligation', () => {
   });
 });
 
+// Why: fixture models are not the design-model inventory; a new test .tla must not fail the public gate.
+test('changed model inventory ignores test fixture models', () => {
+  fixture(({ root, put }) => {
+    put('tests/fixtures/model-fidelity/example/Example.tla', '---- MODULE Example ----\n====\n');
+    put('tests/fixtures/model-fidelity/example/safe.cfg', 'INVARIANT Safe\n');
+    const result = inventory.changedModelInventory({ root });
+    assert.equal(result.errors.some((error) => error.includes('tests/fixtures/')), false, result.errors.join('\n'));
+  });
+});
+
 // Why: make preflight must reject inventory drift before expensive checker runs.
 test('preflight rejects an unregistered new model without running long gates', () => {
   fixture(({ root, put }) => {

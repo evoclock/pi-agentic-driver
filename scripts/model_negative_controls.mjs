@@ -124,6 +124,9 @@ export function changedModelInventory({root = '.'} = {}) {
     errors.push(...allowlistGrowth(previous,current));
   }
   for (const path of changed) {
+    // The audited inventory is only docs/ and skills/ design models. Test
+    // fixtures may add .tla files without a registry entry.
+    if (!(path.startsWith('docs/') || path.startsWith('skills/'))) continue;
     if (!audit.models.some(model => model.path === path)) errors.push(
       `${path}: added/changed model has no auditable safe configuration`);
   }
