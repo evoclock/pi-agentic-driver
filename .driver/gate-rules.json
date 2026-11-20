@@ -175,7 +175,7 @@
     {
       "check": "no-hidden-installs",
       "path": "scripts/enforcement/linux_microvm_remote_fixture.sh",
-      "sha256": "f3f18024398ccfc7ecf5e0dfbc87f9459534dc37e268e09859a62e7a9c072f0b",
+      "sha256": "6199e09d73ddaca3be3d2e9d5481c1f358ea6cf8c4bed7fe433e291f52caf96a",
       "reason": "This fixture embeds denied-command patterns and assertions; the matched install phrases are classifier test data, not install operations."
     }
   ],
