@@ -1,12 +1,35 @@
 // SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
 // SPDX-License-Identifier: AGPL-3.0-only
 import { randomUUID } from "node:crypto";
-import { homedir } from "node:os";
-import { relative, resolve } from "node:path";
+import { readFileSync, realpathSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
 import { normalizeSkillObservation, observationId, summarizeSkillObservations, SKILL_OBSERVATION_ENTRY } from "../scripts/enforcement/task_skill_observability_pi.js";
 import { HERDR_ROLE_PATTERN } from "../scripts/enforcement/herdr_communication_pi.js";
 
-const SKILL_PATH = /^([a-z][a-z0-9-]*-pi)\/SKILL\.md$/;
+// A session-only read uses the same two hashed, session-scoped placeholder IDs.
+const sessionReadIdentity = (sessionId, workerId) => ({
+  taskId: observationId(`session-skill-read:${sessionId}`),
+  attemptId: observationId(`session-skill-read:${sessionId}`), workerId,
+});
+
+function skillRead(path) {
+  if (basename(path) !== "SKILL.md") return null;
+  let directory;
+  try { directory = dirname(realpathSync(path)); } catch { directory = dirname(path); }
+  const skill = basename(directory);
+  let current = directory;
+  while (true) {
+    try {
+      const manifest = JSON.parse(readFileSync(resolve(current, "package.json"), "utf8"));
+      return { skill, package: manifest.name, packageVersion: manifest.version };
+    } catch (error) {
+      if (error?.code !== "ENOENT") return { skill, package: "other" };
+    }
+    const parent = dirname(current);
+    if (parent === current) return { skill, package: "other" };
+    current = parent;
+  }
+}
 const OBSERVER = "agentic_task_skill_observation";
 const rolePattern = new RegExp(HERDR_ROLE_PATTERN);
 const submittedSkill = /^\/skill:([a-z][a-z0-9-]*-pi)(?=\s|$)/;
@@ -23,7 +46,6 @@ const fields = { type: "object", additionalProperties: false, properties: {
 }, required: ["kind"] };
 
 export default function taskSkillObservability(pi) {
-  const skillRoot = resolve(process.env.PI_POTETO_SKILLS_ROOT ?? resolve(homedir(), "pi-poteto-mode", "skills"));
   const workspace = process.env.HERDR_WORKSPACE_ID;
   const tab = process.env.HERDR_TAB_ID;
   const pane = process.env.HERDR_PANE_ID;
@@ -81,8 +103,9 @@ export default function taskSkillObservability(pi) {
   });
   pi.on("tool_call", (event, ctx) => {
     ensure(ctx);
-    if (!active || event.toolName === OBSERVER || event.toolName.startsWith("Task")) return;
-    calls.set(event.toolCallId, { ...active, toolClass: event.toolName === "read" ? "read" : "work" });
+    if (event.toolName === OBSERVER || event.toolName.startsWith("Task") || (!active && event.toolName !== "read")) return;
+    calls.set(event.toolCallId, { ...(active ?? sessionReadIdentity(sessionId, workerId)),
+      sessionOnly: !active, toolClass: event.toolName === "read" ? "read" : "work" });
   });
   pi.on("tool_result", (event, ctx) => {
     ensure(ctx);
@@ -127,11 +150,11 @@ export default function taskSkillObservability(pi) {
     calls.delete(event.toolCallId);
     if (!call || observationId(ctx.sessionManager.getSessionId?.()) !== sessionId) return;
     const ref = observationId(event.toolCallId);
-    record({ ...call, kind: "tool", eventId: `tool:${event.toolCallId}`, sessionId, ref,
+    if (!call.sessionOnly) record({ ...call, kind: "tool", eventId: `tool:${event.toolCallId}`, sessionId, ref,
       result: event.isError ? "error" : "ok", toolClass: call.toolClass });
-    if (event.isError || call.toolClass !== "read") return;
-    const skill = typeof event.input?.path === "string" ? relative(skillRoot, resolve(ctx.cwd ?? process.cwd(), event.input.path)).match(SKILL_PATH)?.[1] : null;
-    if (skill) record({ ...call, kind: "read", eventId: `read:${event.toolCallId}`, ref, skill, sessionId });
+    if (event.isError || call.toolClass !== "read" || typeof event.input?.path !== "string") return;
+    const skill = skillRead(resolve(ctx.cwd ?? process.cwd(), event.input.path));
+    if (skill) record({ ...call, ...skill, kind: "read", eventId: `read:${event.toolCallId}`, ref, sessionId });
   });
   pi.registerCommand?.("skill-observation-report", {
     description: "Show local task skill coverage without model inference",

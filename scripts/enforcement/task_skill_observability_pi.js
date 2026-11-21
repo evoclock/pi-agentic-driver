@@ -8,6 +8,9 @@ const DIGEST = /^[a-f0-9]{64}$/;
 const ROLE = new RegExp(HERDR_ROLE_PATTERN);
 const STEP = /^(?:[1-9]|[1-9][0-9])$/;
 const VERSION = /^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$/;
+const SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
+const PACKAGE_VERSION = /^[0-9][0-9A-Za-z.+-]{0,63}$/;
 const RECIPES = new Set(["investigation", "bug-fix", "feature", "refactoring", "prototype", "perf-issue", "hillclimb", "runtime-forensics", "trace-forensics", "visual-parity", "eval", "authoring-a-skill", "autonomous-run", "orchestrate", "opening-a-pr", "shipping", "babysit", "multi-phase-plan", "autopilot-full", "autopilot-stack", "session-pickup", "pause-safely", "worktree-cleanup"]);
 const SKILLS = new Set(["architect-pi", "arena-pi", "automate-me-pi", "benchmark-checklist-pi", "blast-radius-pi", "bro-pi", "correct-pi", "create-formal-verification-skill-pi", "create-verification-skill-pi", "figure-it-out-pi", "how-pi", "in-your-own-words-pi", "interrogate-pi", "ketchup-pi", "ketchup-video-pi", "maintain-formal-verification-skill-pi", "maintain-verification-skill-pi", "make-bot-ui-pi", "no-comments-pi", "poteto-help-pi", "poteto-mode-pi", "recall-pi", "reflect-pi", "setup-pstack-pi", "sharpen-pi", "show-me-your-work-pi", "statechart-pi", "swarm-pi", "tdd-pi", "teach-pi", "technical-writing-pi", "typescript-best-practices-pi", "unslop-pi", "why-pi", "principle-attack-the-premise-pi", "principle-boundary-discipline-pi", "principle-build-the-lever-pi", "principle-encode-lessons-in-structure-pi", "principle-exhaust-the-design-space-pi", "principle-experience-first-pi", "principle-explain-the-number-pi", "principle-fix-root-causes-pi", "principle-foundational-thinking-pi", "principle-guard-the-context-window-pi", "principle-laziness-protocol-pi", "principle-make-operations-idempotent-pi", "principle-migrate-callers-then-delete-legacy-apis-pi", "principle-minimize-reader-load-pi", "principle-model-the-domain-pi", "principle-never-block-on-the-human-pi", "principle-outcome-oriented-execution-pi", "principle-prove-it-works-pi", "principle-redesign-from-first-principles-pi", "principle-separate-before-serializing-shared-state-pi", "principle-sequence-verifiable-units-pi", "principle-subtract-before-you-add-pi", "principle-test-behavior-not-implementation-pi", "principle-type-system-discipline-pi"]);
 const OUTCOMES = ["success", "failure", "interrupted", "skipped", "unknown"];
@@ -15,7 +18,7 @@ const REASONS = ["verified-result", "caller-reported-result", "tool-error", "req
 const KINDS = ["task", "recipe", "read", "activity", "tool", "outcome", "gap", "spawn", "command"];
 const CAPTURE_LIMITS = Object.freeze([
   "availability-inventory-not-captured", "playbook-and-reference-reads-not-captured",
-  "other-skill-roots-not-captured", "pre-observer-history-not-captured",
+  "pre-observer-history-not-captured",
   "role-without-matched-spawn-not-captured", "skill-command-expansion-and-use-not-verified",
   "cross-session-input-may-be-incomplete",
 ]);
@@ -65,9 +68,16 @@ export function normalizeSkillObservation(input, { persisted = false } = {}) {
       requiredSkills: [...input.requiredSkills], requiredSteps: [...input.requiredSteps], requirementsProvenance: "caller-declared" });
   }
   if (input.kind === "read" || input.kind === "activity" || input.kind === "command") {
-    if (!SKILLS.has(input.skill) || ((input.kind === "read" || input.activity === "step") && !opaque(input.ref))
+    if (!(input.kind === "read" ? SKILL_NAME.test(input.skill) : SKILLS.has(input.skill))
+      || ((input.kind === "read" || input.activity === "step") && !opaque(input.ref))
       || (input.ref != null && !opaque(input.ref))) return null;
     out.skill = input.skill;
+    if (input.kind === "read") {
+      out.package = typeof input.package === "string" && input.package.length <= 128 && PACKAGE_NAME.test(input.package)
+        ? input.package : "other";
+      if (out.package !== "other" && typeof input.packageVersion === "string"
+        && PACKAGE_VERSION.test(input.packageVersion)) out.packageVersion = input.packageVersion;
+    }
     if (input.ref) out.ref = opaque(input.ref);
     if (input.kind === "command") out.commandProvenance = "command-submitted";
     if (input.kind === "activity") {

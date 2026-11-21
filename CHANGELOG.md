@@ -1,3 +1,7 @@
+## 3.3.0
+
+- Record every SKILL.md read with its nearest package name and version, including sessions without an active PAD task; clarify repository-only gate guidance.
+
 ## 3.2.0
 
 - Pin published `@evoclock/pi-bowerbird` 0.3.0 for existing model-fidelity views; its TLA+/TLC verify and composition/click-through diagramming are available without changing the view API. Workflow-runner TLC migration and diagram rebuilds remain follow-ups.
@@ -76,9 +80,9 @@ Release dates below come from the read-only npm registry `time` record for `@evo
 
 ## 2.0.0
 
-- Rename `claimFromVogelkopRequest` to `claimFromBoardRequest` without an alias.
-- Migrate `vogelkop.board-claim-request.v1` to `agentic-driver.board-claim-request.v2`, `vogelkop.board-claim-receipt.v1` to `agentic-driver.board-claim-receipt.v2`, `vogelkop.board-claim-route.v1` to `agentic-driver.board-claim-route.v2`, and `vogelkop.async-transport.receipt.v1` to `agentic-driver.async-transport.receipt.v2`. Legacy request schemas are refused; update producers and consumers together.
-- Move the workspace capability registry from `.vogelkop/capabilities.json` to `.agentic-driver/capabilities.json`. Route identity now uses `board-<alias>` and `board-router`.
+- Rename `claimFrom[legacy private client]Request` to `claimFromBoardRequest` without an alias.
+- Migrate `[legacy private client].board-claim-request.v1` to `agentic-driver.board-claim-request.v2`, `[legacy private client].board-claim-receipt.v1` to `agentic-driver.board-claim-receipt.v2`, `[legacy private client].board-claim-route.v1` to `agentic-driver.board-claim-route.v2`, and `[legacy private client].async-transport.receipt.v1` to `agentic-driver.async-transport.receipt.v2`. Legacy request schemas are refused; update producers and consumers together.
+- Move the workspace capability registry from `.[legacy private client]/capabilities.json` to `.agentic-driver/capabilities.json`. Route identity now uses `board-<alias>` and `board-router`.
 - Preserve the packaged decision-to-spec skill already shipped in 1.1.2; do not package the private worker-repository registry.
 
 ## 1.1.2 (2026-10-11)
