@@ -148,6 +148,8 @@
     "scripts/enforcement/nudge_validate_pi.js",
     ".agentic-driver/nudge.defaults.json",
     "README.md",
+    "assets/spawn-worker-tab.png",
+    "docs/shipped-surface.md",
     "docs/herdr-workers.md",
     "docs/state-machines/worker-abort",
     "docs/task-board.md",
@@ -156,6 +158,9 @@
     "docs/review-and-writing.md",
     "docs/gate.md",
     "docs/interactive-safeguards.md",
+    "docs/fleet-herdr-spawn.md",
+    "docs/autonomous-journeys.md",
+    "docs/portable-repository-contract.md",
     "config/skill-proof.v1.json",
     "LICENSE",
     "extensions/herdr-lifecycle.ts",
@@ -169,7 +174,6 @@
     "config/codex-accounts.v1.example.json",
     "docs/design/codex-daybreak/codex-spawn.md",
     "config/microvm-target.v1.example.json",
-    "config/microvm-target.v1.json",
     "extensions/linux-microvm.ts",
     "scripts/enforcement/linux_microvm_cutover_pi.js",
     "scripts/enforcement/native_tui_context.js",
@@ -200,7 +204,6 @@
     "scripts/codebase_inventory_gate.py",
     "scripts/inventory_refresh.sh",
     "config/codebase-inventory.schema.json",
-    ".githooks/pre-commit",
     "templates/AGENTS.md",
     "scripts/enforcement/task_board_core_pi.js",
     "scripts/enforcement/task_board_hash_pi.js",
@@ -289,7 +292,7 @@
   "dependencies": {
     "@earendil-works/chord": "1.0.4",
     "@earendil-works/pi-durable": "1.0.4",
-    "@evoclock/pi-bowerbird": "0.1.2",
+    "@evoclock/pi-bowerbird": "0.3.0",
     "typescript": "5.9.2"
   },
   "repository": {

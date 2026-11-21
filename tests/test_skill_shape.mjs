@@ -21,7 +21,7 @@ test('decision-gate ships a formal decision workflow', () => {
   const proof = JSON.parse(readFileSync(resolve(root, 'config/skill-proof.v1.json'))).skills['decision-gate'];
   assert.equal(proof.kind, 'code');
   assert.match(proof.acceptance, /behavior.*unconfigured/);
-  assert.match(readFileSync(resolve(root, 'README.md'), 'utf8'), /decision-gate.*behavior proof gap/);
+  assert.match(readFileSync(resolve(root, 'docs/shipped-surface.md'), 'utf8'), /decision-gate.*behavior proof gap/);
 });
 
 // Why: a negative model must expose the intended boundary failure, not merely fail to parse.
@@ -30,16 +30,18 @@ test('decision-gate TLC safe and unsafe configurations', t => {
   const jar = process.env.TLA2TOOLS;
   if (!probe && !jar) return t.skip('TLC not run: tlc unavailable on PATH and TLA2TOOLS unset');
   const executable = jar ? (process.env.JAVA || 'java') : probe;
-  const prefix = jar ? ['-cp', jar, 'tlc2.TLC'] : [];
   mkdirSync(resolve(root, '.scratch'), { recursive: true });
   const cwd = mkdtempSync(resolve(root, '.scratch/decision-tlc-'));
+  const prefix = jar ? ['-Djava.io.tmpdir=' + cwd, '-cp', jar, 'tlc2.TLC'] : [];
+  const env = { ...process.env, TMPDIR: cwd, TEMP: cwd,
+    JAVA_TOOL_OPTIONS: ((process.env.JAVA_TOOL_OPTIONS || '') + ' -Djava.io.tmpdir=' + JSON.stringify(cwd)).trim() };
   cpSync(resolve(root, 'skills/decision-gate'), cwd, { recursive: true });
   prefix.push('-workers', '1', '-metadir', resolve(cwd, 'meta'));
-  const safe = spawnSync(executable, [...prefix, '-config', 'DecisionGate.cfg', 'DecisionGate.tla'], { cwd, encoding: 'utf8', timeout: 60000 });
+  const safe = spawnSync(executable, [...prefix, '-config', 'DecisionGate.cfg', 'DecisionGate.tla'], { cwd, env, encoding: 'utf8', timeout: 60000 });
   assert.equal(safe.status, 0, safe.stdout + safe.stderr);
   assert.match(safe.stdout, /Model checking completed. No error has been found/);
   for (const [variant, invariant] of [['owner', 'OwnerBoundary'], ['record', 'RecordedBeforeProceed'], ['enforce', 'EnforcedBeforeProceed']]) {
-    const unsafe = spawnSync(executable, [...prefix, '-config', `DecisionGate-unsafe-${variant}.cfg`, 'DecisionGate.tla'], { cwd, encoding: 'utf8', timeout: 60000 });
+    const unsafe = spawnSync(executable, [...prefix, '-config', `DecisionGate-unsafe-${variant}.cfg`, 'DecisionGate.tla'], { cwd, env, encoding: 'utf8', timeout: 60000 });
     assert.equal(unsafe.status, 12, unsafe.stdout + unsafe.stderr);
     assert.ok(unsafe.stdout.includes(`Invariant ${invariant} is violated`));
   }

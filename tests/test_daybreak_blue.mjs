@@ -17,11 +17,15 @@ const body = (id, extras = {}) => ({ model: id, store: false, include: ['reasoni
 const runnerPath = new URL('../node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/runner.js', import.meta.url);
 const providerPath = new URL('../node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js', import.meta.url);
 
+// Why: provider-shaped requests must receive Daybreak on the eligible model.
+test('provider-shaped 6-sol requests receive Daybreak', () => {
+  const providerShaped = { model: 'gpt-6-sol', store: false, include: ['reasoning.encrypted_content'], input: [] };
+  assert.deepEqual(daybreakBluePayload(providerShaped).access_programs, { cyber: 'daybreak_blue' });
+});
+
 // Why: outgoing body model controls the entitlement even when a virtual session model differs.
 test('only Codex-shaped 6-sol receives Daybreak; every other request loses inherited cyber', () => {
   assert.deepEqual(daybreakBluePayload(body('gpt-6-sol')).access_programs, { cyber: 'daybreak_blue' });
-  const providerShaped = { model: 'gpt-6-sol', store: false, include: ['reasoning.encrypted_content'], input: [] };
-  assert.deepEqual(daybreakBluePayload(providerShaped).access_programs, { cyber: 'daybreak_blue' });
   assert.equal(daybreakBluePayload(body('gpt-6.1-sol')), undefined);
   assert.equal(daybreakBluePayload(body('gpt-6-sol', { include: [] })), undefined);
   for (const id of ['gpt-6.1-sol', 'other']) {

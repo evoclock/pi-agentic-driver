@@ -29,9 +29,9 @@ function fixture(t) {
 }
 
 // Why: the separate guarded dispatch entry must register while run/tick/status keep their non-authorizing reducer behavior.
-test('seven Pi tools register and run/tick/status share one non-authorizing state', async (t) => {
+test('six Pi tools register and run/tick/status share one non-authorizing state', async (t) => {
   const f = fixture(t);
-  assert.deepEqual([...f.tools.keys()].sort(), ['agentic_workflow_cancel', 'agentic_workflow_dispatch', 'agentic_workflow_gate', 'agentic_workflow_handbrake', 'agentic_workflow_run', 'agentic_workflow_status', 'agentic_workflow_tick']);
+  assert.deepEqual([...f.tools.keys()].sort(), ['agentic_workflow_cancel', 'agentic_workflow_dispatch', 'agentic_workflow_gate', 'agentic_workflow_run', 'agentic_workflow_status', 'agentic_workflow_tick']);
   const params = { workflow: f.workflow, taskId: 'task' };
   const first = await f.call('agentic_workflow_run', { ...params, eventId: 'tick1' });
   assert.equal(first.move, 'act'); assert.equal(first.authorityCreated, false);
@@ -63,7 +63,6 @@ test('agentic_workflow_gate registers and runs only the spec event', async t => 
 test('owner controls and foreign scopes fail closed without a native confirmation', async (t) => {
   const f = fixture(t), params = { workflow: f.workflow, taskId: 'task', eventId: 'stop' };
   assert.equal((await f.call('agentic_workflow_cancel', params)).reason, 'owner-confirmation-required');
-  assert.equal((await f.call('agentic_workflow_handbrake', { ...params, action: 'off' })).reason, 'release-reconciliation-unavailable');
   await assert.rejects(f.call('agentic_workflow_tick', { ...params, event: { id: 'stop', type: 'cancel' } }), /invalid bounded/);
   await assert.rejects(f.call('agentic_workflow_run', params, { ...f.ctx, cwd: resolve('.') }), /current trusted checkout/);
 });
@@ -110,7 +109,6 @@ test('CLI refuses owner controls and private recovery events like Pi tick', asyn
   }
   assert.equal((await f.call('agentic_workflow_cancel', { workflow: f.workflow, taskId: 'task', eventId: 'stop' })).reason, 'owner-confirmation-required');
   const confirmed = { ...f.ctx, hasUI: true, ui: { confirm: async () => true } };
-  assert.equal((await f.call('agentic_workflow_handbrake', { workflow: f.workflow, taskId: 'task', eventId: 'hold', action: 'on' }, confirmed)).phase, 'held');
   const other = fixture(t), confirmedCancel = { ...other.ctx, hasUI: true, ui: { confirm: async () => true } };
   assert.equal((await other.call('agentic_workflow_cancel', { workflow: other.workflow, taskId: 'task', eventId: 'cancel' }, confirmedCancel)).phase, 'cancelled');
 });

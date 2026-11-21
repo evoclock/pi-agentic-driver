@@ -561,6 +561,25 @@ class TestGateWorkflow(unittest.TestCase):
         self.assertNotIn('test-only:', completed.stdout)
 
     @unittest.skipUnless(RUNNER.is_file(), "test-gate runner is not implemented yet")
+    def test_inherited_edits_are_not_new_cases(self):
+        """Why: an edited inherited case must not replace the new-case fail-first contrast."""
+        self.put_test('import unittest\nclass Cases(unittest.TestCase):\n'
+                      '    def test_old(self):\n        """Why: inherited."""\n        self.assertTrue(True)\n')
+        self.git('add', '.')
+        self.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                 'commit', '-qm', 'original case')
+        self.put_test('import unittest\nclass Cases(unittest.TestCase):\n'
+                      '    def test_old(self):\n        """Why: inherited."""\n        self.assertEqual(1, 1)\n')
+        spec = spec_from_file_location('gate_runner', RUNNER)
+        runner = module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        self.assertTrue(hasattr(runner, 'new_test_cases'))
+        base = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.assertFalse(runner.new_test_cases(self.repo, base, 'tests/test_contract.py'))
+        self.put_test((self.repo / 'tests/test_contract.py').read_text() +
+                      '    def test_new(self):\n        """Why: new."""\n        self.assertEqual(1, 2)\n')
+        self.assertTrue(runner.new_test_cases(self.repo, base, 'tests/test_contract.py'))
+
     def test_always_passing_test_is_rejected_on_base(self):
         """Why: a test that passes before the change does not prove the new behavior."""
         self.put_test(self.fixture_text("vacuous.py"))

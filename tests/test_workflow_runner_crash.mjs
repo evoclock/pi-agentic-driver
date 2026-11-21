@@ -41,7 +41,7 @@ test('SIGKILL owner lock is recovered and crash-resume parks without re-Act', as
 });
 
 // Why: A killed recovery claimant must leave a reclaimable guard so both later events and cancel remain possible.
-test('SIGKILL during lock recovery cannot permanently block the handbrake', async (t) => {
+test('SIGKILL during lock recovery cannot block cancel', async (t) => {
   const f = fixture(t);
   run(f.workflow, f.store, { id: 'observe', type: 'look' });
   await deadLock(f.store);

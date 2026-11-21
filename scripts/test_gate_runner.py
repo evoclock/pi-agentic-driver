@@ -914,6 +914,31 @@ def hermetic_contrast(root: Path, snapshot: Path, base_sha: str, commit_sha: str
     return proof
 
 
+def new_test_cases(root: Path, base_sha: str, name: str) -> bool:
+    """A changed file is not itself a new test: compare declared case identities."""
+    old = run_git(root, 'show', f'{base_sha}:{name}')
+    if old.returncode:
+        return True
+    head = (root / name).read_text(encoding='utf-8')
+    if name.endswith('.py'):
+        def cases(source):
+            tree = ast.parse(source)
+            return {node.name for node in ast.walk(tree)
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith('test_')}
+    else:
+        # Dynamic case names cannot be safely classified as inherited.
+        pattern = r"\b(?:test|it)\s*\(\s*(['\"])(.*?)\1"
+        def cases(source):
+            return {match.group(2) for match in re.finditer(pattern, source)}
+        declarations = r'(?<![\w.])(?:test|it)\s*\('
+        if len(re.findall(declarations, head)) > len(re.findall(declarations, old.stdout)) and not cases(head) - cases(old.stdout):
+            return True  # An added dynamic case must still run fail-first.
+    try:
+        return bool(cases(head) - cases(old.stdout))
+    except (SyntaxError, UnicodeError):
+        return True
+
+
 def fixture_baseline_observations(root: Path, base_sha: str, commit_sha: str, tests: set[str], specs: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
     with ExitStack() as cleanup:
         return _fixture_baseline_observations(root, base_sha, commit_sha, tests, specs, cleanup)
@@ -923,7 +948,9 @@ def _fixture_baseline_observations(root: Path, base_sha: str, commit_sha: str, t
     snapshot = prepare_base_snapshot(root, base_sha, tests)
     cleanup.callback(shutil.rmtree, snapshot)
     observations, proofs, hermetic_proofs = [], [], []
-    for spec in specs:
+    new_specs = [spec for spec in specs if any(new_test_cases(root, base_sha, name) for name in spec['testFiles'])]
+    # Keep legacy edited-case contrasts when there are no newly declared cases.
+    for spec in new_specs or specs:
         observation = run_command(root, snapshot, spec, phase='fail-first-base', commit_sha=commit_sha,
                                   base_sha=base_sha, expected='assertion failure or host-proven fixture correction',
                                   environment={key: value for key, value in os.environ.items() if key != 'TEST_GATE_SCRIPT'})

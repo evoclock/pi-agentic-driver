@@ -90,13 +90,4 @@ export default function workflowRunner(pi, dependencies = {}) {
       if (!ctx.hasUI || !await ctx.ui.confirm('Cancel workflow?', `Fence ${params.taskId} in ${ctx.cwd}?`)) return refuse('owner-confirmation-required');
       return result(await run(params.workflow, store, { id: params.eventId, type: 'cancel' }, { authority: await authorityFor(ctx.cwd) }));
     } });
-  pi.registerTool({ ...common, name: 'agentic_workflow_handbrake', label: 'Workflow Handbrake',
-    description: 'Native-confirmed owner hold. Release remains unavailable pending safe reconciliation.',
-    parameters: Type.Object({ ...identity, eventId, action: Type.Union([Type.Literal('on'), Type.Literal('off')]) }),
-    async execute(_id, params, _signal, _update, ctx) {
-      const store = scope(params, ctx);
-      if (params.action !== 'on') return refuse('release-reconciliation-unavailable');
-      if (!ctx.hasUI || !await ctx.ui.confirm('Hold workflow?', `Fence ${params.taskId} in ${ctx.cwd}?`)) return refuse('owner-confirmation-required');
-      return result(await run(params.workflow, store, { id: params.eventId, type: 'hold' }, { authority: await authorityFor(ctx.cwd) }));
-    } });
 }

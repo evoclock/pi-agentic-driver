@@ -1,6 +1,6 @@
 # Logical ownership refinement
 
-This library-only slice adds `release-ownership`, `transfer-ownership` and `reconcile-old`. It does not dispatch workers. Logical ownership is persisted in the authenticated journal/snapshot above the unchanged per-event filesystem writer lock. No operation forcibly retires a live PID/inode lock. The earlier design's handbrake `Release` is a separate operation and is unchanged.
+This library-only slice adds `release-ownership`, `transfer-ownership` and `reconcile-old`. It does not dispatch workers. Logical ownership is persisted in the authenticated journal/snapshot above the unchanged per-event filesystem writer lock. No operation forcibly retires a live PID/inode lock. The earlier design's workflow-hold `Release` is a separate operation and remains unexposed.
 
 ## Contract
 
@@ -46,4 +46,4 @@ Five new tests were written and run before production changes; all five failed o
 
 ## Limits
 
-The composition interleaves atomic ownership and RR5 actions; it does not model byte-level filesystem schedules, host authentication, arbitrary generations or infinite runs. Physical lock concurrency remains covered only by the existing abstraction and sampled runtime schedules. Trusted terminal readback cannot revoke already-issued external work; a host must enforce generation fencing at its own dispatch/effect boundary. The library publishes decisions, not actual worker effects. No live worker, real terminal readback adapter, universal enforcement or procedure adherence proof was exercised. The existing history cap still applies to new ownership operations. CLI/Pi ownership and handbrake-off remain unavailable.
+The composition interleaves atomic ownership and RR5 actions; it does not model byte-level filesystem schedules, host authentication, arbitrary generations or infinite runs. Physical lock concurrency remains covered only by the existing abstraction and sampled runtime schedules. Trusted terminal readback cannot revoke already-issued external work; a host must enforce generation fencing at its own dispatch/effect boundary. The library publishes decisions, not actual worker effects. No live worker, real terminal readback adapter, universal enforcement or procedure adherence proof was exercised. The existing history cap still applies to new ownership operations. CLI/Pi ownership and workflow-hold release remain unavailable.

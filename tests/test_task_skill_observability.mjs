@@ -102,7 +102,7 @@ function harness(journal = [], session = 's1') {
 // It also covers the reviewed 380s per-command ceiling (MAX_COMMAND_SECONDS), matching .driver/test-gate.json.
 test('shared verifier matches the trusted pre-observer implementation', () => {
   const path = 'scripts/test_gate_runner.py';
-  const digest = 'aa88bd50649b1689215ca5c652d646f7f2cd825bc58073d96b6399a9f94932ee';
+  const digest = '37bc77e7a10c82048639a0a6301ced416a3b8cef57e13e80e3eda399ed9f0d9c';
   const file = new URL(`../${path}`, import.meta.url);
   assert.ok(existsSync(file), `trusted verification file missing: ${path}`);
   assert.equal(createHash('sha256').update(readFileSync(file)).digest('hex'), digest, path);

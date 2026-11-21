@@ -288,10 +288,11 @@ test("packed tarball retains the offline Durable module without private scratch"
     assert.ok(files.has("scripts/enforcement/storage_owner_lock_pi.js"));
     assert.ok(files.has("scripts/enforcement/durable_driver_pi.d.ts"));
     assert.ok(files.has("extensions/loop-until-done.ts"));
-    // Private guard sources, when present, must survive packing; absent ones must not ship.
+    // Why: private guard sources are not public runtime resources.
+    const pkgFiles = new Set(JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")).files);
     for (const name of ["env-guard", "pr-merge-guard", "pr-message-guard"]) {
       const path = `pi/extensions/${name}.ts`;
-      assert.equal(files.has(path), existsSync(join(REPO_ROOT, path)), `packed guard mismatch: ${path}`);
+      assert.equal(files.has(path), pkgFiles.has(path), `packed guard mismatch: ${path}`);
     }
     assert.ok(files.has("scripts/enforcement/loop_until_done_pi.js"));
     assert.ok(files.has("scripts/enforcement/loop_until_done_guide.md"));

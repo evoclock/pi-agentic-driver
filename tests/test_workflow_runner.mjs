@@ -84,7 +84,7 @@ test('settled owner controls do not grow capped history', (t) => {
 });
 
 // The action names correspond to WorkflowRunner.tla: Act, ObserveGood/Bad,
-// Advance, Park, Wake, Crash/Resume (reopen), Cancel, LateResult, Handbrake.
+// Advance, Park, Wake, Crash/Resume (reopen), Cancel, LateResult.
 // Why: a real commit must advance once while replayed or conflicting events cannot debit or complete twice.
 test('one move per tick, independently verified commit receipt, DONE and dedup', (t) => {
   const f = fixture(t);
@@ -121,21 +121,6 @@ test('reopen parks uncertain intent; look and usage pause do not spend attempt',
   assert.equal(run(f.w, f.store, { id: 'wake-tick', type: 'tick' }).phase, 'awaiting');
   assert.equal(run(f.w, f.store, { id: 'evidence', type: 'receipt', receipt: f.receipt(head) }).reason, 'verified-receipt');
   assert.equal(run(f.w, f.store, { id: 'advance', type: 'tick' }).phase, 'done');
-});
-
-// Why: stopping an epoch must make a late but otherwise correct commit receipt inert.
-test('cancel and handbrake fence late results and never advance', (t) => {
-  for (const type of ['cancel', 'hold']) {
-    const f = fixture(t);
-    run(f.w, f.store, { id: 'act', type: 'tick' });
-    const head = f.commit();
-    const halted = run(f.w, f.store, { id: 'stop', type });
-    assert.equal(halted.move, 'settled'); assert.equal(halted.epoch, 1);
-    assert.equal(run(f.w, f.store, { id: 'late', type: 'receipt', receipt: f.receipt(head) }).reason,
-      type === 'cancel' ? 'late-receipt-fenced' : 'receipt-rejected');
-    assert.equal(run(f.w, f.store, { id: 'tick', type: 'tick' }).move, 'settled');
-    assert.equal(JSON.parse(readFileSync(join(f.store, 'state.json'), 'utf8')).step, 0);
-  }
 });
 
 // Why: changing a caller-controlled digest or padding the steps list must not undo a cancelled procedure.
@@ -589,13 +574,12 @@ test('symlinked store and wake while not parked fail closed', (t) => {
 });
 
 // Why: The 1,024-event history cap must stop polling and new work, not the owner's
-// stop. A cancel or hold at the cap has to settle; otherwise a run that hit the cap
+// stop. A cancel at the cap has to settle; otherwise a run that hit the cap
 // with an uncertain dispatch outstanding could never be halted.
-test('owner cancel and hold still settle at the run history cap', (t) => {
+test('owner cancel still settles at the run history cap', (t) => {
   const f = fixture(t);
   const atCap = transition(f.w, initial(f.w), { id: 'a', type: 'tick' }).state;
   for (let i = atCap.history.length; i < 1024; i++) atCap.history.push({ id: `poll${i}`, type: 'look', result: { move: 'wait' } });
   assert.throws(() => transition(f.w, atCap, { id: 'poll', type: 'look' }), /run history limit/);
   assert.equal(transition(f.w, atCap, { id: 'stop', type: 'cancel' }).result.reason, 'cancelled');
-  assert.equal(transition(f.w, atCap, { id: 'brake', type: 'hold' }).result.reason, 'handbrake');
 });

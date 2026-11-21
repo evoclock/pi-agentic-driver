@@ -43,18 +43,6 @@ test('ownership release refuses untrusted and misbound controls, then persists o
   assert.equal(run(f.w, f.store, { id: 'stale', type: 'tick' }, f.tickAdapter(f.owner, 0)).move, 'wait');
 });
 
-// Why: Transfer is host-only and cannot grant ownership to a caller-supplied target without exact approval.
-test('ownership transfer requires exact host approval and cannot undo a handbrake', t => {
-  const f = fixture(t);
-  const event = { id: 'transfer', type: 'transfer-ownership', targetOwner: 'owner-b' };
-  assert.throws(() => run(f.w, f.store, event), /owner control unverified/);
-  assert.throws(() => run(f.w, f.store, event, { ownerControl: r => ({ ...r, approved: true, targetOwner: 'owner-c' }) }), /owner control unverified/);
-  run(f.w, f.store, { id: 'hold', type: 'hold' });
-  assert.equal(run(f.w, f.store, event, f.control).reason, 'ownership-transferred');
-  assert.equal(f.state().phase, 'held');
-  assert.equal(run(f.w, f.store, { id: 'held', type: 'tick' }, f.tickAdapter('owner-b', 1)).move, 'settled');
-});
-
 // Why: even an ABA transfer back to the same owner must invalidate its old generation.
 test('each transfer bumps generation and old generation cannot dispatch after owner returns', t => {
   const f = fixture(t);

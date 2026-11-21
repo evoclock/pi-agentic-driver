@@ -114,7 +114,13 @@ class RecurrenceGuardsTest(unittest.TestCase):
                 with acquire(root, 10):
                     holder = root / ".local/locks/test-gate.lock/holder.json"
                     original = holder.read_bytes()
-                    with patch.object(gate.time, "sleep", side_effect=RuntimeError("stop waiting")):
+                    real_sleep = gate.time.sleep
+                    def stop_at_wait(seconds):
+                        # Admission contention can need a short sleep under CI load.
+                        if seconds == 60:
+                            raise RuntimeError("stop waiting")
+                        real_sleep(seconds)
+                    with patch.object(gate.time, "sleep", side_effect=stop_at_wait):
                         with self.assertRaisesRegex(RuntimeError, "stop waiting"):
                             with acquire(root, 10):
                                 self.fail("second caller must not acquire")

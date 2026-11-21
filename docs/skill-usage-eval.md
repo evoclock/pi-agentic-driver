@@ -1,5 +1,7 @@
 # Skill usage evaluation evidence and next step
 
+For scoring skill use after a session, `skill-usage-eval` batches approved Pi transcripts and compares labelled cases. The separate agent-evals repository performs live per-session Langfuse tracing; this scorer does not trace a running session. Missing reads, unresolved paths and unlabelled cases remain uncertainty, not verified skill use.
+
 ## Daily dual-provider workflow
 
 From the installed package root, run `node scripts/skill_usage_eval.mjs --dual --since 24h --out "$HOME/.local/share/skill-usage" --label-sample 20`. Use `--since 7d` for a longer window. The default acting verdict is Jev; the decisions API is shadow only. Set `--acting openai` explicitly to change which verdict acts. Both score the same eligible task segments, and a segment with a failed provider is excluded from both reports. No fallback silently promotes the shadow result. `--sessions DIR` selects an approved local Pi JSONL root (repeatable); `--sessions -` reads stdin. `--limit N` spreads selection over eligible files.
