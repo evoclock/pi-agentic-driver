@@ -5,7 +5,7 @@ description: Use the host-run fail-first, read-only test diff, mutation, and evi
 
 # test-gate
 
-Use this skill in a repository checkout that has `.driver/gate-rules.json` and `scripts/test_gate_runner.py`. The host runner is repository-only and is not shipped in the npm package. Use its observations, not a test author's report, to prove that changed tests detect a behavior change.
+Use this skill in a private repository checkout that has the shared gate rules and repository-only host test-gate runner. The host runner is repository-only and is not shipped in the npm package. Use its observations, not a test author's report, to prove that changed tests detect a behavior change.
 
 ## Workflow
 

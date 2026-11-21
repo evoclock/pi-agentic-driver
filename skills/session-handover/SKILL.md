@@ -13,7 +13,7 @@ Use this skill to hand off one session's state without confusing navigation with
 2. Give each claim `{"label":"derived","text":"...","pointer":"file:line"}`. Labels are `quoted`, `derived`, `unknown` and `conflicting`. Use an existing repository file and line, a locally available full commit SHA, or a JSONL session entry under the root with `#entry=<exact id>@<sha256 of the full entry line including newline>`. Remote URLs cannot be validated locally. Never include secrets or present a claim as authority.
 3. Write a new handover with `python3 scripts/session_handover.py write HANDOVER.json --input sections.json`. Optionally use `--check <command> <args>` for a separate `.checks.json` observation. The sidecar is not signed proof; imported handover checks must be empty.
 4. Validate with `python3 scripts/session_handover.py validate HANDOVER.json`. In the next session, consume it once with `python3 scripts/session_handover.py consume HANDOVER.json` before acting. Keep the exclusive `.consumed` marker and use a new path for another handover.
-5. Run `python3 -m unittest tests/test_session_handover.py` in a repository checkout to check rejection of missing sections, uncited claims and duplicate consumption.
+5. In a private source checkout, run the repository-only session-handover unit suite to check rejection of missing sections, uncited claims and duplicate consumption. The unit suite is not bundled with this skill.
 
 ## Limits
 

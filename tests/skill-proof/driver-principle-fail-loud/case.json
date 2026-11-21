@@ -1,1 +1,0 @@
-{"prompt":"Required checks: A returned nonzero; B did not return a result. Can the work be marked passed? Give each status in a line.","mustInclude":["(?i)A.{0,20}fail","(?i)B.{0,20}unknown|B.{0,20}missing|B.{0,20}not run","(?i)action:.*block"]}

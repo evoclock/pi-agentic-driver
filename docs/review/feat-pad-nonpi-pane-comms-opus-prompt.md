@@ -1,3 +1,0 @@
-# Advisory review prompt (prepare only — do not send)
-
-Review feat/pad-nonpi-pane-comms against origin/main for allowlisted Pi/Claude/Codex pane communication. Check that an unnamed Claude Code pane can be resolved only by a unique label and matching live pane and trusted repository; kind cannot change across preflight and prompt acknowledgment. Confirm unmarked terminal output cannot become an answered delivery, and submit cannot bypass the host fleet guard or send to a coordinator. Check single registration, tool inventory and fake-transport tests. Flag any unsafe real-pane side effects or misleading delivery claims. Do not start an agent or message a real pane.

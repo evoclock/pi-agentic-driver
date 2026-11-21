@@ -38,4 +38,3 @@ skills/weekly-build-recap/banned.local.json
 
 # Generated local discovery artifact; regenerate instead of committing.
 pipeline_output/codebase_inventory.jsonl
-pipeline_output/

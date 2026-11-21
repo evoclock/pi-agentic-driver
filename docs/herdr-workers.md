@@ -14,7 +14,7 @@ Use the guarded tools to start and talk to worker roles. No raw Herdr terminal c
 
 Workers need a fresh in-process listener capability. Installed workers without it fail closed with `abort_capability_unavailable`; this source change does not update those workers. `allowPiQueueRestore` defaults false: a pending Pi-internal queue refuses cancellation unless restoring it to the editor is explicitly allowed. PAD delivery records and the lease are unchanged. Non-yielding native work cannot be preempted by any JavaScript listener, including Escape.
 
-See the [abort design and statechart](state-machines/worker-abort/README.md) for the file channel, refusal codes, audit and verification scope.
+The abort request uses the guarded file channel; refusal codes and audit observations are available through the worker tool results. The private source checkout retains the detailed statechart and verification scope.
 
 ## Worker code search
 

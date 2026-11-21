@@ -1,14 +1,8 @@
 # Bounded statechart evidence
 
-`model/EFDW.tla` represents new and already-exhausted units. It bounds reviews at two, models correction, QA rejection, recovery transfer, delivery and owner-confirmed cleanup. It assumes author and reviewer constants are correctly supplied; it has no live worker, Git, receipt, cancellation or effect-outbox semantics. `CHECK_DEADLOCK FALSE` permits terminal stop/cleanup. No render-and-inspect route exists in the installed-only `run-tlc.mjs` adapter: **visual layout not checked**. The tool checks the TLA+ model only; it does not draw a chart.
+The private, unpublished lifecycle model represents new and already-exhausted units. It bounds reviews at two, models correction, QA rejection, recovery transfer, delivery and owner-confirmed cleanup. It assumes author and reviewer constants are correctly supplied; it has no live worker, Git, receipt, cancellation or effect-outbox semantics. `CHECK_DEADLOCK FALSE` permits terminal stop/cleanup. No render-and-inspect route exists in the installed-only `run-tlc.mjs` adapter: **visual layout not checked**. The tool checks the TLA+ model only; it does not draw a chart.
 
-Run from the repo root with the installed `statechart-pi` runner after making a real, ignored `.scratch/efdw` and copying the three reviewed files from `model/`. Set `STATECHART_RUNNER` to that installed script's path (not an untrusted plan value). The `.scratch/` directory is gitignored, not versioned evidence:
-
-```sh
-node "$STATECHART_RUNNER" --check
-node "$STATECHART_RUNNER" --spec .scratch/efdw/EFDW.tla --config .scratch/efdw/safe.cfg --out .scratch/efdw/safe-final --timeout-seconds 60
-node "$STATECHART_RUNNER" --spec .scratch/efdw/EFDW.tla --config .scratch/efdw/unsafe.cfg --out .scratch/efdw/unsafe-final --timeout-seconds 60
-```
+In a private source checkout, copy the three reviewed model/configuration files to an ignored local work directory. Resolve the installed `statechart-pi` runner from a trusted installation, not a plan value. Check its availability, then invoke it separately with the copied model and each configuration using `--spec`, `--config`, `--out` and `--timeout-seconds 60`. Capture both exits and full results. The model files are not bundled with the installed skill; the ignored work directory is not versioned evidence.
 
 If the checker is absent, skip both runs and report them unrun. A successful safe check and an unsafe counterexample are expected, but neither proves a runtime guard.
 

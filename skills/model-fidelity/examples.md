@@ -9,7 +9,7 @@ Put a valid `model-fidelity.plan.v1` in `plans/original.json` with `currentGener
 Request `requests/prepare.json`:
 
 ```json
-{"schema":"model-fidelity.request.v1","requestId":"proto-prepare-1","unitId":"proto","attemptId":"attempt-1","operation":"prepare","payload":{"mode":"protocol","planRef":"plans/original.json","designRefs":["designs/candidate.json","models/Protocol.tla","models/safe.cfg"]}}
+{"schema":"model-fidelity.request.v1","requestId":"proto-prepare-1","unitId":"proto","attemptId":"attempt-1","operation":"prepare","payload":{"mode":"protocol","planRef":"plans/original.json","designRefs":["designs/candidate.json","<caller-owned-model>","<caller-owned-safe-config>"]}}
 ```
 
 Run `node scripts/model_fidelity.mjs prepare --json requests/prepare.json`. Capture the returned `planId` and `bundleId`. The built candidate and its actual test results come from the caller's ordinary workflow, not this command. For changed bytes, prepare a *new* attempt citing the frozen `planId`. Then request `diagram` with the captured bundle ID and a new request ID:

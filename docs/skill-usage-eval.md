@@ -27,7 +27,7 @@ The 20-session comparison used the same spread across eligible files for both pr
 
 The largest apparent missed-use counts in the Mac run were cite-your-status (377), evidence (314), boundary-only-authority (294), show-me-your-work (245), prove-it-works (219), sequence-verifiable-units (205), tasks (197) and technical-writing (186). The first proposed fix is to calibrate the scorer against a broader, fully read hand-labeled sample. Then test whether a narrower trigger and better task context improve these eight counts. No skill descriptions or routing changed here.
 
-The model in `skills/skill-usage-eval/model/SkillEval.tla` has SHA-256 `e3f55424ce0b4ace7a3da1edad40758696f22d241af51e9518933414e7e26a2a`. TLC checked its three invariants on 2026-11-11 with the adjacent config. It models parse, segment, fit, ask, decide, report and fail; it does not prove source behavior, classifier quality or network access. The checked source and config match the committed model candidates.
+The private, unpublished skill-usage model has SHA-256 `e3f55424ce0b4ace7a3da1edad40758696f22d241af51e9518933414e7e26a2a`. TLC checked its three invariants on 2026-11-11 with the reviewed configuration. It models parse, segment, fit, ask, decide, report and fail; it does not prove source behavior, classifier quality or network access. Those historical results apply only to the reviewed model and configuration bytes, not to an installed-package model.
 
 ## API references
 

@@ -46,14 +46,14 @@ blocked.
 
 ## Test-gate warnings
 
-`python3 scripts/test_gate_runner.py --phase check` runs changed head tests even for test-only edits. If no production code changed, the gate does not require a base assertion failure or a new mutation contract. It prints a distinct test-only warning. Both test-only and config-only warnings attempt a Buildkite annotation only when the root resolves to `BUILDKITE_BUILD_CHECKOUT_PATH`; fixture roots and unset checkout paths never annotate. Annotation failure is nonfatal. Existing contracts still execute. `Why:` notes, assertions, counts, caps, input immutability and head success remain required. Fixture-only edits still need a changed specification. Production changes still require fail-first and focused mutation coverage. See `skills/test-gate/SKILL.md` for the full workflow.
+In a source checkout, `make test-gate` runs changed head tests even for test-only edits. If no production code changed, the gate does not require a base assertion failure or a new mutation contract. It prints a distinct test-only warning. Both test-only and config-only warnings attempt a Buildkite annotation only when the root resolves to `BUILDKITE_BUILD_CHECKOUT_PATH`; fixture roots and unset checkout paths never annotate. Annotation failure is nonfatal. Existing contracts still execute. `Why:` notes, assertions, counts, caps, input immutability and head success remain required. Fixture-only edits still need a changed specification. Production changes still require fail-first and focused mutation coverage. See `skills/test-gate/SKILL.md` for the full workflow.
 
 ## Fixture coverage and deferrals
 
-`tests/test_gate.py` feeds planted violations from `tests/fixtures/gate/` to the
-same scanners used by the gate. It proves a skill bootstrap install and a hook
-bypass fail, then pass when the violating file is removed. Add a fail/pass
-fixture for each new scanner as it is implemented.
+Repository-only gate tests feed planted violations to the same scanners used by
+the gate. They prove a skill bootstrap install and a hook bypass fail, then pass
+when the violating file is removed. Add a fail/pass fixture for each new scanner
+in the private source checkout as it is implemented.
 
 Secrets scanning, dependency-diff enforcement, and the full antipattern scan
 are explicit TODO skips for §10.13; these stubs exit successfully and are not

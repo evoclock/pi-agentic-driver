@@ -1,1 +1,0 @@
-{"prompt":"A teammate writes 'done' but supplies no commit, file, receipt, or check result. Give a brief status assessment.","mustInclude":["(?i)status: unverified","(?i)source: absent"]}

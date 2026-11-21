@@ -1,5 +1,0 @@
-# Advisory Opus re-review: Daybreak Blue on Pi
-
-Read PR #197 against `main` and the prior findings in `.local/opus-review-197.md`. Read-only: do not edit files, push, merge, run a live check, or contact any Claude pane. Write findings only to `.local/opus-rereview-197.md` in this worktree.
-
-Verify H1–H4: handler exceptions are not relied upon to block requests; decisions use the outgoing body model even under virtual/router context; compaction and summary gaps are explicitly guarded/documented; public extension package test includes `daybreak-blue.ts`. Verify M5–M8: fake-HTTP transport with earlier injected cyber, handler pipeline mismatch/router/later-handler tests and residual later-handler risk, CI coverage or honest host-only test-gate rationale, SPDX header, live-check script excluded from package files, and removal of personal path/login from docs. Check draft status and unchanged package version. Identify concrete file/line findings and distinguish verified fixes from live-pending risks.

@@ -1,5 +1,0 @@
-# Advisory Opus re-review: PAD Codex skill bridge
-
-Read PR #194 against `main`, including the earlier findings R1–R5 in `.local/opus-review-194.md`. This is a read-only re-review: do not edit files, push, merge, route prompts, or message any pane. Write findings to `.local/opus-rereview-194.md` only.
-
-Confirm that source `disable-model-invocation: true` yields `agents/openai.yaml` with `policy.allow_implicit_invocation: false`; that wrappers mark Pi/Herdr steps blocked rather than suggest raw Herdr CLI; that trailing/double slash homes normalize without recursion; that duplicate statechart references dedupe but different source files with the same skill name fail; and that backup names cannot collide and partial apply reports completed writes, backups and the failed path. Check atomic temp-file-and-rename writes and no unsafe overwrite of user edits. Inspect the new tests and test-gate result, including any blocked check. Verify no hard-coded Codex CLI version remains in the design doc and that PR #194 remains an independent draft. Report concrete findings with file/line and severity; distinguish required changes from optional improvements.

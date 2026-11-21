@@ -66,7 +66,7 @@ In CI the workflow uses the base rules. A repo may commit `.github/pr-wording.js
 
 If `agentic_aidr` is installed, use it as in step 2. Otherwise say so and apply its four rules by hand: clarity, simplicity, brevity, humanity. Do not claim it ran.
 
-To change a generic cap or pattern, edit `pr_wording_rules.json` and add a test in `tests/`. Put anything personal in your config instead. Never reword around a pattern to slip past it.
+To change a generic cap or pattern, edit `pr_wording_rules.json` and add a repository-only regression case in a private source checkout. Put anything personal in your config instead. Never reword around a pattern to slip past it.
 
 ## Limits
 
