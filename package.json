@@ -41,6 +41,7 @@
     "governance"
   ],
   "files": [
+    "CHANGELOG.md",
     "scripts/pad-runner.mjs",
     "scripts/workflow_runner_core.mjs",
     "scripts/workflow_runner_authority.mjs",
