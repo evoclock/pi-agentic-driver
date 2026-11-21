@@ -5,6 +5,16 @@ description: Use when deciding whether a driver action is inside its approved re
 
 # Boundary-only authority
 
-Check authority at consequential boundaries. Inside the approved scope, ordinary reads, edits, and checks need no repeated prompt. Refuse and report an out-of-envelope effect.
+Use this skill before a consequential action to keep work inside the approved repository, paths and effects. Ordinary actions inside that boundary need no repeated request.
 
-Check: before an outward effect, compare its repository, path, and effect with the applicable policy. This principle is guidance, not an enforcement control.
+## Steps
+
+1. Read the direct instruction and applicable policy; identify the repository, path and permitted effect.
+2. Compare the intended action with that boundary before any outward effect.
+3. If any part is outside it, refuse the affected action and report the mismatch. Otherwise continue without asking again for each ordinary read or edit. In a short decision, state both sides explicitly: the inside-scope edit may proceed without new approval; the outside-scope edit is refused.
+
+Check: an effect outside the approved repository or path is refused before execution.
+
+## Limits
+
+These steps are guidance, not a runtime enforcement control. A host guard may enforce a particular action, but this skill does not.

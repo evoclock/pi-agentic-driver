@@ -88,12 +88,15 @@ def generate(repo: Path) -> bytes:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", type=Path, default=Path.cwd())
-    parser.add_argument("--check", action="store_true", help="compare without writing")
+    parser.add_argument("--check", action="store_true", help="refresh local inventory; compare without writing when tracked")
     args = parser.parse_args()
     repo = Path(git(args.source_root.resolve(), "rev-parse", "--show-toplevel").decode().strip())
     output = repo / "pipeline_output/codebase_inventory.jsonl"
     content = generate(repo)
-    if args.check:
+    ignored = subprocess.run(["git", "-C", str(repo), "check-ignore", "--no-index", "-q",
+                              "pipeline_output/codebase_inventory.jsonl"], capture_output=True).returncode == 0
+    tracked = b"pipeline_output/codebase_inventory.jsonl\0" in git(repo, "ls-files", "-z")
+    if args.check and (tracked or (output.is_file() and not ignored)):
         return 0 if output.is_file() and output.read_bytes() == content else 1
     output.parent.mkdir(parents=True, exist_ok=True)
     if not output.is_file() or output.read_bytes() != content:

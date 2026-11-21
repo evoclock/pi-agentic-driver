@@ -24,8 +24,9 @@ import { join, resolve } from "node:path";
 export const MERGE_POLICY_SCHEMA = "pi-agentic-driver.merge-policy.v1";
 export const HUMAN_MERGES_ONLY = "human-merges-only";
 export const AGENTS_AFTER_CHECKS_AND_REVIEW = "agents-after-checks-and-review";
+export const AGENT_PR_MERGE = "agent-pr-merge";
 export const DEFAULT_MERGE_POLICY = HUMAN_MERGES_ONLY;
-const POLICIES = new Set([HUMAN_MERGES_ONLY, AGENTS_AFTER_CHECKS_AND_REVIEW]);
+const POLICIES = new Set([HUMAN_MERGES_ONLY, AGENTS_AFTER_CHECKS_AND_REVIEW, AGENT_PR_MERGE]);
 const SHA = /^[0-9a-f]{40}$/;
 
 export function profileDir(env = process.env) {
@@ -76,7 +77,6 @@ function normalize(text) {
 // Forms that skip checks or branch protection. Refused under every policy.
 const BYPASS_FORMS = [
   { pattern: /\bgh pr merge\b[^;&|\n]*\s--admin\b/, why: "--admin skips branch protection" },
-  { pattern: /\bgh pr merge\b[^;&|\n]*\s--auto\b/, why: "--auto merges later, after the evidence was checked" },
   { pattern: /\/branches\/[^\s]+\/protection\b/, why: "changes branch protection", write: true },
   { pattern: /\/rulesets\b/, why: "changes repository rulesets", write: true },
   { pattern: /\b(?:enablePullRequestAutoMerge|mergeBranch|updateBranchProtectionRule|deleteBranchProtectionRule)\b/, why: "GraphQL merge or protection change" },
@@ -99,19 +99,40 @@ export function detectMerge(command) {
   const hit = MERGE_FORMS.find(({ pattern }) => pattern.test(text));
   if (!hit) return { merge: false };
   let ref = "";
+  let auto = false;
+  let matchHeadCommit = "";
   const compound = /[;&|>`\n]|\$\(/.test(raw);
   if (hit.form === "gh" && !compound) {
-    const args = text.split(/\bgh pr merge\b/)[1].trim().split(" ").filter(Boolean);
-    // A repository flag could point the merge at a different repository from
-    // the one the evidence is read from, so it is never checkable.
-    const repoFlag = args.some((a) => a === "-R" || a === "--repo" || a.startsWith("--repo=") || /^-R./.test(a));
-    const positional = args.filter((a) => !a.startsWith("-"));
-    if (!repoFlag && positional.length === 1 && /^(?:\d+|https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+)$/.test(positional[0])) ref = positional[0];
+    const tail = raw.replace(/^.*?\bgh\s+['"]?pr['"]?\s+merge\b/, "");
+    const tokens = tail.match(/"(?:[^"\\]|\\.)*"|'[^']*'|\S+/g) ?? [];
+    const args = tokens.map((token) => token.replace(/^(['"])(.*)\1$/, "$2"));
+    const values = new Set(["--match-head-commit", "--subject", "-t", "--body", "-b", "--body-file", "-F", "--author-email", "-A"]);
+    const switches = new Set(["--auto", "--squash", "--merge", "--rebase", "--delete-branch", "-d"]);
+    const positional = [];
+    let valid = true;
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
+      const [flag, inline] = arg.startsWith("--") && arg.includes("=") ? [arg.slice(0, arg.indexOf("=")), arg.slice(arg.indexOf("=") + 1)] : [arg, undefined];
+      if (flag === "-R" || flag === "--repo" || /^-R./.test(flag)) { valid = false; break; }
+      if (values.has(flag)) {
+        const value = inline ?? args[++i];
+        if (!value || value.startsWith("-")) { valid = false; break; }
+        if (flag === "--match-head-commit") {
+          if (matchHeadCommit) { valid = false; break; }
+          matchHeadCommit = value;
+        }
+      } else if (switches.has(flag) && inline === undefined) {
+        if (flag === "--auto") auto = true;
+      } else if (arg.startsWith("-")) { valid = false; break; }
+      else positional.push(arg);
+    }
+    if (valid && positional.length === 1 && /^(?:\d+|https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+)$/.test(positional[0])) ref = positional[0];
   }
-  return { merge: true, form: hit.form, ref };
+  return { merge: true, form: hit.form, ref, auto, matchHeadCommit };
 }
 
 const PASSING = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
+const PENDING = new Set(["PENDING", "QUEUED", "IN_PROGRESS", "EXPECTED"]);
 
 // Pure decision. evidence: { headSha, author, mergerSession,
 //   checks: [{ state }],
@@ -120,17 +141,23 @@ const PASSING = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
 // merging session, and the record was not written by the merging session.
 export function evaluateMerge(policy, detection, evidence) {
   if (detection.form === "bypass") return { allow: false, reason: `refused under every merge policy: ${detection.why}` };
-  if (policy !== AGENTS_AFTER_CHECKS_AND_REVIEW) {
+  if (policy !== AGENTS_AFTER_CHECKS_AND_REVIEW && policy !== AGENT_PR_MERGE) {
     return { allow: false, reason: "merge policy is human-merges-only: the owner merges on GitHub" };
   }
+  if (detection.auto && policy !== AGENT_PR_MERGE) return { allow: false, reason: "--auto requires agent-pr-merge policy" };
   if (detection.form !== "gh" || !detection.ref) {
     return { allow: false, reason: "only a simple `gh pr merge <number|url>` can be checked against the merge policy" };
   }
   if (!evidence || evidence.error) return { allow: false, reason: `merge evidence unavailable: ${evidence?.error ?? "none"}` };
   const checks = Array.isArray(evidence.checks) ? evidence.checks : [];
   if (!checks.length) return { allow: false, reason: "no checks reported on the PR head; a required check (for example PR wording) must pass first" };
-  const failing = checks.filter((c) => !PASSING.has(String(c.state ?? "").toUpperCase()));
-  if (failing.length) return { allow: false, reason: `${failing.length} check(s) on the PR head have not passed` };
+  const failing = checks.filter((c) => !PASSING.has(String(c.state ?? "").toUpperCase()) && !PENDING.has(String(c.state ?? "").toUpperCase()));
+  const pending = checks.filter((c) => PENDING.has(String(c.state ?? "").toUpperCase()));
+  if (failing.length || (pending.length && !detection.auto)) return { allow: false, reason: `${failing.length + (detection.auto ? 0 : pending.length)} check(s) on the PR head have not passed` };
+  if (detection.auto) {
+    if (!SHA.test(detection.matchHeadCommit) || detection.matchHeadCommit !== evidence.headSha || detection.matchHeadCommit !== evidence.review?.headSha) return { allow: false, reason: "auto-merge needs --match-head-commit for the current reviewed head" };
+    if (pending.length && evidence.mergeStateStatus !== "BLOCKED") return { allow: false, reason: "pending checks require BLOCKED merge state" };
+  }
   const review = evidence.review;
   if (!review || review.headSha !== evidence.headSha) return { allow: false, reason: "no independent review recorded for the current PR head" };
   if (review.standards !== "PASS" || review.spec !== "PASS") return { allow: false, reason: "the recorded review for this head is not Standards PASS and Spec PASS" };
@@ -152,13 +179,13 @@ export function evaluateMerge(policy, detection, evidence) {
 // review record kept in the profile directory.
 export function gatherMergeEvidence(ref, { run = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", timeout: 15000 }), env = process.env, read = (p) => readFileSync(p, "utf8") } = {}) {
   try {
-    const view = JSON.parse(run("gh", ["pr", "view", ref, "--json", "headRefOid,statusCheckRollup,author"]));
+    const view = JSON.parse(run("gh", ["pr", "view", ref, "--json", "headRefOid,statusCheckRollup,author,mergeStateStatus"]));
     const headSha = String(view.headRefOid ?? "");
     const author = String(view.author?.login ?? "");
     const checks = (view.statusCheckRollup ?? []).map((c) => ({ state: c.conclusion || c.state || "PENDING" }));
     let review;
     try { review = JSON.parse(read(reviewRecordPath(headSha, env))); } catch { review = undefined; }
-    return { headSha, author, checks, review };
+    return { headSha, author, checks, review, mergeStateStatus: view.mergeStateStatus };
   } catch (error) {
     return { error: String(error?.message ?? error).split("\n")[0] };
   }

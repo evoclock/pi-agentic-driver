@@ -48,6 +48,33 @@ proofs for agentic workflows.
   <img src="assets/agentic-driver-full-color.gif" alt="Full-color Agentic Driver control vault" width="768">
 </p>
 
+## Contents
+
+- [What's new in 3.2.0](#whats-new-in-320)
+- [Fleet Herdr spawn rule](#fleet-herdr-spawn-rule)
+- [Interactive safeguard configuration](#interactive-safeguard-configuration)
+- [Shipped features](#shipped-features)
+- [Code review and planning](#code-review-and-planning)
+- [Multi-agent communication](#multi-agent-communication)
+- [Writing clearly](#writing-clearly)
+- [Sandboxed execution](#sandboxed-execution)
+- [Session continuity](#session-continuity)
+- [Working with Git safely](#working-with-git-safely)
+- [Package integrity](#package-integrity)
+- [Packaged skills](#packaged-skills)
+- [Install](#install)
+- [License](#license)
+
+## What's new in 3.2.0
+
+- **Workflow runner.** OpenBot and OpenMausBot can run their recipes as workflows: each recipe step is a pinned skill step, gated by a spec check before a guarded worker is dispatched. Six `agentic_workflow_*` tools and the `pad-runner` CLI drive it.
+- **Exit checks on macOS or Linux.** A workflow's frozen exit checks can run on the host, in an Apple container on macOS, or in the Linux microVM.
+- **Worker control.** `agentic_herdr_close_tab` closes a finished worker's tab, a scoped abort stops one worker turn, and the stall detector marks an idle worker without a done marker as stalled, not finished.
+- **Codex workers.** Guarded spawn can start a Codex tab with an account-scoped grant (draft).
+- **daybreak-blue.** Adds the Daybreak Blue access flag to Codex requests for the models you list, and strips it from every other request. It does not pick or call a model.
+- **New skills.** `decision-gate`, `review-ready`, `model-fidelity`, `skill-usage-eval` and `workflow-runner`.
+- **Bowerbird 0.3.0.** TLA+/TLC verification and click-through composition diagrams through `bowerbird verify` and `bowerbird composition`.
+
 ## Fleet Herdr spawn rule
 
 **HARD (fleet-wide):** anything that controls bots encodes this in git here, not only in assistant skills.
@@ -131,8 +158,8 @@ inventory and local Obsidian/pad/ci/treehouse scratch paths stay out of git.
 | `agentic_decision_evidence` | Records the stated source of a decision (direct or relayed, with quote, where, when and relayer) for a private assignment; it verifies no identity and creates no authority. | shipped |
 | `agentic_relay_check_request` | Checks whether a recorded, scoped relay covers each requested private action; read-only preflight, with authority checked again at the action boundary. | shipped |
 | `agentic_merge_review_record` | Records independent Standards and Spec verdicts for an exact PR head; read only when the merge policy is `agents-after-checks-and-review`, and it merges nothing. | shipped |
-| `agentic_herdr_communication` | Submits one prompt and observes delivery and marked reports; never grants authority. Labeled-tab recovery keeps worker delivery attribution attached to the live pane. | shipped; included in 3.1.8 candidate |
-| Local task and skill observations | Records task-local reads, submitted skill commands and observed worker provenance, with explicit capture gaps and a read-only cross-session aggregate. These records do not verify successful task completion or correct skill use. | included in 3.1.8 candidate; not published |
+| `agentic_herdr_communication` | Submits one prompt and observes delivery and marked reports; never grants authority. Labeled-tab recovery keeps worker delivery attribution attached to the live pane. | shipped |
+| Local task and skill observations | Records task-local reads, submitted skill commands and observed worker provenance, with explicit capture gaps and a read-only cross-session aggregate. These records do not verify successful task completion or correct skill use. | shipped |
 | `agentic_herdr_spawn_worker` | Starts and verifies one Pi worker tab in a trusted repository, reporting partial failures without an automatic retry. | shipped |
 | `agentic_aidr` | A remedy for AI;DR. Reviews writing for clarity, simplicity, brevity, and humanity. | shipped |
 | `agentic_linux_microvm_cutover` | Runs one job in a throwaway QEMU/KVM virtual machine on a Linux host, with a severity-tiered killswitch that stops escape attempts. | user-enabled, native confirmation |
@@ -148,6 +175,13 @@ inventory and local Obsidian/pad/ci/treehouse scratch paths stay out of git.
 | Janus (bundled service) | Local Jev evaluation service on loopback: semantic ranking, the dispatch-gate judgment, redaction before every external call. See `janus/README.md`. | shipped |
 | `weekly-build-recap` skill | Prepares a local weekly GitHub recap with a picture and draft posts; posting remains yours. | shipped |
 | Bounded loop-until-done | Keeps a session working toward an explicit stopping condition within configured limits; packaged since 2.0.0 and documented here. | shipped |
+| `agentic_workflow_run`, `_dispatch`, `_gate`, `_status`, `_tick`, `_cancel` | Run an OpenBot or OpenMausBot recipe as a workflow: start it, dispatch one gated step, check the spec and exit checks, read state, apply one event, or cancel. Unknown effects park instead of guessing. | new in 3.2.0 (draft) |
+| `pad-runner` | CLI that applies one workflow event for a bot host's recipe. | new in 3.2.0 (draft) |
+| `agentic_herdr_close_tab` | Closes one verified, finished local worker tab; refuses the caller's, protected and remote tabs. | new in 3.2.0 |
+| Worker abort | Stops one scoped worker turn through its in-process abort handler; never claims the task finished. | new in 3.2.0 |
+| Codex worker spawn | Starts a Codex tab through guarded spawn with an account-scoped grant and process readback. | new in 3.2.0 (draft) |
+| daybreak-blue | Sets `access_programs.cyber="daybreak_blue"` on Codex requests whose model is in `PAD_DAYBREAK_MODELS`, and strips it from all others. | new in 3.2.0 |
+| `bowerbird verify`, `bowerbird composition` | Pi-bowerbird 0.3.0: TLA+/TLC model checking and click-through composition diagrams (flat and isometric, with overview and group pages). | new in 3.2.0 |
 
 **Status: active development and testing.** The disabled NUDGE classifier and
 private evidence store are packaged foundations, not a running recovery
@@ -784,6 +818,26 @@ rather than a live run.
 </details>
 
 <details>
+<summary><strong>macOS Apple-container exit checks</strong> <em>(new in 3.2.0; mocked tests, live run pending)</em></summary>
+
+A workflow's frozen exit checks can run in an Apple container on a Mac
+instead of the microVM. Pick the runner with `host`, `macos`, `linux` or
+`auto`; `auto` records what it picked, and a runner you ask for that isn't
+available parks the run with `checks-runner-unavailable` rather than
+switching quietly.
+
+The macOS runner needs Apple silicon, macOS 26 or later, Apple's
+`container` CLI with its service running, and a reviewed image already on
+the Mac. Each check runs with `container run --rm --network none`, the
+checkout mounted read-only at `/work`, and no inherited tokens.
+
+Status: the runner is in `scripts/workflow_runner_exit.mjs` and covered by
+mocked tests in `tests/test_workflow_runner_exit.mjs`. A live containment
+run on a Mac, including the teardown check, has not been recorded yet.
+
+</details>
+
+<details>
 <summary><strong>autonomous journeys, overnight operation</strong> <em>(released, 0.7.0)</em></summary>
 
 Dispatch a worker journey that runs end to end while you are away. The
@@ -1005,6 +1059,13 @@ or change a model route.
 - **Driver workflows.** `tasks` (session plan to durable board), `pulse`
   (Board Pulse), `decision-to-spec` (one reviewable assignment),
   `harvest-lessons` and `public-pr-wording`.
+- **New in 3.2.0.** `workflow-runner` (guide one pinned recipe step and
+  its checked receipt at a time), `decision-gate` (settle a bounded design
+  decision with a TLC-checked statechart; owner actions stay held),
+  `review-ready` (find TLC and guard gaps before review), `model-fidelity`
+  (compare a built change with its frozen plan and model) and
+  `skill-usage-eval` (score approved transcripts for skills the agent should
+  have loaded and didn't: `node scripts/skill_usage_eval.mjs --limit 20`).
 - **harvest-lessons.** Mines past corrections in an approved repository: PR
   reviews, revert and fixup commits, failed CI and session logs. It groups
   them into patterns, ranks them, and hands the top ones to `correct-pi` as

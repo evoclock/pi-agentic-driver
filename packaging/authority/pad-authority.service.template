@@ -1,0 +1,18 @@
+[Unit]
+Description=PAD local authority
+After=local-fs.target
+
+[Service]
+Type=simple
+User=<PAD_AUTHORITY_USER>
+Group=<PAD_AUTHORITY_GROUP>
+UMask=0077
+ExecStart=<PAD_NODE_BIN> <PAD_AUTHORITY_STATE_DIR>/pad-authority-daemon.mjs <PAD_AUTHORITY_STATE_DIR>/config.json
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

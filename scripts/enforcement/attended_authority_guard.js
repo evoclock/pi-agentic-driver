@@ -124,6 +124,32 @@ const FORBIDDEN_SHELL_PATTERNS = [
     pattern: /(?:^|[\s;&|`(]|\$\()(?:\S*\/)?herdr\b(?:\s|$)/,
     kind: "raw herdr CLI (use agentic_herdr_spawn_worker or agentic_herdr_communication)",
   },
+  { pattern: /\brg\b[^\n;&|]*\s--pre(?:=|\s)/,
+    kind: "ripgrep preprocessor can execute a program" },
+  // RIPGREP_CONFIG_PATH names a file of extra ripgrep arguments, so it can
+  // carry --pre without the option appearing in the command text.
+  { pattern: /(?:^|[\s;&|`(])RIPGREP_CONFIG_PATH\s*\+?=/,
+    kind: "ripgrep preprocessor can execute a program" },
+  // A shell given a script operand (any name, or via . / source) runs file
+  // contents this text guard cannot see. -c payloads stay textually checked.
+  { pattern: /(?:^|[\s;&|])(?:sh|bash|zsh)\s+(?:\.\/|\/|[^\s]+\.sh\b)|(?:^|[;&|(`]\s*|\$\(\s*)(?:(?:env|exec|command|nohup|time)\s+)*(?:\S*\/)?(?:sh|bash|zsh|dash|ksh)\s+(?:-(?![A-Za-z]*c)[A-Za-z]+\s+)*(?![-'"])\S|(?:^|[;&|(`]\s*|\$\(\s*)(?:\.|source)\s+\S/,
+    kind: "opaque shell script execution cannot be certified" },
+  // Git keys are case-insensitive and may follow -C, --no-pager or other
+  // global options, a config subcommand, -f/--file or --config-env.
+  { pattern: /(?:^|[\s;&|`(])(?:\S*\/)?git\b[^\n;&|]*?(?:\s-c\s*|\s--config-env[=\s]+|\sconfig\b(?![^\n;&|]*\s--(?:get|get-all|get-regexp|get-urlmatch|list|show-origin)\b)[^\n;&|]*?\s)(?:core\.(?:pager|fsmonitor|sshcommand|editor|hookspath|askpass|alternaterefscommand|gitproxy)|pager\.[^\s=]+|sequence\.editor|diff\.external|uploadpack\.packobjectshook|web\.browser|gpg(?:\.[^\s=]+)?\.program|credential(?:\.[^\s=]+)?\.helper|include(?:if\.[^\s=]+)?\.path|alias\.[^\s=]+|diff\.[^\s=]+\.(?:textconv|command)|merge\.[^\s=]+\.driver|filter\.[^\s=]+\.(?:clean|smudge|process)|(?:mergetool|difftool|man|browser)\.[^\s=]+\.(?:cmd|path)|remote\.[^\s=]+\.(?:uploadpack|receivepack|vcs)|protocol\.[^\s=]+\.allow|submodule\.[^\s=]+\.update)(?=[\s=]|$)/i,
+    kind: "Git configuration can execute an external program" },
+  // Environment equivalents of the Git launch keys. A pager of cat, less or
+  // more (or empty) is the common harmless form and stays allowed.
+  { pattern: /(?:^|[\s;&|`(])(?:GIT_(?:EXTERNAL_DIFF|SSH|SSH_COMMAND|ASKPASS|EDITOR|SEQUENCE_EDITOR|PROXY_COMMAND|EXEC_PATH|CONFIG|CONFIG_GLOBAL|CONFIG_SYSTEM|CONFIG_PARAMETERS|CONFIG_COUNT|CONFIG_KEY_\d+|CONFIG_VALUE_\d+)|SSH_ASKPASS)\s*\+?=|(?:^|[\s;&|`(])(?:GIT_PAGER|PAGER)\s*=(?!(?:cat|less|more|""|'')?(?:\s|$))/,
+    kind: "Git environment can execute an external program" },
+  { pattern: /(?:^|[\s;&|`(]|\$\()(?:\S*\/)?codex\b(?=[\s;&|)`<>]|$)/,
+    kind: "raw codex CLI (use the guarded Codex worker route)" },
+  { pattern: /(?:@openai\/codex|\bcodex\.js\b|\$\{[^}]*\bcodex\b|\b[A-Za-z_][A-Za-z_0-9]*=codex\b)/,
+    kind: "indirect Codex shell launch (use the guarded Codex worker route)" },
+  { pattern: /\bCODEX_HOME\s*\+?=|\b(?:printf\s+-v|read(?:\s+-[A-Za-z]+)*|export)\s+CODEX_HOME\b|\bdeclare\s+-n\s+[A-Za-z_][A-Za-z_0-9]*=CODEX_HOME\b/,
+    kind: "CODEX_HOME shell assignment (use guarded account selection)" },
+  { pattern: /\b([A-Za-z_][A-Za-z_0-9]*)=co\s*;\s*([A-Za-z_][A-Za-z_0-9]*)=dex\s*;\s*\$\1\$\2\b/,
+    kind: "split Codex shell launch (use the guarded Codex worker route)" },
 ];
 
 // Arbitrary-code interpreter execution: any code payload can perform a
@@ -196,12 +222,19 @@ export function classifyBashCommand(command) {
   // destructive payload cannot hide behind a safe-looking prefix.
   const compound = /[;&|>`]|\$\(|\n/.test(text);
   const redirection = /(^|\s)(>{1,2}|<)/.test(text);
+  // Mask only the query in narrowly shaped literal searches. Check every
+  // remaining token for forbidden launches before allowing a plain search.
+  const literalSearch = !compound && !redirection
+    && (/^(?:grep(?:\s+-r)?|rg)\s+codex\s+[A-Za-z0-9_./][A-Za-z0-9_./-]*$/.test(text)
+      || /^git log --grep codex$/.test(text));
+  const forbiddenText = literalSearch ? text.replace(/\bcodex\b/, '__literal_query__') : text;
   // Fleet forbidden forms always win: no safe-prefix escape, no confirm.
   for (const { pattern, kind } of FORBIDDEN_SHELL_PATTERNS) {
-    if (pattern.test(text) || pattern.test(unquoteTokens(text))) {
+    if (pattern.test(forbiddenText) || pattern.test(unquoteTokens(forbiddenText))) {
       return { destructive: true, forbidden: true, kind };
     }
   }
+  if (literalSearch) return { destructive: false };
   // Structural destructive verdicts win over safe-looking prefixes, so a
   // destructive form such as `git branch -D` cannot hide behind a safe
   // prefix such as `git branch`.
@@ -329,10 +362,13 @@ export async function guardToolCall(event, ctx, options = {}) {
   // Pull-request merges follow the owner's merge policy, never a prompt. The
   // same answer applies in a headless bot session and in direct Pi use.
   if (toolName === "bash") {
+    const command = String(input.command ?? "");
+    const legacyGateLock = /\bmkdir\b/.test(command) && /test-gate\.lock\b/.test(command);
+    if (legacyGateLock) return { block: true, reason: "Legacy mkdir gate acquisition is blocked; use the private source-tree test-gate runner for visible FIFO admission." };
     const detection = detectMerge(input.command);
     if (detection.merge) {
       const { policy, source } = (options.loadMergePolicy ?? loadMergePolicy)();
-      const gathered = policy === "agents-after-checks-and-review" && detection.ref
+      const gathered = (policy === "agents-after-checks-and-review" || policy === "agent-pr-merge") && detection.ref
         ? (options.gatherMergeEvidence ?? gatherMergeEvidence)(detection.ref)
         : undefined;
       const evidence = gathered && !gathered.error
@@ -468,7 +504,7 @@ export function registerAttendedAuthorityGuard(pi, options = {}) {
   pi.registerTool?.({
     name: "agentic_merge_review_record",
     label: "Merge review record",
-    description: "Record independent Standards and Spec verdicts for an exact PR head. Only read when the owner has set the merge policy to agents-after-checks-and-review.",
+    description: "Record independent Standards and Spec verdicts for an exact PR head. Read under either agent merge policy for an exact reviewed head.",
     parameters: {
       type: "object",
       properties: {

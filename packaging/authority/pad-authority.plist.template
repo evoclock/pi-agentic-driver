@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string><PAD_AUTHORITY_LABEL></string>
+<key>UserName</key><string><PAD_AUTHORITY_USER></string>
+<key>GroupName</key><string><PAD_AUTHORITY_GROUP></string>
+<key>ProgramArguments</key><array>
+<string><PAD_NODE_BIN></string>
+<string><PAD_AUTHORITY_STATE_DIR>/pad-authority-daemon.mjs</string>
+<string><PAD_AUTHORITY_STATE_DIR>/config.json</string>
+</array>
+<key>KeepAlive</key><true/>
+<key>Umask</key><integer>63</integer>
+<key>EnvironmentVariables</key><dict>
+<key>PAD_AUTHORITY_SOCKET</key><string><PAD_AUTHORITY_SOCKET></string>
+</dict>
+</dict></plist>

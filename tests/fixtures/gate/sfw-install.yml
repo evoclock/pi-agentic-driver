@@ -1,2 +1,0 @@
-steps:
-  - command: "sfw npm install --ignore-scripts --prefix .ci-buildkite/consumer package.tgz"

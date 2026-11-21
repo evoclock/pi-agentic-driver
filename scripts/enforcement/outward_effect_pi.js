@@ -1,6 +1,7 @@
 // The only writable outward route for a driver-owned journey. A worker's
 // independent shell actions are outside this boundary.
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { isNativeTuiContext } from "./native_tui_context.js";
@@ -65,6 +66,25 @@ async function privateRepository(request, cwd, options) {
   return true;
 }
 
+const execCheckedGate = promisify(execFile);
+
+export async function verifyCheckedPush(cwd, targetHead, branch) {
+  const unchanged = () => {
+    if (git(["rev-parse", "HEAD"], cwd) !== targetHead ||
+        git(["branch", "--show-current"], cwd) !== branch ||
+        git(["status", "--porcelain", "--untracked-files=all"], cwd)) {
+      throw new Error("checked push requires clean inputs and unchanged requested head/branch");
+    }
+  };
+  unchanged();
+  for (const target of ["test-gate", "pre-push"]) {
+    // Each repository gate retains its own FIFO/supervisor and command caps.
+    // This outer deadline also bounds queue time without blocking the Pi event loop.
+    await execCheckedGate("make", [target], {cwd, timeout: 3_600_000, maxBuffer: 16 * 1024 * 1024});
+    unchanged();
+  }
+}
+
 export async function executeOutwardEffect(request, context, options = {}) {
   try {
     validate(request);
@@ -103,8 +123,9 @@ export async function executeOutwardEffect(request, context, options = {}) {
       return matchingPr(item, request) && Number.isSafeInteger(item.number)
         ? { verified: true, reference: String(item.number) } : { verified: false };
     };
-    const apply = () => {
+    const apply = async () => {
       if (request.action === "push") {
+        await verifyCheckedPush(cwd, request.targetHead, request.branch);
         const local = git(["rev-parse", "HEAD"], cwd);
         if (local !== request.targetHead || git(["branch", "--show-current"], cwd) !== request.branch ||
             remoteHead(cwd, request.branch) !== request.expectedHead) throw new Error("branch or remote head drift");

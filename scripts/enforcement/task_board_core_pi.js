@@ -34,6 +34,17 @@ export {
 // ---------------------------------------------------------------------------
 
 export const LANES = Object.freeze(["backlog", "in-progress", "review", "done"]);
+export const CARD_STATUSES = Object.freeze([...LANES, "cancelled"]);
+// Legacy boards have no status field. The checkbox, then the cancellation flag,
+// determine completion; a lane-only done heading is never completion.
+function legacyCardStatus(card) {
+  if ((card.flags ?? []).includes("cancelled")) return "cancelled";
+  if (card.done === true) return "done";
+  return card.lane === "done" ? "review" : card.lane;
+}
+function cardStatus(card) {
+  return card.statusPersisted ? card.status : legacyCardStatus(card);
+}
 export const FLAGS = Object.freeze(["proposed", "blocked", "cancelled"]);
 export const PRIORITIES = Object.freeze(["P0", "P1", "P2", "P3"]);
 export const CARD_ID_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$";
@@ -255,6 +266,8 @@ function semanticCard(raw, errors) {
     description: raw.description.join("\n"),
     done: raw.done ?? false,
   };
+  card.statusPersisted = Object.hasOwn(f, "status");
+  card.status = card.statusPersisted ? f.status : legacyCardStatus(card);
   if (card.cardId === null) errors.push(`card without an id marker in lane ${raw.lane}`);
   if (card.authoritySource !== null && !isValidAuthoritySource(card.authoritySource)) {
     errors.push(`${card.cardId ?? "(unidentified)"}: malformed authority-source record (fails closed)`);
@@ -377,6 +390,9 @@ export function validateCard(card, context = {}) {
   if (!LANES.includes(card.lane)) {
     errors.push(`lane "${card.lane}" is not one of ${LANES.join(", ")}`);
   }
+  if (card.statusPersisted && (!CARD_STATUSES.includes(card.status) || card.status !== legacyCardStatus(card))) {
+    errors.push(`status "${card.status}" must agree with its legacy lane and checkbox view`);
+  }
   for (const flag of card.flags ?? []) {
     if (!FLAGS.includes(flag)) errors.push(`flag "${flag}" is not one of ${FLAGS.join(", ")}`);
   }
@@ -474,6 +490,7 @@ export function serializeObsidianCard(card) {
   const checkbox = card.flags?.includes("cancelled") ? "[-]" : card.done ? "[x]" : "[ ]";
   const parts = [checkbox, card.title];
   parts.push(fieldText("id", card.cardId));
+  if (card.statusPersisted) parts.push(fieldText("status", card.status));
   // §3.6: a live claim is published through the derived projection as the
   // card being active. Presentation only — the claim record in dispatcher
   // state is canonical for run authority, never this field.
@@ -507,6 +524,7 @@ export function serializeObsidianCard(card) {
 export function serializeTasksCard(card) {
   const checkbox = card.flags?.includes("cancelled") ? "[-]" : card.done ? "[x]" : "[ ]";
   const parts = [checkbox, card.title, `<!-- id: ${card.cardId} -->`];
+  if (card.statusPersisted) parts.push(fieldText("status", card.status));
   if (card.hash) parts.push(fieldText("hash", card.hash));
   if (card.priority) parts.push(fieldText("priority", card.priority));
   for (const flag of card.flags ?? []) parts.push(fieldText("flag", flag));
@@ -581,9 +599,10 @@ export function writeProjection(boardPath, cards, claims = []) {
       .map((claim) => claim?.cardId)
       .filter((id) => typeof id === "string"));
     const annotated = cards.map((card) => {
-      if (!claimedIds.has(card.cardId)) return card;
+      const view = { ...card, lane: cardStatus(card) === "cancelled" ? "backlog" : cardStatus(card) };
+      if (!claimedIds.has(card.cardId)) return view;
       const claim = (Array.isArray(claims) ? claims : []).find((entry) => entry?.cardId === card.cardId);
-      return { ...card, activeClaim: typeof claim?.role === "string" ? claim.role : "claimed" };
+      return { ...view, activeClaim: typeof claim?.role === "string" ? claim.role : "claimed" };
     });
     const frontmatter = "---\nkanban-plugin: board\n---\n\n";
     const body = serializeBoard(annotated, { surface: "obsidian" })
@@ -899,6 +918,9 @@ function writeCardLocked({ boardPath, input, authority, registries, surface, now
   if (dodText !== null && dodText.trim() === "") {
     return { ok: false, code: "empty-definition-of-done", errors: ["definition-of-done text must be non-empty"], persisted: false };
   }
+  if (input.lane === "done") {
+    return { ok: false, code: "completion-transition-required", errors: ["create an open card, then complete it with human authority"], persisted: false, cardId };
+  }
   const card = {
     cardId,
     lane: input.lane ?? "backlog",
@@ -927,6 +949,8 @@ function writeCardLocked({ boardPath, input, authority, registries, surface, now
     description: sanitizeFreeText(input.description),
     done: false,
   };
+  card.status = legacyCardStatus(card);
+  card.statusPersisted = true;
   const validation = validateCard(card, { ...registries, userLevel: input.userLevel ?? false });
   if (!validation.ok) {
     return { ok: false, code: "validation-failed", errors: validation.errors, persisted: false, cardId };
@@ -988,13 +1012,16 @@ function applyCardChanges(card, changes) {
     if (!LANES.includes(c.lane)) {
       return { error: { code: "invalid-lane", errors: [`lane "${c.lane}" is not one of ${LANES.join(", ")}`] } };
     }
+    if (c.lane === "done" && c.done !== true) {
+      return { error: { code: "completion-transition-required", errors: ["moving to done requires the complete transition (done: true)"] } };
+    }
     updated.lane = c.lane;
     changed.push("lane");
   }
   if (c.done !== undefined) {
     updated.done = Boolean(c.done);
-    // Moving to done sets the done checkbox AND the lane (§1 lifecycle).
     if (c.done) updated.lane = "done";
+    else if (updated.lane === "done") updated.lane = "backlog";
     changed.push("done");
   }
   if (c.flags !== undefined) {
@@ -1011,6 +1038,20 @@ function applyCardChanges(card, changes) {
     }
     changed.push("flags");
   }
+  if (updated.flags.includes("cancelled")) {
+    if (c.done === true || c.lane === "done") {
+      return { error: { code: "cancelled-card", errors: ["a cancelled card cannot be completed"] } };
+    }
+    updated.done = false;
+    if (updated.lane === "done") updated.lane = "backlog";
+  } else if (cardStatus(card) === "cancelled" && c.flags !== undefined && updated.lane === "done") {
+    updated.lane = "backlog";
+  }
+  if (cardStatus(card) === "done" && c.lane !== undefined && c.lane !== "done" && c.done !== false) {
+    updated.done = false;
+  }
+  updated.status = legacyCardStatus(updated);
+  updated.statusPersisted = true;
   if (c.title !== undefined) {
     if (typeof c.title !== "string" || c.title.trim() === "") {
       return { error: { code: "invalid-title", errors: ["title must be a non-empty string"] } };
@@ -1255,7 +1296,7 @@ function deleteCardLocked({ boardPath, cardId, authority, registries, surface, n
 
 export function isDispatchable(card, boardIndex) {
   const failed = [];
-  if (card.lane !== "backlog") failed.push(`lane is "${card.lane}", not "backlog"`);
+  if (cardStatus(card) !== "backlog") failed.push(`lane is "${card.lane}", not "backlog"`);
   if (!PRIORITIES.includes(card.priority)) failed.push("card is unranked; owner must assign P0–P3 before dispatch");
   if ((card.flags ?? []).includes("proposed")) failed.push("card carries the #proposed flag");
   if ((card.flags ?? []).includes("blocked")) failed.push("card carries the #blocked flag");
@@ -1321,12 +1362,10 @@ export function isDispatchable(card, boardIndex) {
     const depCard = boardIndex?.get?.(dep);
     if (!depCard) {
       failed.push(`dependency "${dep}" does not exist`);
-    } else if (depCard.lane !== "done") {
-      failed.push(`dependency "${dep}" is in lane "${depCard.lane}", not "done"`);
-    } else if ((depCard.flags ?? []).includes("cancelled")) {
+    } else if (cardStatus(depCard) === "cancelled") {
       failed.push(`dependency "${dep}" is cancelled`);
-    } else if (depCard.done !== true) {
-      failed.push(`dependency "${dep}" is not completed`);
+    } else if (cardStatus(depCard) !== "done") {
+      failed.push(depCard.lane === "done" ? `dependency "${dep}" is not completed` : `dependency "${dep}" is in lane "${depCard.lane}", not "done"`);
     }
   }
   return { dispatchable: failed.length === 0, failedConditions: failed };

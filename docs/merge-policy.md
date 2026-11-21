@@ -5,7 +5,8 @@ The driver has one merge setting. It is the first piece of driver-native setup.
 | Value | Meaning |
 | --- | --- |
 | `human-merges-only` (default) | The owner merges on GitHub. Every agent merge command is refused. |
-| `agents-after-checks-and-review` | An agent may run `gh pr merge <number or URL>` once every check on the PR head has passed and a Standards PASS and a Spec PASS are recorded for that exact head. |
+| `agents-after-checks-and-review` | An agent may run a plain `gh pr merge <number or URL>` once every check on the PR head has passed and independent Standards PASS and Spec PASS are recorded for that head. |
+| `agent-pr-merge` | The same plain merge rules apply. An agent may also arm auto-merge for the exact reviewed head with `--auto --match-head-commit <sha>`, under the conditions below. |
 
 ## Where it is stored
 
@@ -15,11 +16,11 @@ Copy `config/merge-policy.v1.example.json` to `{PI_CODING_AGENT_DIR}/config/merg
 
 `attended-authority-guard` checks every bash call for a pull-request merge: `gh pr merge`, the REST merge endpoint and the `mergePullRequest` mutation. The answer never depends on a prompt, so a headless bot session and direct Pi use behave the same. A refusal starts with `pi-agentic-driver.merge-policy.v1: needs-owner-approval:` so a coordinator can pass it up as an owner decision.
 
-## Bypasses are refused under both values
+## Bypasses are refused under every value
 
-These are refused whatever the policy says: `gh pr merge --admin`, `gh pr merge --auto` (alone or with `--admin`), writes to branch protection or rulesets through `gh api`, edits to protection bypass lists, and the GraphQL `enablePullRequestAutoMerge`, `mergeBranch` and branch protection rule mutations. The REST merge endpoint and `mergePullRequest` cannot be checked, so they are refused too. Reading protection or rulesets is allowed.
+These are refused whatever the policy says: `gh pr merge --admin`, `--auto --admin`, writes to branch protection or rulesets through `gh api`, edits to protection bypass lists, and the GraphQL `enablePullRequestAutoMerge`, `mergeBranch` and branch protection rule mutations. The REST merge endpoint and `mergePullRequest` cannot be checked, so they are refused too. Reading protection or rulesets is allowed.
 
-## The agents value
+## The agent values
 
 The guard reads the PR head, its author and its checks through the existing `gh` login. It reads the review record from `{profile}/merge-reviews/<head sha>.json`, written by `agentic_merge_review_record`. Only a simple `gh pr merge <ref>` can be checked, and never one with `--repo` or `-R`, since that could target a different repository from the one the evidence comes from. A new push changes the head, so the review must be recorded again.
 
@@ -30,6 +31,8 @@ Each verdict carries its reviewer identity or session id. The tool adds the reco
 - the record was not written by the merging session.
 
 If the merging session has no id, or the PR author is unknown, the merge is refused.
+
+Under `agent-pr-merge`, `--auto` also needs `--match-head-commit` equal to both the current and reviewed head. At least one check must be reported, and none may have failed. Pending checks (`PENDING`, `QUEUED`, `IN_PROGRESS`, `EXPECTED`) require `mergeStateStatus` to be `BLOCKED`; when none are pending, all checks must have passed. `UNKNOWN` with pending checks refuses: try again later. Only required checks hold an auto-merge; configure those checks in GitHub before relying on this option. `--auto` under either other policy is refused.
 
 ## Limits
 

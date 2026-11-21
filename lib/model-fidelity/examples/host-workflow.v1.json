@@ -1,0 +1,41 @@
+{
+  "schema": "model-fidelity.host-workflow.v1",
+  "description": "One transport-neutral example for agent hosts. It defines data dependencies, not an executor or authority to perform effects.",
+  "mode": "protocol",
+  "transport": {
+    "cli": "node scripts/model_fidelity.mjs OPERATION --json REQUEST_FILE (stdin closed)",
+    "mcp": "tools/call model-fidelity.OPERATION with the same model-fidelity.request.v1 JSON; opt-in PAD_MACHINE_COMMANDS=model-fidelity",
+    "result": "model-fidelity.result.v1 on both transports; do not infer success from a missing response"
+  },
+  "availability": {
+    "base": ["prepare", "diagram", "read"],
+    "pendingDrafts": {
+      "check": "#173",
+      "assess": "#168",
+      "evaluate": "#170"
+    },
+    "rule": "Do not issue unavailable operations. Record not-run with a reason until their drafts merge; continue other scoped delivery."
+  },
+  "steps": [
+    { "id": "prepare", "owner": "pad", "operation": "prepare", "input": "model-fidelity.request.v1", "output": "model-fidelity.result.v1", "capture": ["planId", "bundleId", "artifactIds", "findings"] },
+    { "id": "diagram", "owner": "pad", "after": ["prepare"], "operation": "diagram", "input": "model-fidelity.request.v1", "payload": { "bundleId": "$prepare.bundleId" }, "capture": ["diagrams", "artifactIds"] },
+    { "id": "build", "owner": "host", "after": ["diagram"], "action": "Build through the host's existing authorized workflow. Capture a new attempt and bundle for changed bytes; do not replace original plan or earlier evidence." },
+    { "id": "check", "owner": "pad", "after": ["build"], "operation": "check", "payload": { "bundleId": "$build.bundleId" }, "capture": ["checks", "findings", "artifactIds"] },
+    { "id": "review", "owner": "host", "after": ["check"], "offer": "model-fidelity.to-host.v1", "response": "model-fidelity.from-host.v1", "kind": "review", "record": "model-fidelity.caller-step.v1", "action": "Bind an actual review artifact to the built bundle; host establishes provenance. Missing review is not an approval wait." },
+    { "id": "assess", "owner": "pad", "after": ["review"], "operation": "assess", "payload": { "bundleId": "$build.bundleId", "checkResultIds": ["$check.requestId"], "reviewArtifactIds": ["$review.callerStep.reviewArtifactId (only if recorded; otherwise [])"] }, "capture": ["correspondence", "findings"] },
+    { "id": "runtime", "owner": "host", "after": ["assess"], "offer": "model-fidelity.to-host.v1", "response": "model-fidelity.from-host.v1", "kind": "runtime", "record": "model-fidelity.caller-step.v1", "action": "Observe the built behavior in the authorized host runtime; if not run, return null callerStep and reason, never invented proof." },
+    { "id": "evaluate", "owner": "pad", "after": ["runtime"], "operation": "evaluate", "payload": { "planId": "$prepare.planId", "bundleId": "$build.bundleId", "assessmentIds": ["$assess.requestId"], "runtimeArtifactIds": ["$runtime.callerStep.observationId (only if recorded; otherwise [])"], "changeRef": "$build.changeRef", "rollbackRecordRef": null }, "capture": ["continuation", "planMatch", "rollback", "findings"] },
+    { "id": "red-line", "owner": "host", "after": ["evaluate"], "when": "evaluate.continuation == stop-red-line", "offer": "model-fidelity.to-host.v1", "response": "model-fidelity.from-host.v1", "kind": "red-line-stop", "record": "model-fidelity.caller-step.v1", "action": "Stop only the offending action. Name the confirmed finding and stopped action; do not stop unrelated delivery." },
+    { "id": "rollback", "owner": "host", "after": ["evaluate"], "when": "wrong change and scoped rollback permitted", "offer": "model-fidelity.to-host.v1", "response": "model-fidelity.from-host.v1", "kind": "rollback", "record": "model-fidelity.caller-step.v1", "action": "Check current revision and manifest digest against clearance before effect; deprecate key assets first. Record observed, failed, unknown or not-permitted outcome without silently replaying." },
+    { "id": "evaluate-after-rollback", "owner": "pad", "after": ["rollback"], "when": "rollback recorded", "operation": "evaluate", "payload": { "priorEvaluateRequestId": "$evaluate.requestId", "rollbackRecordRef": "$rollback.callerStep.id" }, "action": "Use a NEW requestId. The rest of the evaluate payload binds the new bundle and original plan; stale target is a finding, not permission to roll back." },
+    { "id": "read", "owner": "pad", "after": ["evaluate", "red-line", "rollback", "evaluate-after-rollback"], "operation": "read", "payload": { "resultId": "$evaluate.requestId" }, "action": "Use an actual returned artifactId or resultId, never both or a guessed ID. If evaluate was unavailable, read an actual prepare or diagram result instead." },
+    { "id": "deliver", "owner": "host", "after": ["read"], "action": "Report evidence and gaps. The result grants no merge, publication or rollback authority." }
+  ],
+  "branches": {
+    "complete": "Keep findings separate from the operation status and continue.",
+    "partial": "Keep missing checks, review, diagrams and runtime explicit; continue.",
+    "tool-error": "Record the typed error or unsupported operation; continue other scoped work.",
+    "interrupted": "Record no JSON and uncertain effects; inspect stored evidence before a new attempt. Never blindly replay.",
+    "stop-red-line": "Only the confirmed offending action stops; read and report the rest."
+  }
+}

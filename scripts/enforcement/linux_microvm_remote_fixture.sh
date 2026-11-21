@@ -2385,15 +2385,15 @@ case "$decision" in
     # is skipped when either group id cannot be established. PID 1 and its
     # group are never signalled.
     if [ -f "$session/kill" ]; then
-      if [ "$PPID" != "1" ]; then
-        kill -KILL "$PPID" 2>/dev/null || true
-      fi
       if [ -r /proc/self/stat ] && [ -r /proc/1/stat ]; then
         my_pgid=$(awk '{print $5}' /proc/self/stat 2>/dev/null) || my_pgid=
         init_pgid=$(awk '{print $5}' /proc/1/stat 2>/dev/null) || init_pgid=
         if [ -n "$my_pgid" ] && [ -n "$init_pgid" ] && [ "$my_pgid" != "$init_pgid" ]; then
           kill -KILL 0 2>/dev/null || true
         fi
+      fi
+      if [ "$PPID" != "1" ]; then
+        kill -KILL "$PPID" 2>/dev/null || true
       fi
     fi
     exit 126 ;;

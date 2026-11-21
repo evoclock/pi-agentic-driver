@@ -188,6 +188,6 @@ janus/
     sdk.ts             THE ONLY AI SDK import site (pinned versions)
     evaluate.ts        /evaluate pipeline + SDK error classification
     server.ts          HTTP surface, loopback bind, entrypoint
-  tests/               node:test suites (mocked SDK, no live calls)
+  (source only)         mocked SDK suites, not included in the package
   user.janus.plist  launchd template
 ```

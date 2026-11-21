@@ -3,8 +3,12 @@
     "target": "ES2023",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "lib": ["ES2023"],
-    "types": ["node"],
+    "lib": [
+      "ES2023"
+    ],
+    "types": [
+      "node"
+    ],
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
@@ -15,5 +19,7 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["janus/**/*.ts", "tests/**/*.ts"]
+  "include": [
+    "janus/**/*.ts"
+  ]
 }

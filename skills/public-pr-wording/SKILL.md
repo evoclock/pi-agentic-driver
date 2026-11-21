@@ -5,7 +5,7 @@ description: Use before creating or editing any pull-request title or body. Draf
 
 # Public PR wording
 
-Write every PR as if strangers will read it. The lint enforces the rule; this file only says how to pass it.
+Use this skill before creating or editing a public PR title or body. Write as if strangers will read it. The lint checks the copy; this file explains the drafting workflow.
 
 The lint and its CI workflow check only the PR title and body. They never read repo files, so model names and other text in the README, docs or code are not affected. The only files read are the rules and the optional config.
 
@@ -64,6 +64,10 @@ In CI the workflow uses the base rules. A repo may commit `.github/pr-wording.js
 
 5. Create or edit the PR as a draft with the linted text only.
 
-If `agentic_aidr` is not loaded, say so and apply its four rules by hand: clarity, simplicity, brevity, humanity. Do not claim it ran.
+If `agentic_aidr` is installed, use it as in step 2. Otherwise say so and apply its four rules by hand: clarity, simplicity, brevity, humanity. Do not claim it ran.
 
-To change a generic cap or pattern, edit `pr_wording_rules.json` and add a test in `tests/`. Put anything personal in your config instead. Never reword around a pattern to slip past it.
+To change a generic cap or pattern, edit `pr_wording_rules.json` and add a repository-only regression case in a private source checkout. Put anything personal in your config instead. Never reword around a pattern to slip past it.
+
+## Limits
+
+The lint enforces only the PR title and body wording rules, not repository content or permissions. Drafting, review and publication are guidance and separate actions.

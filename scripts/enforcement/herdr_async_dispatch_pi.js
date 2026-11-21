@@ -55,23 +55,10 @@ export const WORKER_DISPATCH_PARAMETERS = Object.freeze({
     action: { type: "string", enum: ["dispatch", "pulse", "journeys"] },
     role: { type: "string", pattern: "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", maxLength: 64 },
     mode: { type: "string", enum: WORKER_DISPATCH_MODES },
-    autonomy: { type: "string", enum: WORKER_DISPATCH_AUTONOMY_MODES },
     maxSteps: { type: "integer", minimum: 1, maximum: MAX_JOURNEY_STEPS },
     stepPrompt: { type: "string", minLength: 1, maxLength: 8192 },
     journeyId: { type: "string", pattern: "^[a-zA-Z0-9_-]{1,100}$", maxLength: 100 },
     model: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,63}(?:\\/[a-z0-9][a-z0-9._-]{0,127})*$", maxLength: 192 },
-    cast: {
-      type: "object",
-      properties: {
-        roles: { type: "array", items: { type: "string", pattern: "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$" }, maxItems: 8 },
-        models: {
-          type: "object",
-          patternProperties: { "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$": { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,63}(?:\\/[a-z0-9][a-z0-9._-]{0,127})*$", maxLength: 192 } },
-          additionalProperties: false,
-        },
-      },
-      additionalProperties: false,
-    },
   },
   required: ["action"],
   allOf: [
@@ -189,6 +176,7 @@ export async function workerPulse(role, context, options = {}, signal) {
     status,
     dispatchEligible: status === "idle",
     observed: true,
+    agentKind: agent.agentKind,
   };
 }
 
@@ -289,6 +277,9 @@ function scopedDiffHash(repository) {
 // A worker that is not idle within an observed exchange cycle is unresponsive for
 // dispatch purposes and ends the journey explicitly as worker-unresponsive.
 export async function runWorkerJourney(params, context, options = {}, signal) {
+  if (options.enableAutonomy !== true && (params.autonomy !== undefined && params.autonomy !== DEFAULT_AUTONOMY || params.cast !== undefined)) {
+    return failure("dispatch", dispatchError("autonomy-unavailable", "not available yet", "denied"));
+  }
   const mode = params.mode ?? DEFAULT_MODE;
   const autonomy = params.autonomy ?? DEFAULT_AUTONOMY;
   const maxSteps = params.maxSteps ?? DEFAULT_JOURNEY_STEPS;
@@ -397,10 +388,15 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
   // worker for the same trusted repository/role through the existing
   // herdr-lifecycle spawn boundary (fixed argv, shell:false) and resume the
   // pending task sequence. Reuses the same task cards; never duplicates them.
+  let observedKind;
   const handoffToReplacement = async (reason, taskDisplayId = null) => {
     journey.status = "worker-unresponsive";
     journey.code = "worker-unresponsive";
     journey.steps.push({ step: journey.steps.length + 1, taskDisplayId, status: "worker-unresponsive", error: reason });
+    if (observedKind !== "pi") {
+      journey.handoff = { attempted: false, reason: "non-Pi or unobserved worker kind requires a separately authorized replacement" };
+      return finish("worker-unresponsive");
+    }
     if (!spawnReplacement) {
       journey.handoff = { attempted: false, reason: "replacement spawn is not available in this context" };
       return finish("worker-unresponsive");
@@ -551,12 +547,23 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
     // Pulse: liveness and dispatch eligibility, no authority.
     let pulse;
     try {
-      if (!recovering) pulse = await workerPulse(role, context, communicationOptions, signal);
+      if (!recovering) {
+        pulse = await workerPulse(role, context, communicationOptions, signal);
+        observedKind = pulse.agentKind;
+      }
     } catch (error) {
       journey.status = error?.code === "role_blocked" ? "role-blocked" : "failed";
       journey.code = error?.code || "pulse-failed";
       journey.steps.push({ step: stepIndex, taskDisplayId: null, status: journey.status, error: String(error?.message || error).slice(0, 256) });
       return finish(journey.status);
+    }
+    // Claude uses the same bounded exchange; Codex and unknown kinds have no
+    // receipt-bound route. A policy refusal is not a worker liveness failure.
+    if (!recovering && observedKind !== "pi" && observedKind !== "claude") {
+      journey.status = "role-blocked";
+      journey.code = "non-pi-dispatch-denied";
+      journey.handoff = { attempted: false, reason: "non-Pi worker kind has no verified dispatch route" };
+      return finish("role-blocked");
     }
     // The pre-task pulse has not selected a task. Confirmed replacement here
     // cannot be tied to a task identity, so it must not offer a spawn.
@@ -685,7 +692,10 @@ export async function runWorkerJourney(params, context, options = {}, signal) {
         journey.steps.push({ step: stepIndex, taskDisplayId: displayTaskId, status: "blocked", error: "reconcile exchange before another send" });
         return finish("blocked");
       }
-      const unresponsive = exchange.code === "prompt_stalled" || exchange.code === "prompt_delivery_unknown" || exchange.code === "process_timeout";
+      // A returned prompt acknowledgement means the brief was handed off. A
+      // later read timeout is not an unresponsive worker, so never re-prompt.
+      const unresponsive = exchange.deliveryState !== "unattributed"
+        && (exchange.code === "prompt_stalled" || exchange.code === "prompt_delivery_unknown" || exchange.code === "process_timeout");
       if (unresponsive) {
         if (autonomy === "autonomous" && castCheck?.authorized) {
           // Autonomous replacement spawn: in-cast roles are replaced
@@ -773,11 +783,11 @@ export function registerWorkerDispatchInterface(pi, options = {}) {
   pi.registerTool({
     name: WORKER_DISPATCH_TOOL,
     label: "Worker Dispatch And Pulse",
-    description: "Observe worker liveness (pulse) or run a bounded journey over coordinator session tasks. Interactive dispatch requires native confirmation; autonomous journeys follow their existing session confirmation semantics. Canonical TASKS.md board cards are dispatched through Board Pulse or agentic_kanban_board_dispatch, not this journey.",
+    description: "Observe worker liveness (pulse) or run a bounded journey over coordinator session tasks. Interactive dispatch requires native confirmation. Canonical TASKS.md board cards are dispatched through Board Pulse or agentic_kanban_board_dispatch, not this journey.",
     promptSnippet: "Use agentic_worker_dispatch for coordinator session tasks only; board cards belong to Board Pulse or agentic_kanban_board_dispatch.",
     promptGuidelines: [
       "agentic_worker_dispatch pulse observes liveness and eligibility without granting authority.",
-      "agentic_worker_dispatch dispatch observes session tasks without claiming board cards; interactive steps require native confirmation, while autonomous steps follow the session's existing autonomy semantics.",
+      "agentic_worker_dispatch dispatch observes session tasks without claiming board cards; steps require native confirmation.",
       "Board Pulse and agentic_kanban_board_dispatch own TASKS.md claims and the full route evidence required for envelopes. A journey never claims board cards.",
       "Dispatch runs at most maxSteps single-exchange steps; exchange failure ends the journey without retry or resend.",
     ],

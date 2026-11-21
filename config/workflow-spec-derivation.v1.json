@@ -1,0 +1,11 @@
+{
+  "schema": "pad-spec-derivation.v1",
+  "always": { "skills": ["tdd-pi", "no-comments-pi"], "playbook": "poteto-mode-pi" },
+  "rules": [
+    { "when": { "feature": "external-effect" }, "skills": ["principle-make-operations-idempotent-pi"] },
+    { "when": { "feature": "concurrency" }, "skills": ["principle-separate-before-serializing-shared-state-pi"] },
+    { "when": { "statechart": "has-parallel-regions" }, "skills": ["principle-separate-before-serializing-shared-state-pi"] },
+    { "when": { "feature": "typescript" }, "skills": ["typescript-best-practices-pi"] }
+  ],
+  "harness": { "default": "pi", "allowed": ["pi", "claude", "codex"] }
+}

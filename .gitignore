@@ -1,8 +1,12 @@
-node_modules/
+# Managed dependency directories may be read-only mounts or links in CI.
+node_modules
+.local/
 scratch/*
 !scratch/.gitkeep
 .scratch/
+.local/
 .driver/test-gate-evidence/
+.driver/skill-proof-evidence/
 /scan-terms.local.json
 /.ci-buildkite/
 /.briefs/
@@ -31,4 +35,6 @@ skills/weekly-build-recap/banned.local.json
 .pad-scratch/
 .ci-scratch/
 .treehouse/
-pipeline_output/
+
+# Generated local discovery artifact; regenerate instead of committing.
+pipeline_output/codebase_inventory.jsonl

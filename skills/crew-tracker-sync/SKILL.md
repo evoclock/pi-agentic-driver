@@ -11,7 +11,7 @@ description: >-
 Keep a human's tracker current from structured evidence, not chat prose. Every run reconciles the tracker's data file against live sources. Completeness is the product: if the human has to ask whether an open PR or unblock is on the tracker, the last run failed.
 
 ## Inputs (set by the routine or repo config, not here)
-- `tracker_data`: path to the tracker's data file, e.g. `data.json`. Validate its core sections against [`tracker-data.schema.json`](tracker-data.schema.json); other site-specific fields can coexist.
+- `tracker_data`: path to the tracker's data file, e.g. `data.json`. Validate it with `node ./validate_tracker.mjs TRACKER.json SOURCE.json` from this skill directory; the core shape is in [`tracker-data.schema.json`](tracker-data.schema.json); other site-specific fields can coexist.
 - `publish_cmd`: the build and deploy command(s) for the tracker site.
 - `agents`: the agents/bots whose work the tracker covers, and how to read their latest reports.
 - `scm_query`: the source-control search for the owner's open and recently merged PRs (must cover every owned repo, not a shortlist).
@@ -35,7 +35,10 @@ These are hard requirements. A run that skips them is wrong even if it republish
 5. **Stale open decisions** the human already answered, or that no longer apply, are settled or removed so the human never answers an obsolete question.
 6. A missing human response is never a reason to skip reconcile or publish.
 
-## Each run
+## Fixture-only tracker updates
+When asked for a tracker update from a supplied fixture rather than live sources, show four sections with one item per line. Use `Streams:`, `PRs:`, `Human steps:`, and `Decisions:` in that order. Use a `- ` prefix for every item. Under `PRs:`, start each line with the PR ID, then its state and draft age (`- <id> | draft (<age>)` or `- <id> | ready`). Under `Human steps:`, list only actions the human can take now, such as `- Approve <id>`; never list a draft PR there. Do not invent a publish command or claim to have published. This presentation is not a substitute for live reconciliation when sources are available.
+
+## Steps
 1. **Gather evidence.** Read each agent's latest report and recent activity. Read live process or job state where you have access. List **all** open PRs and PRs merged or closed in the last day with the source-control connector (`scm_query`). Read the human's saved responses and note the newest `at` already handled.
 2. **Apply the human's responses first.** An accept, reject or comment on a decision is the human's own decision, so relay it verbatim to the owning agent and move the item to settled. A ticked step is marked done. Ask the human only if an entry is ambiguous.
 3. **Reconcile each section against the invariants above.** Edit `tracker_data` in place (never rewrite the file from scratch).
@@ -49,3 +52,7 @@ These are hard requirements. A run that skips them is wrong even if it republish
 - Never print secrets, and never change the tracker site's access settings.
 - Keep each decision to one question, with a recommendation and why.
 - Prefer surfacing an unblock on the tracker over waiting for the human to ask whether something exists.
+
+## Limits
+
+The shipped validator checks schema and invariants 1, 3 and 4 against supplied evidence; it does not fetch live sources or publish. Reconciliation, time-zone choice and publication remain guidance; never publish without an explicit `publish_cmd`.

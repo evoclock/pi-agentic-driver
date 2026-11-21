@@ -74,6 +74,8 @@ export function hashPayload(card) {
     if (Array.isArray(value) && value.length === 0) continue;
     payload[field] = value;
   }
+  // Historical cards have no status field and retain their original hashes.
+  if (card.statusPersisted) payload.status = card.status;
   return payload;
 }
 

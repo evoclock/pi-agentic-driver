@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>org.evoclock.skill-usage-daily</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>node</string>
+    <string>/absolute/package/scripts/skill_usage_eval.mjs</string>
+    <string>--dual</string>
+    <string>--since</string>
+    <string>24h</string>
+    <string>--out</string>
+    <string>/private/output-dir</string>
+    <string>--label-sample</string>
+    <string>20</string>
+  </array>
+  <!-- Configure store names in the private pad-user.v1 config. Never log the environment or load implicit home key files. -->
+  <key>EnvironmentVariables</key><dict><key>PAD_USER_CONFIG</key><string>&lt;USER_CONFIG&gt;</string></dict>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>0</integer></dict>
+</dict>
+</plist>

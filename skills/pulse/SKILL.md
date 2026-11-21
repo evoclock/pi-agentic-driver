@@ -4,9 +4,6 @@ description: Use Board Pulse to check Kanban scheduling capacity or work through
 license: AGPL-3.0-only
 ---
 
-// SPDX-FileCopyrightText: 2026 Julen Gamboa <j.a.r.gamboa@gmail.com>
-// SPDX-License-Identifier: AGPL-3.0-only
-
 # Pulse
 
 Board Pulse moves authorised Kanban work through available role/model capacity
@@ -16,15 +13,12 @@ with little ceremony. Use this skill when the user asks to "check the board",
 Board Pulse is capacity scheduling. It is not worker liveness observation —
 that is the separate Herdr `pulse`.
 
-## When to use what
+## Steps
 
-- "Check the board" → call `agentic_kanban_pulse` with `action: "check"`.
-  This is a pure observation: it reports card results, capacity, and what
-  could be proposed, and it claims nothing.
-- "Work through the ready cards" → the interactive `run` action (not yet
-  implemented; report that it is not available in this rollout step).
-- Enable/disable/configure Pulse → the policy actions (not yet implemented;
-  the board-bound automation policy is the only policy store).
+1. For "check the board", call `agentic_kanban_pulse` with `action: "check"`. It observes cards and capacity without claiming work.
+2. For "work through ready cards", use `run`. It fills eligible capacity under the configured board policy after a native confirmation.
+3. Use `enable`, `disable` or `configure` only on a direct current-turn human request; preview the policy change and obtain native confirmation. Without a valid policy, dispatch is refused.
+4. Read the result and report capacity and any refusals without presenting proposed work as completed.
 
 ## Reading a check result
 
@@ -43,3 +37,7 @@ Pulse is off unless the board's automation policy enables it. Without it,
 every card reports `REVIEW_REQUIRED` and nothing is proposed. A check never
 claims work, never spawns workers, and never completes cards — completion
 remains an explicit human board transition.
+
+## Limits
+
+The Pulse tool checks board policy and confirmation for its actions. This skill only guides selection and reporting; it does not authorize or complete a card.
