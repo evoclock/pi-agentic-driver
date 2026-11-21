@@ -50,6 +50,7 @@ proofs for agentic workflows.
 
 ## Contents
 
+- [What's new in 3.3.0](#whats-new-in-330)
 - [What's new in 3.2.0](#whats-new-in-320)
 - [Fleet Herdr spawn rule](#fleet-herdr-spawn-rule)
 - [Interactive safeguard configuration](#interactive-safeguard-configuration)
@@ -64,6 +65,10 @@ proofs for agentic workflows.
 - [Packaged skills](#packaged-skills)
 - [Install](#install)
 - [License](#license)
+
+## What's new in 3.3.0
+
+- **Skill reads across every root.** Successful `SKILL.md` reads now record the skill and its nearest package name and version, when available, even without an active PAD task. Missing package names become `other`; session-only reads use hashed identifiers and do not prove skill use or task completion.
 
 ## What's new in 3.2.0
 

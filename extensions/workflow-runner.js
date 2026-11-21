@@ -90,4 +90,8 @@ export default function workflowRunner(pi, dependencies = {}) {
       if (!ctx.hasUI || !await ctx.ui.confirm('Cancel workflow?', `Fence ${params.taskId} in ${ctx.cwd}?`)) return refuse('owner-confirmation-required');
       return result(await run(params.workflow, store, { id: params.eventId, type: 'cancel' }, { authority: await authorityFor(ctx.cwd) }));
     } });
+  // Private hold registration stays dormant until a separately reviewed 3.2.1 surface.
+  const PRIVATE_HOLD_TOOL_ENABLED = false; // Held for a reviewed 3.2.1 tool contract.
+  if (PRIVATE_HOLD_TOOL_ENABLED) {
+  }
 }
