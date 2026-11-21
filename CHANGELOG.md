@@ -1,4 +1,4 @@
-## 3.3.0
+## 3.2.1
 
 - Record every SKILL.md read with its nearest package name and version, including sessions without an active PAD task; clarify repository-only gate guidance.
 
