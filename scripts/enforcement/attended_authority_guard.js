@@ -364,7 +364,7 @@ export async function guardToolCall(event, ctx, options = {}) {
   if (toolName === "bash") {
     const command = String(input.command ?? "");
     const legacyGateLock = /\bmkdir\b/.test(command) && /test-gate\.lock\b/.test(command);
-    if (legacyGateLock) return { block: true, reason: "Legacy mkdir gate acquisition is blocked; use make test-gate for visible FIFO admission via scripts/gate.py." };
+    if (legacyGateLock) return { block: true, reason: "Legacy mkdir gate acquisition is blocked; use the private source-tree test-gate runner for visible FIFO admission." };
     const detection = detectMerge(input.command);
     if (detection.merge) {
       const { policy, source } = (options.loadMergePolicy ?? loadMergePolicy)();

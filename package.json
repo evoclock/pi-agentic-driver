@@ -236,7 +236,9 @@
     "extensions/tasks.ts",
     "scripts/enforcement/session_tasks_core_pi.js",
     "scripts/enforcement/session_tasks_validate_pi.js",
-    "janus"
+    "janus",
+    "assets/Yamagane-origami.png",
+    "assets/agentic-driver-full-color.gif"
   ],
   "pi": {
     "extensions": [
