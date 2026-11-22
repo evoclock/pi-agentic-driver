@@ -1,6 +1,6 @@
 ---
 name: weekly-build-recap
-description: Draft a local weekly GitHub shipping recap with a PNG, an X post, and a LinkedIn post. Use when asked what shipped this week across repositories.
+description: Use when draft a local weekly GitHub shipping recap with a PNG, an X post, and a LinkedIn post. Use when asked what shipped this week across repositories.
 ---
 
 # Weekly build recap

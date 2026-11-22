@@ -1,7 +1,6 @@
 ---
-name: correct-pi
-description: Find a recurring, evidenced agent mistake in an approved repository and prevent it structurally, then prove the guard catches a real past failure. Use explicitly after the owner identifies a repeated correction.
-disable-model-invocation: true
+name: correct-it-pi
+description: Use when PAD or Herdr-driven work has two evidenced occurrences of an agent mistake; use this PAD guarded variant of pstack `correct` instead of pi-poteto-mode `correct-pi`. Not for a one-off incident or unapproved conversations. Invoke /skill:correct-it-pi.
 license: MIT; see ../how/LICENSE
 ---
 

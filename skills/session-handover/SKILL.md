@@ -1,6 +1,6 @@
 ---
 name: session-handover
-description: Write and consume a source-indexed, fixed-shape session handover once.
+description: Use when write and consume a source-indexed, fixed-shape session handover once.
 ---
 
 # Session handover

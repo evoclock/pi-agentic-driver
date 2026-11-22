@@ -1,3 +1,9 @@
+## Unreleased
+
+## 3.2.2
+
+- Make every PAD skill model-invocable and give the three conflicting skills unique PAD names: `correct-it-pi`, `pad-harvest-lessons`, and `pad-public-pr-wording`. Their old PAD slash names change; the other packages keep theirs. Add a lint to prevent PAD correction references from routing to the poteto skill.
+
 ## 3.2.1
 
 - Record every SKILL.md read with its nearest package name and version, including sessions without an active PAD task; clarify repository-only gate guidance.

@@ -1,6 +1,6 @@
 ---
-name: public-pr-wording
-description: Use before creating or editing any pull-request title or body. Draft in the four-section shape, rewrite with agentic_aidr and a bro-style restatement, then run pr_wording_lint until it exits 0. CI runs the same lint on every PR.
+name: pad-public-pr-wording
+description: Use when drafting or editing a PR title or body with the PAD variant and its bundled wording lint tooling. Not for general prose editing. Invoke /skill:pad-public-pr-wording.
 ---
 
 # Public PR wording
@@ -60,7 +60,7 @@ In CI the workflow uses the base rules. A repo may commit `.github/pr-wording.js
    python3 <this skill folder>/pr_wording_lint.py --title "$TITLE" --body-file body.md
    ```
 
-   In this repo the folder is `skills/public-pr-wording`. Installed, it is the installed agent skills directory's `public-pr-wording`.
+   In this repo the folder is `skills/pad-public-pr-wording`. Installed, it is the installed agent skills directory's `pad-public-pr-wording`.
 
 5. Create or edit the PR as a draft with the linted text only.
 

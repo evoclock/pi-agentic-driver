@@ -1,6 +1,6 @@
 ---
 name: ralph
-description: Run one bounded fix-plan item per iteration with acceptance, plateau and handover checks.
+description: Use when run one bounded fix-plan item per iteration with acceptance, plateau and handover checks.
 ---
 
 # Ralph

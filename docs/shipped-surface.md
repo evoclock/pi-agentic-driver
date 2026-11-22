@@ -31,7 +31,7 @@ This packed reference lists the registered public surface. The [README](../READM
 | `agentic_recovery_evidence_summary` | recovery-evidence | Read-only counts of recent recovery records. Returns no content. |
 | `agentic_task_skill_observation` | task-skill-observability | Records a task's declared recipe, outcome and observed tool activity, or reports coverage. |
 | `agentic_workflow_run`, `agentic_workflow_status`, `agentic_workflow_tick`, `agentic_workflow_dispatch`, `agentic_workflow_gate`, `agentic_workflow_cancel` | workflow-runner | Draft workflow controls sharing the CLI reducer. Dispatch uses guarded worker tools and parks unknown effects without retry. Frozen host checks remain separate from delivery acknowledgement and do not prove full skill adherence; cancel needs native confirmation. |
-| `agentic_harvest_lessons` | harvest-lessons | Read-only collector for the `harvest-lessons` skill. Writes nothing. |
+| `agentic_harvest_lessons` | harvest-lessons | Read-only collector for the `pad-harvest-lessons` skill. Writes nothing. |
 
 ## Commands
 
@@ -54,10 +54,10 @@ This packed reference lists the registered public surface. The [README](../READM
 | `decision-gate` | Settle bounded design decisions with statechart/TLC evidence and an enforcing check; hold owner-only actions. | Pi: `statechart-pi` (`pi-poteto-mode`); Claude: `/statechart`; TLC; behavior proof gap |
 | `decision-to-spec` | Turn an explicit owner decision, or a sourced quoted relay, into one reviewable assignment with outcomes and a stop point. | `agentic_decision_evidence`, `agentic_relay_check_request` |
 | `evidence-first-delivery-workflow` | Draft an inactive delivery plan for a new or resumed unit, then check it with a static validator. Plan only: it runs and dispatches nothing. | `validate_plan.mjs` (static checks only) |
-| `harvest-lessons` | Mine past corrections (reviews, reverts, failed CI, session logs), rank the patterns, and hand the top ones to `correct-pi`. Explicit invocation only. | `agentic_harvest_lessons` (read-only) |
+| `pad-harvest-lessons` | Mine past corrections (reviews, reverts, failed CI, session logs), rank the patterns, and hand the top ones to `correct-it-pi`. Model-invocable and available via `/skill:pad-harvest-lessons`. | `agentic_harvest_lessons` (read-only) |
 | `crew-tracker-sync` | Keep a team tracker current from live evidence: every open PR, worker stream and human unblock. | `validate_tracker.mjs` |
-| `correct-pi` | Turn a repeated, evidenced mistake into a structural guard and prove it catches a real past failure. Explicit invocation only. | — |
-| `public-pr-wording` | Draft PR titles and bodies in four sections, in the owner's voice, then lint them. | `pr_wording_lint.py` |
+| `correct-it-pi` | Turn a repeated, evidenced mistake into a structural guard and prove it catches a real past failure. Model-invocable and available via `/skill:correct-it-pi`. | — |
+| `pad-public-pr-wording` | Draft PR titles and bodies in four sections, in the owner's voice, then lint them. | `pr_wording_lint.py` |
 | `test-gate` | Prove changed tests fail first, then pass, and catch a mutation, using the host runner. Repository checkout only: the runner is not in the npm package. | `make test-gate` (needs `.driver/gate-rules.json`) |
 | `workflow-runner` | Guide one bounded workflow event and report unresolved worker-dispatch and skill-procedure proof gaps. Draft and voluntary; no real-worker execution is implied. | `pad-runner` CLI and `agentic_workflow_*` Pi tools (non-authorizing) |
 | `skill-usage-eval` | Compare skill-use recommendations with labelled task evidence and inspect uncertainty before choosing a default. A load requires a successful dedicated read of the exact catalog skill file. Relative reads resolve against the recorded session directory; without one, they do not count. Shell commands, writes and path mentions do not count. The evaluator CLI and its documentation ship with the skill for non-interactive workflow runs. The separate handcheck scorer and its evidence are repository-only. | `node scripts/skill_usage_eval.mjs --limit 20` (installed package root); `make skill-usage-handcheck` (repository checkout only) |

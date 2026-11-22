@@ -1,6 +1,6 @@
 ---
 name: workflow-runner
-description: Guide a draft bot-host recipe through one statechart skill step, checking spec and receipt evidence without claiming procedure proof.
+description: Use when guide a draft bot-host recipe through one statechart skill step, checking spec and receipt evidence without claiming procedure proof.
 ---
 
 # PAD workflow runner (draft, voluntary)
