@@ -1,6 +1,6 @@
 ---
 name: pulse
-description: Use Board Pulse to check Kanban scheduling capacity or work through ready cards.
+description: Use when use Board Pulse to check Kanban scheduling capacity or work through ready cards.
 license: AGPL-3.0-only
 ---
 

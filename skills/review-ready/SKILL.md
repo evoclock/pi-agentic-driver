@@ -1,6 +1,6 @@
 ---
 name: review-ready
-description: Run reusable review checks and record guard evidence before requesting review.
+description: Use when run reusable review checks and record guard evidence before requesting review.
 ---
 
 # Review ready

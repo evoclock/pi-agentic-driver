@@ -1,6 +1,6 @@
 ---
 name: decision-to-spec
-description: Draft one bounded implementation assignment from an explicit owner decision or a sourced, quoted coordinator relay. Automatic loading is not approval.
+description: Use when draft one bounded implementation assignment from an explicit owner decision or a sourced, quoted coordinator relay. Automatic loading is not approval.
 license: AGPL-3.0-only
 ---
 

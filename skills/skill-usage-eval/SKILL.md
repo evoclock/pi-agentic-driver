@@ -1,6 +1,6 @@
 ---
 name: skill-usage-eval
-description: "Measure skill loads, missed skills, and whether loaded skills were followed in a bounded Pi session corpus, using an injectable decisions API. Use when evaluating installed skill-pack usage, not to enforce agent compliance."
+description: "Use when evaluating skill loads and missed skill use in a bounded session corpus; not for enforcing agent compliance."
 ---
 
 # Skill usage eval

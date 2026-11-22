@@ -1,6 +1,6 @@
 ---
 name: tasks
-description: Use the session task list to track work and promote owner-authorized tasks to the durable board.
+description: Use when use the session task list to track work and promote owner-authorized tasks to the durable board.
 license: AGPL-3.0-only
 ---
 

@@ -1063,7 +1063,7 @@ or change a model route.
 
 - **Driver workflows.** `tasks` (session plan to durable board), `pulse`
   (Board Pulse), `decision-to-spec` (one reviewable assignment),
-  `harvest-lessons` and `public-pr-wording`.
+  `pad-harvest-lessons` and `pad-public-pr-wording`.
 - **New in 3.2.0.** `workflow-runner` (guide one pinned recipe step and
   its checked receipt at a time), `decision-gate` (settle a bounded design
   decision with a TLC-checked statechart; owner actions stay held),
@@ -1071,20 +1071,20 @@ or change a model route.
   (compare a built change with its frozen plan and model) and
   `skill-usage-eval` (score approved transcripts for skills the agent should
   have loaded and didn't: `node scripts/skill_usage_eval.mjs --limit 20`).
-- **harvest-lessons.** Mines past corrections in an approved repository: PR
+- **pad-harvest-lessons.** Mines past corrections in an approved repository: PR
   reviews, revert and fixup commits, failed CI and session logs. It groups
-  them into patterns, ranks them, and hands the top ones to `correct-pi` as
+  them into patterns, ranks them, and hands the top ones to `correct-it-pi` as
   guarded draft PRs. Its `agentic_harvest_lessons` collector is read-only and
   never writes files, posts or opens PRs.
-- **public-pr-wording.** Drafts PR titles and bodies in four sections, in
+- **pad-public-pr-wording.** Drafts PR titles and bodies in four sections, in
   the repository owner's first person, with no bot or model names and no
   local paths. The bundled lint enforces length caps and wording rules; your
   own names go in a personal config that is never committed.
-- **correct-pi.** Turns an owner-selected recurring correction into a
+- **correct-it-pi.** Turns an owner-selected recurring correction into a
   structural guard, then requires a check that catches a real past failure.
 - **pstack methods.** The separate `pi-poteto-mode` package supplies the
   pstack skill ports. Install it separately if you need those methods.
-  `correct-pi` remains a native driver skill.
+  `correct-it-pi` remains a native driver skill.
 - **Packaged-skill checks.** Public CI verifies skill frontmatter and package
   registration, then loads the packed artifact in a fresh consumer and checks
   for Pi skill diagnostics. This is release validation, not an install-time
@@ -1138,7 +1138,7 @@ To load one skill and no extensions, set `extensions` to an empty list:
     {
       "source": "npm:@evoclock/pi-agentic-driver",
       "extensions": [],
-      "skills": ["skills/harvest-lessons"]
+      "skills": ["skills/pad-harvest-lessons"]
     }
   ]
 }

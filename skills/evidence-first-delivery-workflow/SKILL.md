@@ -1,6 +1,6 @@
 ---
 name: evidence-first-delivery-workflow
-description: Draft a connected, inactive delivery plan from an approved task contract and observed state. Use before orchestrating a new unit or resuming an interrupted delivery. Validate review budget, evidence edges and terminal recovery without starting execution.
+description: Use when draft a connected, inactive delivery plan from an approved task contract and observed state. Use before orchestrating a new unit or resuming an interrupted delivery. Validate review budget, evidence edges and terminal recovery without starting execution.
 ---
 
 # Evidence-first delivery workflow

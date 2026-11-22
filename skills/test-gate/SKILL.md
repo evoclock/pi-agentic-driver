@@ -1,6 +1,6 @@
 ---
 name: test-gate
-description: Use the host-run fail-first, read-only test diff, mutation, and evidence workflow before trusting changed tests.
+description: Use when use the host-run fail-first, read-only test diff, mutation, and evidence workflow before trusting changed tests.
 ---
 
 # test-gate

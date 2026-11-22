@@ -1,6 +1,6 @@
 ---
 name: driver-mode
-description: Route explicit Agentic Driver jobs to their driver playbooks. Use only for shipping, project knowledge, Ralph, clean-room, release, board, lesson-harvest, weekly-recap, or model-fidelity requests.
+description: Use when route explicit Agentic Driver jobs to their driver playbooks. Use only for shipping, project knowledge, Ralph, clean-room, release, board, lesson-harvest, weekly-recap, or model-fidelity requests.
 ---
 
 # Driver mode
@@ -23,7 +23,7 @@ Use this index only when the request explicitly names a driver job. Ordinary cod
 | `clean-room` | Study a tool, capture an oracle, then replace it. | Load `clean-room` if installed; otherwise report that this route is unavailable. |
 | `release-to-public` | Prepare a public release. | Use `release-public` if installed; otherwise report that this route is unavailable. Do not publish a package. |
 | `board-run` | Run work explicitly selected from the board. | Use the native `tasks` and `pulse` skills; do not route ordinary work through the board. |
-| `harvest-lessons` | Review recorded corrections. | Use the native `harvest-lessons` skill. |
+| `pad-harvest-lessons` | Review recorded corrections. | Use the native `pad-harvest-lessons` skill. |
 | `weekly-recap` | Prepare the weekly build recap. | Use the native `weekly-build-recap` skill; do not post it. |
 | `model-fidelity` | Compare a built change with its original plan and model assumptions. | Load `model-fidelity`. Only prepare, diagram and read are currently callable; keep other stages as caller-owned steps. |
 

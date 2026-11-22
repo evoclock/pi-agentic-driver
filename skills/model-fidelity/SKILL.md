@@ -1,6 +1,6 @@
 ---
 name: model-fidelity
-description: Compare a built change to its frozen original plan and model assumptions. Use for protocol, lifecycle, crash recovery, locks or light statechart work; keep gaps visible without holding delivery.
+description: Use when compare a built change to its frozen original plan and model assumptions. Use for protocol, lifecycle, crash recovery, locks or light statechart work; keep gaps visible without holding delivery.
 ---
 
 # Model fidelity

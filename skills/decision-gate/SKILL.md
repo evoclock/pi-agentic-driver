@@ -1,6 +1,6 @@
 ---
 name: decision-gate
-description: Settle bounded autonomous design or gate decisions with statechart modeling, TLC evidence, and an enforcing check without expanding authority.
+description: Use when settle bounded autonomous design or gate decisions with statechart modeling, TLC evidence, and an enforcing check without expanding authority.
 ---
 
 # Decision gate
