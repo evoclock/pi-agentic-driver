@@ -136,7 +136,7 @@ export async function dispatchWorkflow(w, store, event, driver, { authority, har
   const promptClaim = await run(w, store, internal('_prompt'), { authority });
   if (promptClaim.move !== 'submit' || promptClaim.duplicate || !(await current())) return promptClaim;
   const prompt = 'Execute only this frozen workflow step within its declared artifact scope. Do not push, open a PR, merge or change other files. Report the resulting commit; host checks run independently.\n' +
-    JSON.stringify({ schema: 'pad-worker-step.v1', binding, branch: issued.branch, base: issued.base,
+    JSON.stringify({ schema: 'pad-worker-step.v1', runnerRunId: store.split('/').at(-1), binding, branch: issued.branch, base: issued.base,
       artifact: w.steps[before.step].artifact,
       ...(w.spec ? { outputContract: { schema: 'pad-worker-output.v1', paths: [w.steps[before.step].artifact], acceptance: 'frozen-checks', receipt: 'outputs' } } : { sha256: w.steps[before.step].sha256 }),
       skill: w.steps[before.step].skill, procedure: w.steps[before.step].procedure, stack: issued.stack, gaps: issued.gaps });

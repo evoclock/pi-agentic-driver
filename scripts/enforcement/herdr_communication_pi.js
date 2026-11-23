@@ -2195,7 +2195,7 @@ async function executeCommunication(params, context, options, signal) {
       const { raw, observation } = await observeRole(role, context, options, signal, repositories);
       const agent = extractAgent(raw, "agent_info");
       return successResult(operation, { role, observation, inputReady: ["pi", "claude"].includes(observation.agentKind)
-        && agent.interactive_ready === true && agent.launch_pending === false });
+        && agent.interactive_ready === true && agent.launch_pending !== true });
     }
     if (operation === "get") {
       const { observation } = await observeRole(role, context, options, signal, repositories);

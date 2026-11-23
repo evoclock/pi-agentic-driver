@@ -7,6 +7,7 @@ import { dispatchWorkflow, padWorkerDriver } from './workflow_runner_dispatch.mj
 import { specGateWorkflow } from './workflow_runner_spec.mjs';
 import { exitGateWorkflow } from './workflow_runner_exit.mjs';
 import { resolve } from 'node:path';
+import { observeRunner } from './workflow_runner_langfuse.mjs';
 
 try {
   const args = process.argv.slice(2);
@@ -28,7 +29,12 @@ try {
     : event.type === 'spec' ? await specGateWorkflow(workflow, `${root}/${runId}`, event, { authority })
     : event.type === 'checks' ? await exitGateWorkflow(workflow, `${root}/${runId}`, event, { authority })
     : await run(workflow, `${root}/${runId}`, event, { authority });
-  process.stdout.write(JSON.stringify({ schema: 'pad-runner.result.v1', runId, ...result, authorityCreated: false }) + '\n');
+  let telemetry = 'disabled';
+  if (!result.duplicate && process.env.PAD_LANGFUSE_SESSION_MODULE) {
+    try { await observeRunner(workflow, runId, event, result); telemetry = 'submitted'; }
+    catch { telemetry = 'unavailable'; }
+  }
+  process.stdout.write(JSON.stringify({ schema: 'pad-runner.result.v1', runId, ...result, telemetry, authorityCreated: false }) + '\n');
 } catch (error) {
   process.stderr.write(`pad-runner: ${error.message}\n`);
   process.exitCode = 2;
