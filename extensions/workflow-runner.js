@@ -6,6 +6,7 @@ import { authorityForRepository } from '../scripts/workflow_runner_authority.mjs
 import { dispatchWorkflow, padWorkerDriver } from '../scripts/workflow_runner_dispatch.mjs';
 import { specGateWorkflow } from '../scripts/workflow_runner_spec.mjs';
 import { exitGateWorkflow } from '../scripts/workflow_runner_exit.mjs';
+import { observeRunner } from '../scripts/workflow_runner_langfuse.mjs';
 
 const identity = { workflow: Type.Any(), taskId: Type.String({ minLength: 1, maxLength: 81 }) };
 const eventId = Type.String({ minLength: 1, maxLength: 81 });
@@ -14,6 +15,14 @@ const refuse = (reason) => result({ schema: 'pad-workflow-tool.v1', status: 'una
 
 export default function workflowRunner(pi, dependencies = {}) {
   const authorityFor = dependencies.authorityForRepository ?? authorityForRepository;
+  const observed = async (params, event, operation) => {
+    const value = await operation();
+    if (!value.duplicate && process.env.PAD_LANGFUSE_SESSION_MODULE) {
+      try { await observeRunner(params.workflow, params.taskId, event, value); }
+      catch { console.error('Runner Langfuse export unavailable'); }
+    }
+    return result(value);
+  };
   const scope = (params, ctx) => {
     if (typeof ctx.isProjectTrusted !== 'function' || !ctx.isProjectTrusted() ||
         !params.workflow || typeof params.workflow !== 'object' || Array.isArray(params.workflow) ||
@@ -38,14 +47,15 @@ export default function workflowRunner(pi, dependencies = {}) {
     parameters: Type.Object({ ...identity, eventId }),
     async execute(_id, params, _signal, _update, ctx) {
       const store = scope(params, ctx);
-      return result(await run(params.workflow, store, { id: params.eventId, type: 'tick' }, { authority: await authorityFor(ctx.cwd) }));
+      return observed(params, { id: params.eventId, type: 'tick' }, async () => run(params.workflow, store, { id: params.eventId, type: 'tick' }, { authority: await authorityFor(ctx.cwd) }));
     } });
   pi.registerTool({ ...common, name: 'agentic_workflow_tick', label: 'Workflow Tick',
     description: 'Submit one bounded observation or tick to the same durable reducer. Worker reports and PR prose cannot prove steps.',
     parameters: Type.Object({ ...identity, event: Type.Any() }),
     async execute(_id, params, _signal, _update, ctx) {
       const store = scope(params, ctx);
-      return result(await run(params.workflow, store, event(params.event, ['tick', 'receipt', 'wake', 'look', 'procedure']), { authority: await authorityFor(ctx.cwd) }));
+      const input = event(params.event, ['tick', 'receipt', 'wake', 'look', 'procedure']);
+      return observed(params, input, async () => run(params.workflow, store, input, { authority: await authorityFor(ctx.cwd) }));
     } });
   pi.registerTool({ ...common, name: 'agentic_workflow_dispatch', label: 'Workflow Dispatch',
     description: 'Claim one worker effect durably, then use guarded spawn and communication once. Unknown effects park without retry.',
@@ -56,7 +66,7 @@ export default function workflowRunner(pi, dependencies = {}) {
       const store = scope(params, ctx);
       const input = event(params.event, ['dispatch', 'delivery']);
       if (typeof ctx.executeTool !== 'function') return refuse('capability-unavailable');
-      return result(await dispatchWorkflow(params.workflow, store, input,
+      return observed(params, input, async () => dispatchWorkflow(params.workflow, store, input,
         padWorkerDriver(ctx, ctx.executeTool.bind(ctx), signal), { authority: await authorityFor(ctx.cwd), readUserConfig: dependencies.readUserConfig }));
     } });
   pi.registerTool({ ...common, name: 'agentic_workflow_gate', label: 'Workflow Gate',
@@ -67,7 +77,7 @@ export default function workflowRunner(pi, dependencies = {}) {
       const store = scope(params, ctx);
       const input = event(params.event, ['spec', 'checks']);
       const gate = input.type === 'checks' ? exitGateWorkflow : specGateWorkflow;
-      return result(await gate(params.workflow, store, input, { ...(input.type === 'checks' ? dependencies.exit : dependencies.spec), signal,
+      return observed(params, input, async () => gate(params.workflow, store, input, { ...(input.type === 'checks' ? dependencies.exit : dependencies.spec), signal,
         runLinuxChecks: async runId => {
           if (typeof ctx.executeTool !== 'function') return { verdict: 'runner-unavailable', parkReason: 'checks-runner-unavailable' };
           const observed = await ctx.executeTool('agentic_linux_microvm_checks', { runId }, { signal });

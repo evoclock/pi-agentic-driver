@@ -1,6 +1,6 @@
 {
   "name": "@evoclock/pi-agentic-driver",
-  "version": "3.2.2",
+  "version": "3.2.3",
   "description": "Guardrail extensions for Agentic Driver: advisory review, bounded Herdr communication, and guarded worker lifecycle.",
   "type": "module",
   "bin": {
@@ -55,6 +55,7 @@
     "scripts/workflow_runner_ownership.mjs",
     "scripts/workflow_runner_procedure.mjs",
     "scripts/workflow_runner_dispatch.mjs",
+    "scripts/workflow_runner_langfuse.mjs",
     "scripts/workflow_runner_spec.mjs",
     "scripts/workflow_runner_user_config.mjs",
     "scripts/workflow_runner_exit.mjs",

@@ -1,6 +1,8 @@
-## Unreleased
+## 3.2.3
 
-## 3.2.2
+- Idle Pi tabs report ready when Herdr omits launch_pending
+
+## Unreleased
 
 - Make every PAD skill model-invocable and give the three conflicting skills unique PAD names: `correct-it-pi`, `pad-harvest-lessons`, and `pad-public-pr-wording`. Their old PAD slash names change; the other packages keep theirs. Add a lint to prevent PAD correction references from routing to the poteto skill.
 
