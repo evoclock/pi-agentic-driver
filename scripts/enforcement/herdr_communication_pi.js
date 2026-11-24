@@ -1025,7 +1025,7 @@ function listAgents(value) {
   if (!Array.isArray(result.agents) || result.agents.length > 64) {
     throw communicationError("unexpected_result", "Herdr returned an invalid bounded agent list");
   }
-  return result.agents.map((item) => validateAgentInfoShape(item));
+  return result.agents;
 }
 
 // A refreshed session may retain its tab and Pi pane after the named agent
@@ -1059,7 +1059,14 @@ async function labeledPane(role, context, options, signal, repositories) {
   const value = { name: pane.name ?? role, role: pane.role, agent: pane.agent ?? pane.agent_kind ?? pane.kind,
     status: pane.agent_status ?? pane.status, cwd: pane.cwd, foreground_cwd: pane.foreground_cwd,
     pane_id: paneId, tab_id: tab.tab_id, agent_session: pane.agent_session, state_change_seq: pane.state_change_seq };
-  return { paneId, tabId: tab.tab_id, observation: publicAgentObservation(value, role, repositories), value };
+  if (options.inventoryOnly && !belongsToProject(value, repositories)) return undefined;
+  let observation;
+  try { observation = publicAgentObservation(value, role, repositories); }
+  catch (error) {
+    if (!options.inventoryOnly) throw error;
+    observation = classifiedBad(value, role, error);
+  }
+  return { paneId, tabId: tab.tab_id, observation, value };
 }
 
 async function observeRole(role, context, options, signal, repositories) {
@@ -1087,18 +1094,43 @@ async function observeRole(role, context, options, signal, repositories) {
   }
 }
 
+// Inventory ownership is structural; it must not require a writer lease.
+function projectGitRoot(value) {
+  const root = repositoryIdentity(value).real;
+  try {
+    const dotGit = join(root, ".git");
+    if (!lstatSync(dotGit).isFile()) return root;
+    const pointer = readFileSync(dotGit, "utf8");
+    if (!pointer.startsWith("gitdir: ") || pointer.length > 2048) return undefined;
+    const admin = resolve(root, pointer.slice(8).trim());
+    return realpathSync(dirname(dirname(dirname(admin))));
+  } catch { return root; }
+}
+
+function belongsToProject(value, repositories) {
+  try {
+    const primary = [...repositories.roots][0];
+    const cwd = value.cwd ?? value.foreground_cwd ?? value.repository ?? value.repo;
+    return projectGitRoot(cwd) === projectGitRoot(primary);
+  } catch { return false; }
+}
+
+function classifiedBad(value, role, error) {
+  return { role, classification: "classified-bad", reason: error.code ?? "unexpected_result",
+    tabId: value.tab_id, paneId: value.pane_id, cwd: value.cwd ?? value.repository };
+}
+
 function resolveConfiguredRoles(values, repositories) {
   const observations = new Map();
   for (const value of values) {
-    const names = collectStringValues(value, ["name", "role"]);
-    const name = oneConsistent(names, "role");
+    if (!belongsToProject(value, repositories)) continue;
+    const name = value.name ?? value.role;
     if (!name || isCoordinatorRole(name) || !HERDR_ROLE_REGEXP.test(name) || name.length > 64) continue;
     if (observations.has(name)) throw communicationError("ambiguous_target_role", `more than one ${name} role was observed`);
     try {
       observations.set(name, publicAgentObservation(value, name, repositories));
     } catch (error) {
-      if (error instanceof HerdrCommunicationError && error.code === "repository_mismatch") continue;
-      throw error;
+      observations.set(name, classifiedBad(value, name, error));
     }
   }
   return [...observations.values()].sort((left, right) => left.role.localeCompare(right.role));
@@ -2180,11 +2212,19 @@ async function executeCommunication(params, context, options, signal) {
       const labels = new Set(tabsRaw.tabs.map((tab) => tab?.label)
         .filter((label) => typeof label === "string" && HERDR_ROLE_REGEXP.test(label) && !isCoordinatorRole(label)));
       for (const label of labels) {
-        const pane = await labeledPane(label, context, options, signal, repositories);
+        let pane;
+        try { pane = await labeledPane(label, context, { ...options, inventoryOnly: true }, signal, repositories); }
+        catch (error) {
+          const tab = tabsRaw.tabs.find((item) => item.label === label);
+          if (belongsToProject(tab, repositories)) roles.push(classifiedBad(tab, label, error));
+          continue;
+        }
+        if (!pane) continue;
         if (roles.some((item) => item.role === label)) {
           const registered = agents.find((item) => item.name === label || item.role === label);
           if (registered?.pane_id !== pane.paneId) {
-            throw communicationError("ambiguous_target_role", "a registered agent and a labeled tab claim different panes");
+            const index = roles.findIndex((item) => item.role === label);
+            roles[index] = classifiedBad(pane.value, label, { code: "ambiguous_target_role" });
           }
         } else roles.push(pane.observation);
       }

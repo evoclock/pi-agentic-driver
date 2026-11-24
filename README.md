@@ -50,6 +50,7 @@ proofs for agentic workflows.
 
 ## Contents
 
+- [What's new in 3.2.4](#whats-new-in-324)
 - [What's new in 3.2.1](#whats-new-in-321)
 - [What's new in 3.2.0](#whats-new-in-320)
 - [Fleet Herdr spawn rule](#fleet-herdr-spawn-rule)
@@ -65,6 +66,11 @@ proofs for agentic workflows.
 - [Packaged skills](#packaged-skills)
 - [Install](#install)
 - [License](#license)
+
+## What's new in 3.2.4
+
+- **Project-scoped Herdr listing.** `list` shows only the calling project's own tabs, not every tab in the session. Each tab is checked on its own, so one bad tab is reported as classified-bad instead of failing the whole list.
+- **No first-workspace fallback.** Worker placement uses the workspace whose folder matches the project. If none matches, placement is refused with an error naming what failed to match, instead of landing in whichever workspace happens to be free.
 
 ## What's new in 3.2.1
 
