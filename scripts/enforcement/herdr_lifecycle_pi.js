@@ -1116,17 +1116,8 @@ export function tabCreateArgv(canonicalRoot, role, workspaceId, workerEnv = {}) 
   ]);
 }
 
-// Attended Electron has no coordinator pane. Use an existing workspace for
-// layout only; the requested cwd is independently checked on the new pane.
 async function availableWorkspace(canonicalRoot, options, signal) {
-  const listed = parseJsonEnvelope(await invokeHerdr(["workspace", "list"], canonicalRoot, options, signal), "workspace list");
-  if (!Array.isArray(listed.workspaces) || listed.workspaces.length > 128) {
-    throw lifecycleError("workspace_unavailable", "workspace list is invalid", "denied");
-  }
-  const workspaceId = listed.workspaces.find((item) => typeof item?.workspace_id === "string"
-    && /^w[A-Za-z0-9]+$/.test(item.workspace_id))?.workspace_id;
-  if (!workspaceId) throw lifecycleError("workspace_unavailable", "no existing workspace is available", "denied");
-  return workspaceId;
+  return selectedWorkspace(undefined, canonicalRoot, options, signal);
 }
 
 async function selectedWorkspace(selection, canonicalRoot, options, signal) {
@@ -1134,9 +1125,17 @@ async function selectedWorkspace(selection, canonicalRoot, options, signal) {
   if (!Array.isArray(listed.workspaces) || listed.workspaces.length > 128) {
     throw lifecycleError("workspace_unavailable", "workspace list is invalid", "denied");
   }
-  const matches = listed.workspaces.filter((item) => item?.workspace_id === selection || item?.label === selection);
+  const projectMatches = (item) => {
+    try { return typeof item?.cwd === "string" && realpathSync(item.cwd) === realpathSync(canonicalRoot); }
+    catch { return false; }
+  };
+  const matches = listed.workspaces.filter((item) => selection
+    ? item?.workspace_id === selection || item?.label === selection : projectMatches(item));
   if (matches.length !== 1 || !/^w[A-Za-z0-9]+$/.test(matches[0]?.workspace_id ?? "")) {
-    throw lifecycleError("workspace_unavailable", "the selected workspace was not found uniquely in workspace list", "denied");
+    throw lifecycleError("workspace_unavailable", `workspace ${selection ?? "(automatic)"} did not uniquely match project ${canonicalRoot} in workspace list`, "denied");
+  }
+  if (!projectMatches(matches[0])) {
+    throw lifecycleError("workspace_project_mismatch", `workspace ${selection} cwd did not match project ${canonicalRoot}`, "denied");
   }
   return matches[0].workspace_id;
 }
@@ -1432,7 +1431,7 @@ export async function executeHerdrSpawnWorker(params, context, options = {}, sig
     const coordinator = request.workspace ? null
       : parseCurrentPane(await invokeHerdr(currentPaneArgv(), spawnCwd, options, signal));
     const workspaceId = request.workspace
-      ? await selectedWorkspace(request.workspace, spawnCwd, options, signal)
+      ? await selectedWorkspace(request.workspace, canonicalRoot, options, signal)
       : coordinator.paneId.split(":")[0];
     if (!/^w[A-Za-z0-9]+$/.test(workspaceId)
         || (coordinator && !coordinator.tabId.startsWith(`${workspaceId}:`))) {
@@ -1778,7 +1777,7 @@ export async function executeHerdrSpawnWorkerAttendedElectron(params, context, o
       : null;
     let spawnCwd = worktreeTarget ? worktreeTarget.worktreePath : canonicalRoot;
     await observeDuplicateRole(spawnCwd, role, options, signal);
-    const workspaceId = request.workspace ? await selectedWorkspace(request.workspace, spawnCwd, options, signal) : await availableWorkspace(canonicalRoot, options, signal);
+    const workspaceId = request.workspace ? await selectedWorkspace(request.workspace, canonicalRoot, options, signal) : await availableWorkspace(canonicalRoot, options, signal);
     if (request.authority) {
       try {
         const reservation = await reserveApprovalUse(resolveProfileConfigPath(".").base, request.authority.ledgerId, attendedSpawnApprovalRequest(request, worktreeTarget));

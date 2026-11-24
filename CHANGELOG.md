@@ -1,10 +1,14 @@
-## 3.2.3
-
-- Idle Pi tabs report ready when Herdr omits launch_pending
-
 ## Unreleased
 
 - Make every PAD skill model-invocable and give the three conflicting skills unique PAD names: `correct-it-pi`, `pad-harvest-lessons`, and `pad-public-pr-wording`. Their old PAD slash names change; the other packages keep theirs. Add a lint to prevent PAD correction references from routing to the poteto skill.
+
+## 3.2.4
+
+- Scope Herdr inventory to the calling project and classify bad project tabs individually. Refuse workspace placement unless its cwd matches the project; never fall back to the first workspace.
+
+## 3.2.3
+
+- Idle Pi tabs report ready when Herdr omits launch_pending
 
 ## 3.2.1
 
